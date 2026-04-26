@@ -632,7 +632,9 @@ fn app_root() -> PathBuf {
 
     #[cfg(test)]
     {
-        return std::env::temp_dir().join("maestro-editorial-ai-tests");
+        return PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("maestro-editorial-ai-tests");
     }
 
     #[cfg(not(test))]

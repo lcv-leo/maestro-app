@@ -84,7 +84,7 @@ Required adapter choices:
 
 ## Cross-Agent Adapter Contract
 
-`v0.3.0` now has the first Tauri-native process adapter pass for real background sessions. It writes full per-agent artifacts under `data/sessions/<run>/agent-runs/` and logs sanitized lifecycle summaries as `session.agent.started` / `session.agent.finished`. The adapter is still a defensive text parser, not the final structured-output implementation described below.
+`v0.3.1` has the current Tauri-native process adapter pass for real background sessions. It writes full per-agent artifacts under `data/sessions/<run>/agent-runs/` and logs sanitized lifecycle summaries as `session.agent.started` / `session.agent.finished`. On Windows release builds, child processes must be created without visible terminal windows. Real editorial calls have no artificial timeout; only diagnostics may use short bounded probes. The adapter is still a defensive text parser, not the final structured-output implementation described below.
 
 Every CLI adapter must produce this internal record before a peer response can enter convergence:
 

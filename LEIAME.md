@@ -54,8 +54,10 @@ Na validacao real, o Maestro diferencia tokens de usuario (`cfut_`) e tokens de 
 
 ## Estado deste build
 
-Este build ja executa uma primeira sessao editorial real em background: Claude gera o rascunho inicial, e Claude, Codex e Gemini revisam o texto contra o protocolo integral importado. Se qualquer peer nao retornar aprovacao, a entrega fica bloqueada e a ata fica disponivel em `data/sessions/<run>/ata-da-sessao.md`.
+Este build executa sessao editorial real em background: Claude, Codex e Gemini podem gerar/revisar o texto contra o protocolo integral importado. Se um peer nao retornar aprovacao, a sessao nao deve ser tratada como finalizada; ela permanece sem entrega final e novas rodadas de revisao devem continuar ate unanimidade. A ata fica disponivel em `data/sessions/<run>/ata-da-sessao.md`.
 
-Os logs foram ampliados para diagnostico: eles registram contexto de UI, estado do runtime, caminhos resolvidos das CLIs, inicio/fim de cada agente, duracao, exit code, timeout e caminho dos artefatos. O conteudo bruto dos agentes fica nos arquivos de sessao, nao embutido no NDJSON geral.
+As chamadas editoriais reais nao possuem timeout artificial, porque os modelos podem demorar bastante para cumprir o protocolo. A UI mostra andamento e tempo decorrido enquanto os agentes trabalham, e as CLIs devem rodar sem qualquer janela de terminal visivel.
+
+Os logs foram ampliados para diagnostico: eles registram contexto de UI, estado do runtime, caminhos resolvidos das CLIs, inicio/fim de cada agente, duracao, exit code, politica de timeout e caminho dos artefatos. O conteudo bruto dos agentes fica nos arquivos de sessao, nao embutido no NDJSON geral.
 
 Regra inviolavel: nenhum texto final deve ser entregue sem unanimidade trilateral real.

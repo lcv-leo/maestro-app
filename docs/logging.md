@@ -10,7 +10,7 @@ Each app execution creates a new NDJSON file. Events inside one app execution ar
 
 During early development the logs are intentionally detailed. They should make UI actions, protocol imports, native runtime startup, frontend errors, unhandled promise rejections, session context, agent context, evidence context, and file paths understandable without replaying the whole session.
 
-CLI agents run silently in background. The UI shows synthesized status, progress, and blockers; it does not expose raw terminal output as the normal operator experience. Detailed CLI lifecycle events, sanitized command metadata, parsed statuses, exit codes, durations, timeout flags, and artifact paths belong in structured logs so they can be analyzed without forcing the operator to read terminal transcripts.
+CLI agents run silently in background. On Windows release builds, child processes are created without visible terminal windows. The UI shows synthesized status, elapsed-time heartbeat progress, and blockers; it does not expose raw terminal output as the normal operator experience. Detailed CLI lifecycle events, sanitized command metadata, parsed statuses, exit codes, durations, timeout policy, and artifact paths belong in structured logs so they can be analyzed without forcing the operator to read terminal transcripts.
 
 Raw prompts, full protocol text, stdout, and stderr are written to ignored session artifacts under `data/sessions/<run>/`. The NDJSON points to those artifacts and keeps only safe summaries.
 
@@ -34,7 +34,9 @@ Each log line is standalone JSON with:
 
 Frontend events include a `context.runtime` snapshot with viewport, current URL/hash, visibility, online state, active element, user agent, screen metrics, device pixel ratio, language, platform, hardware concurrency, and browser connection hints when available.
 
-Native startup events include resolved command paths for known CLIs when available. Editorial agent events include `session.agent.started` and `session.agent.finished` records with run id, agent, role, CLI, duration, exit code, timeout, output path, and stdout/stderr character counts. Native command execution drains stdout and stderr while the process is running, so large agent outputs do not block only because an OS pipe buffer filled.
+Native startup events include resolved command paths for known CLIs when available. Editorial agent events include `session.agent.started` and `session.agent.finished` records with run id, agent, role, CLI, duration, exit code, timeout policy, output path, and stdout/stderr character counts. Native command execution drains stdout and stderr while the process is running, so large agent outputs do not block only because an OS pipe buffer filled.
+
+Real editorial agent calls do not have an artificial timeout. Timeout is allowed only for short diagnostics and dependency probes. While a real editorial call is still running, the frontend emits `session.editorial.heartbeat` events so a log reader can distinguish normal long model latency from an app freeze.
 
 Recommended bootstrap categories:
 
@@ -62,10 +64,13 @@ Recommended editorial categories:
 - `session.protocol.pinned`
 - `session.editorial.requested`
 - `session.editorial.started`
+- `session.editorial.heartbeat`
 - `session.agent.started`
 - `session.agent.finished`
 - `session.editorial.completed`
 - `session.editorial.blocked`
+- `session.review.not_ready`
+- `session.revision.unavailable`
 - `session.editorial.failed`
 - `native.panic`
 

@@ -162,12 +162,14 @@ jobs:
           - Three persistence modes in the product contract: local JSON, Windows env-var hybrid, and Cloudflare D1 `maestro_db` plus Secrets Store.
           - One NDJSON diagnostic log file per app execution, with expanded frontend/native context.
           - First functional CLI orchestration pass: Claude draft plus Claude, Codex, and Gemini review.
+          - Windows background execution for CLI agents, with no visible terminal windows in release builds.
+          - No artificial timeout for real editorial agent calls; long model latency is surfaced through UI heartbeat progress.
           - Session artifacts under `data/sessions/<run-id>/`, including prompts, per-agent raw outputs, minutes, and final text only when consensus is ready.
 
           ## Current Limits
 
           - This is a functional alpha for practical smoke testing, not the final editorial engine.
-          - CLI adapters are now real, but still require local CLI authentication and more hardening across long sessions.
+          - CLI adapters are now real, but still require local CLI authentication and more hardening for resumable/cancellable long sessions.
           - Cloudflare persistence provisioning, link validation, ABNT formatting, and MainSite D1 publishing are planned but not production-complete in this build.
           - No NuGet package is published. GitHub Releases is the human-facing distribution channel; GitHub Packages/GHCR is only an automation mirror.
 

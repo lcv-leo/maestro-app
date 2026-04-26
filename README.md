@@ -13,9 +13,9 @@ Portable Windows editorial workbench for protocol-driven AI drafting, source ver
 ![state](https://img.shields.io/badge/state-JSON%2FNDJSON-informational)
 ![license](https://img.shields.io/badge/license-AGPL--3.0-blue)
 
-Status: functional alpha with live bootstrap, diagnostics, navigation, Cloudflare credential probing, PostEditor parity, and a first real background Claude/Codex/Gemini editorial session path.
+Status: functional alpha with live bootstrap, diagnostics, navigation, Cloudflare credential probing, PostEditor parity, and a real background Claude/Codex/Gemini editorial session path.
 
-Current project version: `v0.3.0`.
+Current project version: `v0.3.1`.
 
 Maestro is independent from `cross-review-mcp`; it incorporates the same strict convergence discipline in its own application logic. It is designed to run from a folder, keep runtime data out of Git, and store operator protocols, drafts, evidence, and sessions locally under ignored runtime paths.
 
@@ -25,7 +25,7 @@ Planned modern stack: Tauri 2 + WebView2, React 19, Vite 8, TypeScript 6, Vitest
 
 Diagnostic logs are structured NDJSON files under `data/logs/`, one file per app execution, with native/frontend context and per-agent process events so failures can be attached for precise analysis. See `docs/logging.md`.
 
-CLI agents run in background by design. The operator sees friendly progress, phase status, and a selectable UI verbosity level, while raw prompts, stdout, stderr, and transcripts stay out of the normal interface and remain protected as ignored local runtime artifacts under `data/sessions/`.
+CLI agents run in background by design, without visible terminal windows in Windows release builds. Real editorial calls do not have an artificial timeout. The operator sees friendly progress, elapsed-time heartbeat status, phase status, and a selectable UI verbosity level, while raw prompts, stdout, stderr, and transcripts stay out of the normal interface and remain protected as ignored local runtime artifacts under `data/sessions/`.
 
 MainSite-bound editing uses a PostEditor parity module, not a generic editor. See `docs/text-editor-decision.md` and `docs/mainsite-compatibility-contract.md`.
 

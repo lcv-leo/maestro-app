@@ -4,6 +4,18 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.1] - 2026-04-26
+
+- Fixed Windows child-process spawning so CLI probes, registry env-var reads, `.cmd` shims, PowerShell wrappers, and editorial agents run with `CREATE_NO_WINDOW` and no visible terminal windows.
+- Moved long editorial execution onto a native background worker so the Tauri/WebView UI remains responsive while agents run.
+- Removed editorial-agent timeouts: real drafting, revision, and review calls may take as long as needed under the inviolable unanimity rule.
+- Split startup bootstrap into fast config/env loading plus background dependency preflight so app startup no longer waits for every CLI version probe.
+- Added visible no-timeout heartbeat updates while an editorial session is still running, including elapsed time and diagnostic log events.
+- Changed non-unanimous or operationally incomplete sessions from final-abort semantics to paused/no-final-delivery semantics.
+- Added fallback draft generation across Claude, Codex, and Gemini if the first draft agent fails to produce usable text.
+- Added multi-round review/revision behavior: `NOT_READY` review output feeds a new revision round instead of ending the task as failed.
+- Updated session minutes and UI language so divergence means continuing/paused work, while `texto-final.md` is still created only after unanimous `READY`.
+
 ## [v0.3.0] - 2026-04-26
 
 - Replaced the UI-only CLI smoke path with a real first-pass editorial session command that runs Claude for draft generation and Claude, Codex, and Gemini for review in background.

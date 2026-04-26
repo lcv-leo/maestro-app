@@ -359,7 +359,23 @@ fn cloudflare_env_snapshot() -> CloudflareEnvSnapshot {
 }
 
 #[tauri::command]
-fn dependency_preflight() -> Value {
+async fn dependency_preflight() -> Value {
+    tauri::async_runtime::spawn_blocking(dependency_preflight_inner)
+        .await
+        .unwrap_or_else(|error| {
+            json!({
+                "checks": [
+                    {
+                        "label": "Preflight",
+                        "value": sanitize_text(&format!("falha no worker de diagnostico: {error}"), 220),
+                        "tone": "error"
+                    }
+                ]
+            })
+        })
+}
+
+fn dependency_preflight_inner() -> Value {
     let cloudflare = cloudflare_env_snapshot();
     let cloudflare_value = match (cloudflare.account_id.as_ref(), cloudflare.api_token_present) {
         (Some(_), true) => "account id + token detectados",
@@ -509,8 +525,20 @@ fn run_cli_adapter_smoke(
 }
 
 #[tauri::command]
-fn run_editorial_session(
-    log_session: tauri::State<LogSession>,
+async fn run_editorial_session(
+    log_session: tauri::State<'_, LogSession>,
+    request: EditorialSessionRequest,
+) -> Result<EditorialSessionResult, String> {
+    let log_session = log_session.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        run_editorial_session_blocking(log_session, request)
+    })
+    .await
+    .map_err(|error| format!("editorial worker join failed: {error}"))?
+}
+
+fn run_editorial_session_blocking(
+    log_session: LogSession,
     request: EditorialSessionRequest,
 ) -> Result<EditorialSessionResult, String> {
     let _ = write_log_record(
@@ -620,6 +648,22 @@ fn create_log_session() -> LogSession {
     }
 }
 
+fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    apply_hidden_window_policy(&mut command);
+    command
+}
+
+#[cfg(windows)]
+fn apply_hidden_window_policy(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn apply_hidden_window_policy(_command: &mut Command) {}
+
 fn persist_bootstrap_config(path: &PathBuf, config: &BootstrapConfig) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -680,7 +724,7 @@ fn env_value_with_scope(name: &str) -> Option<(String, String)> {
 
 #[cfg(windows)]
 fn windows_registry_env_value(key: &str, name: &str) -> Option<String> {
-    let output = Command::new("reg.exe")
+    let output = hidden_command("reg.exe")
         .args(["query", key, "/v", name])
         .output()
         .ok()?;
@@ -747,23 +791,58 @@ fn run_editorial_session_inner(
     )?;
     write_text_file(&protocol_path, &request.protocol_text)?;
 
-    let draft_output_path = agent_dir.join("round-001-claude-draft.md");
-    let draft_run = run_editorial_agent(
-        log_session,
-        &run_id,
-        "Claude",
-        "draft",
-        "claude",
-        claude_args(),
-        build_draft_prompt(request, &run_id),
-        &draft_output_path,
-        Duration::from_secs(300),
-    );
-    let mut agents = vec![draft_run.clone()];
-    let draft_artifact = fs::read_to_string(&draft_output_path).unwrap_or_default();
-    let draft_text = extract_stdout_block(&draft_artifact).unwrap_or(draft_artifact.as_str());
+    let mut agents = Vec::new();
+    let mut current_draft = String::new();
+    let mut current_draft_path: Option<PathBuf> = None;
+    let draft_specs = vec![
+        ("Claude", "claude", claude_args()),
+        ("Codex", "codex", codex_args()),
+        ("Gemini", "gemini", gemini_args()),
+    ];
 
-    if draft_run.tone == "error" || draft_run.tone == "blocked" || draft_text.trim().is_empty() {
+    for (name, command, args) in draft_specs {
+        let output_path =
+            agent_dir.join(format!("round-001-{}-draft.md", name.to_ascii_lowercase()));
+        let draft_run = run_editorial_agent(
+            log_session,
+            &run_id,
+            name,
+            "draft",
+            command,
+            args,
+            build_draft_prompt(request, &run_id),
+            &output_path,
+            None,
+        );
+        agents.push(draft_run.clone());
+        let draft_artifact = fs::read_to_string(&output_path).unwrap_or_default();
+        let draft_text = extract_stdout_block(&draft_artifact).unwrap_or(draft_artifact.as_str());
+        if draft_run.tone != "error" && draft_run.tone != "blocked" && !draft_text.trim().is_empty()
+        {
+            current_draft = draft_text.trim().to_string();
+            current_draft_path = Some(output_path);
+            break;
+        }
+
+        let _ = write_log_record(
+            log_session,
+            LogEventInput {
+                level: "warn".to_string(),
+                category: "session.draft.retry".to_string(),
+                message: "draft agent did not produce usable text; trying next available agent"
+                    .to_string(),
+                context: Some(json!({
+                    "run_id": &run_id,
+                    "agent": name,
+                    "status": draft_run.status,
+                    "tone": draft_run.tone,
+                    "next_policy": "continue_with_next_agent_without_final_delivery"
+                })),
+            },
+        );
+    }
+
+    if current_draft.trim().is_empty() {
         let minutes_path = session_dir.join("ata-da-sessao.md");
         write_text_file(
             &minutes_path,
@@ -777,88 +856,188 @@ fn run_editorial_session_inner(
             session_minutes_path: minutes_path.to_string_lossy().to_string(),
             prompt_path: prompt_path.to_string_lossy().to_string(),
             protocol_path: protocol_path.to_string_lossy().to_string(),
-            draft_path: Some(draft_output_path.to_string_lossy().to_string()),
+            draft_path: current_draft_path.map(|path| path.to_string_lossy().to_string()),
             agents,
             consensus_ready: false,
-            status: "BLOCKED_DRAFT_UNAVAILABLE".to_string(),
+            status: "PAUSED_DRAFT_UNAVAILABLE".to_string(),
         });
     }
 
-    let review_specs = [
-        (
-            "Claude",
-            "review",
-            "claude",
-            claude_args(),
-            agent_dir.join("round-001-claude-review.md"),
-        ),
-        (
-            "Codex",
-            "review",
-            "codex",
-            codex_args(),
-            agent_dir.join("round-001-codex-review.md"),
-        ),
-        (
-            "Gemini",
-            "review",
-            "gemini",
-            gemini_args(),
-            agent_dir.join("round-001-gemini-review.md"),
-        ),
-    ];
-    let review_handles = review_specs
-        .into_iter()
-        .map(|(name, role, command, args, output_path)| {
-            let prompt = build_review_prompt(request, &run_id, draft_text);
-            let run_id = run_id.clone();
-            let log_session = log_session.clone();
-            thread::spawn(move || {
-                run_editorial_agent(
-                    &log_session,
-                    &run_id,
-                    name,
-                    role,
-                    command,
-                    args,
-                    prompt,
-                    &output_path,
-                    Duration::from_secs(300),
-                )
+    let mut final_path: Option<PathBuf> = None;
+    let mut round = 1usize;
+    loop {
+        let review_specs = vec![
+            (
+                "Claude",
+                "review",
+                "claude",
+                claude_args(),
+                agent_dir.join(format!("round-{round:03}-claude-review.md")),
+            ),
+            (
+                "Codex",
+                "review",
+                "codex",
+                codex_args(),
+                agent_dir.join(format!("round-{round:03}-codex-review.md")),
+            ),
+            (
+                "Gemini",
+                "review",
+                "gemini",
+                gemini_args(),
+                agent_dir.join(format!("round-{round:03}-gemini-review.md")),
+            ),
+        ];
+        let review_handles = review_specs
+            .into_iter()
+            .map(|(name, role, command, args, output_path)| {
+                let prompt = build_review_prompt(request, &run_id, &current_draft);
+                let run_id = run_id.clone();
+                let log_session = log_session.clone();
+                thread::spawn(move || {
+                    run_editorial_agent(
+                        &log_session,
+                        &run_id,
+                        name,
+                        role,
+                        command,
+                        args,
+                        prompt,
+                        &output_path,
+                        None,
+                    )
+                })
             })
-        })
-        .collect::<Vec<_>>();
+            .collect::<Vec<_>>();
 
-    for handle in review_handles {
-        agents.push(handle.join().unwrap_or_else(|_| EditorialAgentResult {
-            name: "Unknown".to_string(),
-            role: "review".to_string(),
-            cli: "unknown".to_string(),
-            tone: "error".to_string(),
-            status: "thread de revisao falhou".to_string(),
-            duration_ms: 0,
-            exit_code: None,
-            output_path: String::new(),
-        }));
-    }
+        let mut round_results = Vec::new();
+        for handle in review_handles {
+            let result = handle.join().unwrap_or_else(|_| EditorialAgentResult {
+                name: "Unknown".to_string(),
+                role: "review".to_string(),
+                cli: "unknown".to_string(),
+                tone: "error".to_string(),
+                status: "thread de revisao falhou".to_string(),
+                duration_ms: 0,
+                exit_code: None,
+                output_path: String::new(),
+            });
+            round_results.push(result.clone());
+            agents.push(result);
+        }
 
-    let review_agents = agents
-        .iter()
-        .filter(|agent| agent.role == "review")
-        .collect::<Vec<_>>();
-    let consensus_ready = !draft_text.trim().is_empty()
-        && draft_run.tone != "error"
-        && review_agents
+        let consensus_ready = round_results
             .iter()
             .all(|agent| agent.tone == "ok" && agent.status == "READY");
+        if consensus_ready {
+            let path = session_dir.join("texto-final.md");
+            write_text_file(&path, &current_draft)?;
+            final_path = Some(path);
+            break;
+        }
+
+        let operational_failure = round_results
+            .iter()
+            .any(|agent| agent.tone == "error" || agent.tone == "blocked");
+        if operational_failure {
+            let _ = write_log_record(
+                log_session,
+                LogEventInput {
+                    level: "warn".to_string(),
+                    category: "session.review.operational_failure".to_string(),
+                    message: "review round has an operational agent failure; final delivery remains unavailable".to_string(),
+                    context: Some(json!({
+                        "run_id": &run_id,
+                        "round": round,
+                        "policy": "no_final_delivery_without_unanimity",
+                        "next_state": "paused_for_operator_or_retry"
+                    })),
+                },
+            );
+            break;
+        }
+
+        let _ = write_log_record(
+            log_session,
+            LogEventInput {
+                level: "info".to_string(),
+                category: "session.review.not_ready".to_string(),
+                message: "review round did not reach unanimity; continuing with a revision round"
+                    .to_string(),
+                context: Some(json!({
+                    "run_id": &run_id,
+                    "round": round,
+                    "policy": "continue_until_unanimous_ready",
+                    "not_ready_agents": round_results.iter()
+                        .filter(|agent| agent.status != "READY")
+                        .map(|agent| agent.name.clone())
+                        .collect::<Vec<_>>()
+                })),
+            },
+        );
+
+        round += 1;
+        let revision_prompt =
+            build_revision_prompt(request, &run_id, round, &current_draft, &round_results);
+        let revision_specs = vec![
+            ("Claude", "claude", claude_args()),
+            ("Codex", "codex", codex_args()),
+            ("Gemini", "gemini", gemini_args()),
+        ];
+        let mut revised = false;
+        for (name, command, args) in revision_specs {
+            let output_path = agent_dir.join(format!(
+                "round-{round:03}-{}-revision.md",
+                name.to_ascii_lowercase()
+            ));
+            let revision_run = run_editorial_agent(
+                log_session,
+                &run_id,
+                name,
+                "revision",
+                command,
+                args,
+                revision_prompt.clone(),
+                &output_path,
+                None,
+            );
+            agents.push(revision_run.clone());
+            let artifact = fs::read_to_string(&output_path).unwrap_or_default();
+            let revised_text = extract_stdout_block(&artifact).unwrap_or(artifact.as_str());
+            if revision_run.tone != "error"
+                && revision_run.tone != "blocked"
+                && !revised_text.trim().is_empty()
+            {
+                current_draft = revised_text.trim().to_string();
+                current_draft_path = Some(output_path);
+                revised = true;
+                break;
+            }
+        }
+
+        if !revised {
+            let _ = write_log_record(
+                log_session,
+                LogEventInput {
+                    level: "warn".to_string(),
+                    category: "session.revision.unavailable".to_string(),
+                    message:
+                        "no revision agent produced usable text; final delivery remains unavailable"
+                            .to_string(),
+                    context: Some(json!({
+                        "run_id": &run_id,
+                        "round": round,
+                        "policy": "no_final_delivery_without_unanimity"
+                    })),
+                },
+            );
+            break;
+        }
+    }
+
+    let consensus_ready = final_path.is_some();
     let minutes_path = session_dir.join("ata-da-sessao.md");
-    let final_path = if consensus_ready {
-        let final_path = session_dir.join("texto-final.md");
-        write_text_file(&final_path, draft_text)?;
-        Some(final_path)
-    } else {
-        None
-    };
     write_text_file(
         &minutes_path,
         &build_session_minutes(
@@ -877,13 +1056,13 @@ fn run_editorial_session_inner(
         session_minutes_path: minutes_path.to_string_lossy().to_string(),
         prompt_path: prompt_path.to_string_lossy().to_string(),
         protocol_path: protocol_path.to_string_lossy().to_string(),
-        draft_path: Some(draft_output_path.to_string_lossy().to_string()),
+        draft_path: current_draft_path.map(|path| path.to_string_lossy().to_string()),
         agents,
         consensus_ready,
         status: if consensus_ready {
             "READY_UNANIMOUS".to_string()
         } else {
-            "BLOCKED_WITH_REAL_AGENT_OUTPUTS".to_string()
+            "PAUSED_WITH_REAL_AGENT_OUTPUTS".to_string()
         },
     })
 }
@@ -1000,6 +1179,63 @@ Obrigatorio:
     )
 }
 
+fn build_revision_prompt(
+    request: &EditorialSessionRequest,
+    run_id: &str,
+    round: usize,
+    draft: &str,
+    review_agents: &[EditorialAgentResult],
+) -> String {
+    let mut review_notes = String::new();
+    for agent in review_agents {
+        let artifact = fs::read_to_string(&agent.output_path).unwrap_or_default();
+        let artifact_excerpt = artifact.chars().take(40_000).collect::<String>();
+        review_notes.push_str(&format!(
+            "\n### {} / {}\n\nStatus: `{}` (`{}`)\nArtifact: `{}`\n\n```markdown\n{}\n```\n",
+            agent.name, agent.role, agent.status, agent.tone, agent.output_path, artifact_excerpt
+        ));
+    }
+
+    format!(
+        r#"# Maestro Editorial AI - Revisao de Rascunho
+
+Run: `{run_id}`
+Rodada de revisao: `{round}`
+Sessao: {}
+
+Leia integralmente o protocolo editorial, o rascunho atual e as manifestacoes dos peers.
+Sua tarefa e produzir uma nova versao completa do texto em Markdown puro, incorporando todas as correcoes concretas.
+Nao entregue comentarios sobre o processo. Entregue apenas o texto revisado.
+Nao invente links. Se faltar evidencia, preserve marcador `[EVIDENCIA_PENDENTE]`.
+
+## Solicitacao do operador
+
+{}
+
+## Protocolo editorial integral
+
+```markdown
+{}
+```
+
+## Rascunho atual
+
+```markdown
+{}
+```
+
+## Manifestacoes dos peers
+
+{}
+"#,
+        sanitize_text(&request.session_name, 200),
+        request.prompt,
+        request.protocol_text,
+        draft,
+        review_notes
+    )
+}
+
 fn run_editorial_agent(
     log_session: &LogSession,
     run_id: &str,
@@ -1009,7 +1245,7 @@ fn run_editorial_agent(
     args: Vec<String>,
     stdin_text: String,
     output_path: &Path,
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> EditorialAgentResult {
     let started = Instant::now();
     let _ = write_log_record(
@@ -1024,7 +1260,8 @@ fn run_editorial_agent(
                 "role": role,
                 "cli": command,
                 "stdin_chars": stdin_text.chars().count(),
-                "timeout_seconds": timeout.as_secs(),
+                "timeout_seconds": timeout.map(|value| value.as_secs()),
+                "timeout_policy": if timeout.is_some() { "diagnostic_or_limited" } else { "none_editorial_session" },
                 "output_path": output_path.to_string_lossy().to_string()
             })),
         },
@@ -1051,7 +1288,13 @@ fn run_editorial_agent(
         return result;
     };
 
-    match run_resolved_command_with_timeout(&path, &args, timeout, Some(&stdin_text)) {
+    let command_result = if let Some(timeout) = timeout {
+        run_resolved_command_with_timeout(&path, &args, timeout, Some(&stdin_text))
+    } else {
+        run_resolved_command_unbounded(&path, &args, Some(&stdin_text))
+    };
+
+    match command_result {
         Ok(result) => {
             let stdout = String::from_utf8_lossy(&result.output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&result.output.stderr).to_string();
@@ -1228,12 +1471,10 @@ fn build_session_minutes(
 
     if !consensus_ready {
         text.push_str(
-            "\n## Decisao\n\nTexto final bloqueado. Pelo menos um peer nao retornou `MAESTRO_STATUS: READY` na mesma rodada ou houve falha de execucao.\n",
+            "\n## Decisao\n\nTexto final indisponivel nesta chamada. A regra permanece: divergencia editorial exige novas rodadas ate unanimidade; falha operacional exige retry ou intervencao do operador antes de qualquer entrega final.\n",
         );
     } else {
-        text.push_str(
-            "\n## Decisao\n\nTexto final liberado por unanimidade trilateral na rodada 001.\n",
-        );
+        text.push_str("\n## Decisao\n\nTexto final liberado por unanimidade trilateral.\n");
     }
 
     text
@@ -1678,36 +1919,44 @@ fn probe_row(
 }
 
 fn command_check(label: &str, command: &str, args: &[&str]) -> Value {
-    let resolved = resolve_command(command);
-    let output = if let Some(path) = resolved.as_ref() {
-        run_resolved_command(path, args)
-    } else {
-        Command::new(command).args(args).output()
+    let Some(path) = resolve_command(command) else {
+        return json!({
+            "label": label,
+            "value": "nao encontrado no PATH efetivo",
+            "tone": "blocked"
+        });
     };
+    let args = args
+        .iter()
+        .map(|arg| (*arg).to_string())
+        .collect::<Vec<_>>();
+    let output = run_resolved_command_with_timeout(&path, &args, Duration::from_secs(12), None);
 
     match output {
-        Ok(output) if output.status.success() => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        Ok(result) if result.timed_out => json!({
+            "label": label,
+            "value": sanitize_text("diagnostico excedeu 12s; CLI pode exigir login ou inicializacao lenta", 220),
+            "tone": "warn"
+        }),
+        Ok(result) if result.output.status.success() => {
+            let stdout = String::from_utf8_lossy(&result.output.stdout);
+            let stderr = String::from_utf8_lossy(&result.output.stderr);
             let detail = stdout
                 .lines()
                 .chain(stderr.lines())
                 .find(|line| !line.trim().is_empty())
                 .unwrap_or("detectado")
                 .trim();
-            let resolved_note = resolved
-                .as_ref()
-                .map(|path| format!(" via {}", path.to_string_lossy()))
-                .unwrap_or_default();
+            let resolved_note = format!(" via {}", path.to_string_lossy());
             json!({
                 "label": label,
                 "value": sanitize_text(&format!("{detail}{resolved_note}"), 220),
                 "tone": "ok"
             })
         }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(result) => {
+            let stderr = String::from_utf8_lossy(&result.output.stderr);
+            let stdout = String::from_utf8_lossy(&result.output.stdout);
             let detail = stderr
                 .lines()
                 .chain(stdout.lines())
@@ -1802,37 +2051,6 @@ fn command_search_dirs() -> Vec<PathBuf> {
         .collect()
 }
 
-fn run_resolved_command(path: &Path, args: &[&str]) -> std::io::Result<Output> {
-    let extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-
-    #[cfg(windows)]
-    {
-        if extension == "cmd" || extension == "bat" {
-            return Command::new(
-                std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string()),
-            )
-            .arg("/C")
-            .arg(path)
-            .args(args)
-            .output();
-        }
-
-        if extension == "ps1" {
-            return Command::new("powershell.exe")
-                .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
-                .arg(path)
-                .args(args)
-                .output();
-        }
-    }
-
-    Command::new(path).args(args).output()
-}
-
 fn run_resolved_command_with_timeout(
     path: &Path,
     args: &[String],
@@ -1898,6 +2116,47 @@ fn run_resolved_command_with_timeout(
     }
 }
 
+fn run_resolved_command_unbounded(
+    path: &Path,
+    args: &[String],
+    stdin_text: Option<&str>,
+) -> std::io::Result<TimedCommandOutput> {
+    let started = Instant::now();
+    let mut command = resolved_command_builder(path, args);
+    command
+        .current_dir(app_root())
+        .stdin(if stdin_text.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    if let Some(text) = stdin_text {
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(text.as_bytes())?;
+        }
+    }
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_handle = thread::spawn(move || read_pipe_to_end(stdout));
+    let stderr_handle = thread::spawn(move || read_pipe_to_end(stderr));
+    let status = child.wait()?;
+    let stdout = stdout_handle.join().unwrap_or_default();
+    let stderr = stderr_handle.join().unwrap_or_default();
+
+    Ok(TimedCommandOutput {
+        output: Output {
+            status,
+            stdout,
+            stderr,
+        },
+        duration_ms: started.elapsed().as_millis(),
+        timed_out: false,
+    })
+}
+
 fn read_pipe_to_end(pipe: Option<impl Read>) -> Vec<u8> {
     let mut buffer = Vec::new();
     if let Some(mut pipe) = pipe {
@@ -1917,13 +2176,13 @@ fn resolved_command_builder(path: &Path, args: &[String]) -> Command {
     {
         if extension == "cmd" || extension == "bat" {
             let mut command =
-                Command::new(std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string()));
+                hidden_command(std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string()));
             command.arg("/C").arg(path).args(args);
             return command;
         }
 
         if extension == "ps1" {
-            let mut command = Command::new("powershell.exe");
+            let mut command = hidden_command("powershell.exe");
             command
                 .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
                 .arg(path)
@@ -1932,7 +2191,7 @@ fn resolved_command_builder(path: &Path, args: &[String]) -> Command {
         }
     }
 
-    let mut command = Command::new(path);
+    let mut command = hidden_command(path);
     command.args(args);
     command
 }

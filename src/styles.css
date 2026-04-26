@@ -468,6 +468,11 @@ button:disabled {
   background: #dcfce7;
 }
 
+.run-state-badge.paused {
+  color: #7c3aed;
+  background: #ede9fe;
+}
+
 .run-state-badge.blocked {
   color: #b45309;
   background: #fff7ed;
@@ -538,6 +543,11 @@ button:disabled {
 .pulse-icon.completed {
   color: #166534;
   background: #dcfce7;
+}
+
+.pulse-icon.paused {
+  color: #7c3aed;
+  background: #ede9fe;
 }
 
 .pulse-icon.blocked {
@@ -614,6 +624,10 @@ button:disabled {
 
 .progress-fill.completed {
   background: #16a34a;
+}
+
+.progress-fill.paused {
+  background: #7c3aed;
 }
 
 .progress-stack span {

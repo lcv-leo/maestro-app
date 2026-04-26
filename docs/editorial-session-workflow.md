@@ -1,6 +1,6 @@
 # Editorial Session Workflow
 
-Status: implementation contract with first functional pass in `v0.3.0`.
+Status: implementation contract with functional background pass in `v0.3.1`.
 
 Maestro's core workflow starts from an operator prompt and an active editorial protocol. The app must not deliver a final text until Claude, Codex, and Gemini all return `READY` in the same trilateral round and Maestro's deterministic fourth-peer check also returns `READY`.
 
@@ -37,18 +37,22 @@ If any peer remains `NOT_READY` or `NEEDS_EVIDENCE`, the session continues, paus
 
 ## Round Flow
 
-`v0.3.0` implements the first real executable pass:
+`v0.3.1` implements the current real executable pass:
 
 - The UI blocks execution unless the full Markdown protocol text was imported.
-- Claude is called in headless mode to produce the first draft.
+- Claude, Codex, and Gemini are called without visible terminal windows in Windows release builds.
+- Real editorial calls run without artificial timeout; model latency is treated as normal operational time.
+- The UI remains responsive and shows heartbeat progress while the native worker waits for long-running agents.
+- Draft generation can fall back across Claude, Codex, and Gemini when an earlier agent fails to produce usable text.
 - Claude, Codex, and Gemini are called in background to review the draft.
-- If draft generation fails or returns no usable text, Maestro writes the session minutes and blocks delivery without spending reviewer calls on an execution-error artifact.
+- If a review returns `NOT_READY`, Maestro feeds the review artifacts into a revision prompt and starts another round instead of treating divergence as task completion.
+- If an operational failure prevents progress, Maestro writes the session minutes and pauses without emitting a final text.
 - Each agent receives the full protocol text and operator prompt.
 - Each review must return `MAESTRO_STATUS: READY` as its first line to count as approval.
 - Maestro writes `texto-final.md` only when all three review peers return `READY` and the draft command succeeded.
 - Maestro always writes `ata-da-sessao.md` plus per-agent artifacts under ignored `data/sessions/<run>/`.
 
-This first pass is intentionally conservative. The later multi-round debate loop, deterministic link checker, ABNT engine, and MainSite D1 publication gates remain required before the workflow can be considered mature.
+This pass is still conservative. The deterministic link checker, ABNT engine, resumable/cancellable sessions, and MainSite D1 publication gates remain required before the workflow can be considered mature.
 
 1. Maestro builds an evidence pack and protocol pack.
 2. Each agent receives the same session prompt, protocol snapshot, evidence pack, and status schema.

@@ -42,7 +42,7 @@ type AiCredentialKey = 'openai' | 'anthropic' | 'gemini';
 type CredentialStorageMode = 'local_json' | 'windows_env' | 'cloudflare';
 type CloudflareTokenSource = 'prompt_each_launch' | 'windows_env' | 'local_encrypted';
 type ActiveSection = 'session' | 'protocols' | 'evidence' | 'agents' | 'settings' | 'setup';
-type RunStatus = 'idle' | 'preparing' | 'running' | 'blocked' | 'completed';
+type RunStatus = 'idle' | 'preparing' | 'running' | 'paused' | 'blocked' | 'completed';
 type ActivityLevel = 'summary' | 'detail' | 'diagnostic';
 
 type OperationSnapshot = {
@@ -391,7 +391,9 @@ export function App() {
   }, [activityItems, verbosity]);
   const isRunPreparing = operation.status === 'preparing' || operation.status === 'running';
   const runActionLabel =
-    operation.status === 'blocked' || operation.status === 'completed' ? 'Nova sessao' : 'Iniciar sessao';
+    operation.status === 'paused' || operation.status === 'blocked' || operation.status === 'completed'
+      ? 'Nova sessao'
+      : 'Iniciar sessao';
   const formalState =
     operation.status === 'idle'
       ? 'aguardando_prompt'
@@ -399,9 +401,11 @@ export function App() {
         ? 'preflight_em_execucao'
         : operation.status === 'running'
           ? 'agentes_em_execucao'
-          : operation.status === 'completed'
-            ? 'final_disponivel'
-            : 'bloqueado';
+          : operation.status === 'paused'
+            ? 'aguardando_retomada'
+            : operation.status === 'completed'
+              ? 'final_disponivel'
+              : 'bloqueado';
   const linkEvidenceState = evidenceRows.find((item) => item.label === 'Links')?.value ?? 'nao iniciado';
   const activeNavItem = navItems.find((item) => item.section === activeSection) ?? navItems[0];
   const cloudflareTokenAvailable = cloudflareApiToken.length > 0 || Boolean(cloudflareEnvSnapshot?.api_token_present);
@@ -455,13 +459,18 @@ export function App() {
 
   async function loadBootstrapConfig() {
     try {
-      const [config, envSnapshot, preflight] = await Promise.all([
+      const [config, envSnapshot] = await Promise.all([
         invoke<BootstrapConfig>('read_bootstrap_config'),
         invoke<CloudflareEnvSnapshot>('cloudflare_env_snapshot'),
-        invoke<DependencyPreflight>('dependency_preflight'),
       ]);
 
-      setBootstrapRows(preflight.checks);
+      setBootstrapRows(
+        initialBootstrapChecks.map((row) => ({
+          ...row,
+          value: row.label === 'WebView2' ? 'ativo pelo runtime Tauri' : 'checagem em background',
+          tone: row.label === 'WebView2' ? 'ok' : row.tone,
+        })),
+      );
       setCredentialStorageMode(config.credential_storage_mode);
       setCloudflareTokenSource(envSnapshot.api_token_present ? 'windows_env' : config.cloudflare_api_token_source);
       setCloudflareTokenEnvVar(envSnapshot.api_token_env_var ?? config.cloudflare_api_token_env_var);
@@ -490,6 +499,36 @@ export function App() {
           cloudflare_api_token_present: envSnapshot.api_token_present,
         },
       });
+      void invoke<DependencyPreflight>('dependency_preflight')
+        .then((preflight) => {
+          setBootstrapRows(preflight.checks);
+          void logEvent({
+            level: 'info',
+            category: 'bootstrap.dependency_preflight.completed',
+            message: 'background dependency preflight completed',
+            context: {
+              checks: preflight.checks.map((check) => ({
+                label: check.label,
+                tone: check.tone,
+              })),
+            },
+          });
+        })
+        .catch((error) => {
+          setBootstrapRows((current) =>
+            current.map((row) =>
+              row.label === 'WebView2'
+                ? row
+                : { ...row, value: 'falha na checagem em background; ver logs', tone: 'warn' },
+            ),
+          );
+          void logEvent({
+            level: 'warn',
+            category: 'bootstrap.dependency_preflight.failed',
+            message: 'background dependency preflight failed',
+            context: { error },
+          });
+        });
     } catch (error) {
       setBootstrapConfigStatus('falha ao carregar bootstrap.json');
       void logEvent({
@@ -765,6 +804,35 @@ export function App() {
       },
     });
 
+    const startedAt = Date.now();
+    let lastLoggedMinute = 0;
+    const heartbeat = window.setInterval(() => {
+      const elapsedSeconds = Math.max(1, Math.floor((Date.now() - startedAt) / 1000));
+      const elapsedMinutes = Math.floor(elapsedSeconds / 60);
+      const progress = Math.min(94, 44 + Math.floor(elapsedSeconds / 30));
+      setOperation({
+        title: 'Executando sessao editorial real',
+        progress,
+        current: `Agentes trabalhando ha ${elapsedSeconds.toLocaleString('pt-BR')}s. Sem timeout editorial; a UI permanece livre para navegacao.`,
+        eta: runId,
+        status: 'running',
+      });
+      if (elapsedMinutes > lastLoggedMinute) {
+        lastLoggedMinute = elapsedMinutes;
+        appendActivity({
+          level: elapsedMinutes % 5 === 0 ? 'detail' : 'diagnostic',
+          title: 'Sessao ainda em execucao',
+          detail: `Agentes em background ha ${elapsedMinutes} min; nenhum timeout sera aplicado a geracao editorial.`,
+        });
+        void logEvent({
+          level: 'info',
+          category: 'session.editorial.heartbeat',
+          message: 'editorial session still running without timeout',
+          context: { run_id: runId, elapsed_seconds: elapsedSeconds },
+        });
+      }
+    }, 5000);
+
     try {
       const result = await invoke<EditorialSessionResult>('run_editorial_session', {
         request: {
@@ -776,6 +844,7 @@ export function App() {
           protocol_hash: protocol.hash,
         },
       });
+      window.clearInterval(heartbeat);
       const nextAgentCards = result.agents.map((agent) => ({
         name: agent.name,
         cli: agent.cli,
@@ -787,8 +856,8 @@ export function App() {
         {
           name: 'MaestroPeer',
           cli: 'deterministico',
-          state: result.consensus_ready ? 'ready' : 'blocked',
-          note: result.consensus_ready ? 'unanimidade registrada' : 'bloqueou entrega sem unanimidade',
+          state: result.consensus_ready ? 'ready' : 'evidence',
+          note: result.consensus_ready ? 'unanimidade registrada' : 'sessao pausada sem entrega final',
         },
       ]);
       setProtocolGateItems(
@@ -820,7 +889,7 @@ export function App() {
       ]);
       appendActivity({
         level: 'summary',
-        title: result.consensus_ready ? 'Texto final liberado' : 'Entrega bloqueada',
+        title: result.consensus_ready ? 'Texto final liberado' : 'Sessao pausada',
         detail: result.agents.map((agent) => `${agent.name}: ${agent.tone}`).join('; '),
       });
 
@@ -851,17 +920,20 @@ export function App() {
         });
       } else {
         setOperation({
-          title: 'Entrega bloqueada por decisao real',
+          title: 'Sessao pausada sem entrega final',
           progress: 66,
-          current: 'Pelo menos um peer nao retornou READY. A regra de unanimidade bloqueou o texto final.',
+          current:
+            result.status === 'PAUSED_DRAFT_UNAVAILABLE'
+              ? 'Nenhum agente produziu rascunho utilizavel. A entrega segue indisponivel ate nova tentativa ou intervencao.'
+              : 'A sessao nao entregou texto final nesta chamada. Divergencias exigem novas rodadas ate unanimidade.',
           eta: `Ata: ${result.session_minutes_path}`,
-          status: 'blocked',
+          status: 'paused',
         });
         setPhaseItems([
           { label: 'Protocolo', detail: 'registrado', state: 'done' },
           { label: 'Preflight', detail: 'concluido', state: 'done' },
-          { label: 'Orquestracao', detail: 'rodada real concluida', state: 'done' },
-          { label: 'Entrega', detail: 'sem unanimidade', state: 'waiting' },
+          { label: 'Orquestracao', detail: 'rodadas registradas', state: 'done' },
+          { label: 'Entrega', detail: 'aguardando unanimidade', state: 'waiting' },
         ]);
         void logEvent({
           level: 'warn',
@@ -885,6 +957,7 @@ export function App() {
         });
       }
     } catch (error) {
+      window.clearInterval(heartbeat);
       setOperation({
         title: 'Sessao editorial falhou',
         progress: 42,

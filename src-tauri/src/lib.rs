@@ -7,7 +7,7 @@ use std::{
     collections::BTreeSet,
     fs::{self, OpenOptions},
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::{self, Command, Output, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -213,9 +213,10 @@ fn write_log_record(
     log_session: &LogSession,
     event: LogEventInput,
 ) -> Result<LogWriteResult, String> {
-    let dir = logs_dir();
+    let dir = checked_data_child_path(&logs_dir())?;
     fs::create_dir_all(&dir).map_err(|error| format!("failed to create log dir: {error}"))?;
     let sequence = NATIVE_LOG_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
+    let log_path = checked_data_child_path(&log_session.path)?;
 
     let record = json!({
         "schema_version": 1,
@@ -238,26 +239,34 @@ fn write_log_record(
         },
         "session": {
             "id": log_session.id.clone(),
-            "log_file": log_session.path.to_string_lossy().to_string()
+            "log_file": log_path.to_string_lossy().to_string()
         }
     });
 
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&log_session.path)
+        .open(&log_path)
         .map_err(|error| format!("failed to open log file: {error}"))?;
     writeln!(file, "{record}").map_err(|error| format!("failed to write log record: {error}"))?;
 
     Ok(LogWriteResult {
-        path: log_session.path.to_string_lossy().to_string(),
+        path: log_path.to_string_lossy().to_string(),
         session_id: log_session.id.clone(),
     })
 }
 
 #[tauri::command]
 fn diagnostics_snapshot(log_session: tauri::State<LogSession>) -> Value {
-    let dir = logs_dir();
+    let dir = match checked_data_child_path(&logs_dir()) {
+        Ok(dir) => dir,
+        Err(error) => {
+            return json!({
+                "error": sanitize_text(&error, 240),
+                "hint": "Maestro could not validate its diagnostic log directory."
+            });
+        }
+    };
     let files = fs::read_dir(&dir)
         .ok()
         .into_iter()
@@ -286,7 +295,7 @@ fn diagnostics_snapshot(log_session: tauri::State<LogSession>) -> Value {
 
 #[tauri::command]
 fn read_bootstrap_config() -> Result<BootstrapConfig, String> {
-    let path = bootstrap_config_path();
+    let path = checked_data_child_path(&bootstrap_config_path())?;
     if !path.exists() {
         let config = BootstrapConfig::default();
         persist_bootstrap_config(&path, &config)?;
@@ -617,18 +626,22 @@ fn run_editorial_session_blocking(
 
 fn app_root() -> PathBuf {
     std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(PathBuf::from))
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."))
+        .expect("failed to resolve current executable path")
+        .parent()
+        .expect("current executable must have a parent directory")
+        .to_path_buf()
+}
+
+fn data_dir() -> PathBuf {
+    app_root().join("data")
 }
 
 fn logs_dir() -> PathBuf {
-    app_root().join("data").join("logs")
+    data_dir().join("logs")
 }
 
 fn config_dir() -> PathBuf {
-    app_root().join("data").join("config")
+    data_dir().join("config")
 }
 
 fn bootstrap_config_path() -> PathBuf {
@@ -636,7 +649,37 @@ fn bootstrap_config_path() -> PathBuf {
 }
 
 fn sessions_dir() -> PathBuf {
-    app_root().join("data").join("sessions")
+    data_dir().join("sessions")
+}
+
+fn checked_data_child_path(path: &Path) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err("internal data path must be absolute".to_string());
+    }
+
+    let data_root = data_dir();
+    let relative = path
+        .strip_prefix(&data_root)
+        .map_err(|_| "internal data path escaped Maestro data directory".to_string())?;
+
+    if relative
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err("internal data path contains unsafe segments".to_string());
+    }
+
+    Ok(path.to_path_buf())
+}
+
+fn sanitize_path_segment(value: &str, max_len: usize) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+        .take(max_len)
+        .collect::<String>()
+        .trim_matches(['_', '-'])
+        .to_string()
 }
 
 fn create_log_session() -> LogSession {
@@ -665,13 +708,14 @@ fn apply_hidden_window_policy(command: &mut Command) {
 fn apply_hidden_window_policy(_command: &mut Command) {}
 
 fn persist_bootstrap_config(path: &PathBuf, config: &BootstrapConfig) -> Result<(), String> {
+    let path = checked_data_child_path(path)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create config dir: {error}"))?;
     }
     let bytes = serde_json::to_vec_pretty(config)
         .map_err(|error| format!("failed to serialize bootstrap config: {error}"))?;
-    fs::write(path, bytes).map_err(|error| format!("failed to write bootstrap config: {error}"))
+    fs::write(&path, bytes).map_err(|error| format!("failed to write bootstrap config: {error}"))
 }
 
 fn normalize_storage_mode(value: &str) -> &'static str {
@@ -760,7 +804,7 @@ fn run_editorial_session_inner(
     request: &EditorialSessionRequest,
     log_session: &LogSession,
 ) -> Result<EditorialSessionResult, String> {
-    let run_id = sanitize_short(&request.run_id, 120);
+    let run_id = sanitize_path_segment(&request.run_id, 120);
     if run_id.is_empty() {
         return Err("run_id vazio".to_string());
     }
@@ -773,8 +817,8 @@ fn run_editorial_session_inner(
         return Err("protocolo editorial integral nao foi carregado".to_string());
     }
 
-    let session_dir = sessions_dir().join(&run_id);
-    let agent_dir = session_dir.join("agent-runs");
+    let session_dir = checked_data_child_path(&sessions_dir().join(&run_id))?;
+    let agent_dir = checked_data_child_path(&session_dir.join("agent-runs"))?;
     fs::create_dir_all(&agent_dir)
         .map_err(|error| format!("failed to create session dir: {error}"))?;
 
@@ -815,7 +859,7 @@ fn run_editorial_session_inner(
             None,
         );
         agents.push(draft_run.clone());
-        let draft_artifact = fs::read_to_string(&output_path).unwrap_or_default();
+        let draft_artifact = read_text_file(&output_path).unwrap_or_default();
         let draft_text = extract_stdout_block(&draft_artifact).unwrap_or(draft_artifact.as_str());
         if draft_run.tone != "error" && draft_run.tone != "blocked" && !draft_text.trim().is_empty()
         {
@@ -1003,7 +1047,7 @@ fn run_editorial_session_inner(
                 None,
             );
             agents.push(revision_run.clone());
-            let artifact = fs::read_to_string(&output_path).unwrap_or_default();
+            let artifact = read_text_file(&output_path).unwrap_or_default();
             let revised_text = extract_stdout_block(&artifact).unwrap_or(artifact.as_str());
             if revision_run.tone != "error"
                 && revision_run.tone != "blocked"
@@ -1068,11 +1112,17 @@ fn run_editorial_session_inner(
 }
 
 fn write_text_file(path: &Path, text: &str) -> Result<(), String> {
+    let path = checked_data_child_path(path)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create artifact dir: {error}"))?;
     }
-    fs::write(path, text).map_err(|error| format!("failed to write artifact: {error}"))
+    fs::write(&path, text).map_err(|error| format!("failed to write artifact: {error}"))
+}
+
+fn read_text_file(path: &Path) -> Result<String, String> {
+    let path = checked_data_child_path(path)?;
+    fs::read_to_string(&path).map_err(|error| format!("failed to read artifact: {error}"))
 }
 
 fn claude_args() -> Vec<String> {
@@ -1188,7 +1238,7 @@ fn build_revision_prompt(
 ) -> String {
     let mut review_notes = String::new();
     for agent in review_agents {
-        let artifact = fs::read_to_string(&agent.output_path).unwrap_or_default();
+        let artifact = read_text_file(Path::new(&agent.output_path)).unwrap_or_default();
         let artifact_excerpt = artifact.chars().take(40_000).collect::<String>();
         review_notes.push_str(&format!(
             "\n### {} / {}\n\nStatus: `{}` (`{}`)\nArtifact: `{}`\n\n```markdown\n{}\n```\n",
@@ -2354,6 +2404,29 @@ mod tests {
         assert!(!should_redact_key("cloudflare_api_token_env_var"));
         assert!(!should_redact_key("token_source"));
         assert!(!should_redact_key("credential_storage_mode"));
+    }
+
+    #[test]
+    fn sanitizes_run_ids_for_path_segments() {
+        assert_eq!(
+            sanitize_path_segment("../run:2026/04/26", 120),
+            "run20260426"
+        );
+        assert_eq!(
+            sanitize_path_segment("run-2026_04_26", 120),
+            "run-2026_04_26"
+        );
+        assert!(sanitize_path_segment("../../../", 120).is_empty());
+    }
+
+    #[test]
+    fn rejects_paths_outside_data_dir() {
+        let outside = app_root().join("outside.txt");
+        assert!(checked_data_child_path(&outside).is_err());
+        let traversal = sessions_dir().join("safe").join("..").join("escape.txt");
+        assert!(checked_data_child_path(&traversal).is_err());
+        let inside = sessions_dir().join("safe").join("artifact.md");
+        assert!(checked_data_child_path(&inside).is_ok());
     }
 
     #[test]

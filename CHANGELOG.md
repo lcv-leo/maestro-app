@@ -4,6 +4,12 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.3] - 2026-04-26
+
+- Hardened native filesystem access so logs, bootstrap configuration, and editorial session artifacts are validated as children of Maestro's local `data/` directory before reads or writes.
+- Sanitized editorial `run_id` values into safe path segments before creating session folders, preventing path traversal through session artifact names.
+- Updated GitHub release attestation action to `actions/attest-build-provenance@v4.1.0` through the merged Dependabot PR.
+
 ## [v0.3.2] - 2026-04-26
 
 - Transferred the public repository from `lcv-leo/maestro-app` to `lcv-ideas-software/maestro-app`.

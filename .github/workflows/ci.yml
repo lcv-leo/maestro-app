@@ -17,6 +17,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
       - name: Verify private protocol artifacts are absent
         shell: bash
         run: |
@@ -28,7 +40,15 @@ jobs:
       - name: Detect common secret-shaped strings
         shell: bash
         run: |
-          if grep -RInE '(sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z_-]{20,})' . --exclude-dir=.git; then
+          if grep -RInE '(sk-[A-Za-z0-9_-]{20,}|sk-ant-[A-Za-z0-9_-]{20,}|sk_live_[A-Za-z0-9_-]{20,}|cfut_[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z_-]{20,}|re_[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16})' . \
+            --exclude-dir=.git \
+            --exclude-dir=node_modules \
+            --exclude-dir=dist \
+            --exclude-dir=build \
+            --exclude-dir=out \
+            --exclude-dir=target \
+            --exclude='package-lock.json' \
+            --exclude='Cargo.lock'; then
             echo "Secret-shaped string detected. Use placeholders such as <api_key_redacted>." >&2
             exit 1
           fi

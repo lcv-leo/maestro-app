@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default desktop window permissions for Maestro Editorial AI.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

@@ -17,6 +17,12 @@ Security alerts are release blockers until triaged.
 
 ## GitHub Releases
 
+Versioning convention:
+
+- App and release labels use `vX.X.X`.
+- `package.json` stores the numeric semver core, for example `0.1.0`; Git tags and changelog headings include the `v` prefix, for example `v0.1.0`.
+- Every release or scaffold milestone updates `CHANGELOG.md` under a concrete `vX.X.X` heading before Commit & Sync.
+
 Release readiness requires:
 
 - Clean working tree.

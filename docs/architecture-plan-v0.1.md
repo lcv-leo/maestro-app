@@ -13,6 +13,8 @@ The app lives under `maestro-app`, runs from any folder, uses no installer as a 
 ## 2. Hard Gates
 
 - No text becomes `publicavel` unless the mechanical evidence engine and all active AI agents converge `READY` in the same round.
+- Maestro itself is a deterministic fourth peer. Final delivery requires Claude, Codex, and Gemini to converge plus `MaestroPeer: READY`.
+- Inviolable unanimity rule: regardless of time, cost, number of rounds, rate limits, or operator impatience, the final text is delivered only after unanimous acceptance. While any divergence remains, the work remains open.
 - Partial agreement is non-convergence.
 - `NEEDS_EVIDENCE` blocks publication until the requested evidence is supplied or the item is explicitly escalated and the formal state remains below `publicavel`.
 - The operator may provide evidence, revise scope, abort, or export a non-publicable draft, but cannot silently convert unresolved blockers into `publicavel`.
@@ -44,18 +46,41 @@ Local prerequisite recheck observed 2026-04-26: Rust is installed through rustup
 
 ## 4. Core Modules
 
-- `agent-adapters`: Codex CLI, Claude CLI, Gemini CLI process adapters with model pins, timeout policy, redaction, stdout/stderr capture, and no silent model downgrade.
+- `agent-adapters`: Codex CLI, Claude CLI, Gemini CLI process adapters with model pins, timeout policy, redaction, stdout/stderr capture, JSON/JSONL parser hardening, auth probes, update probes, and no silent model downgrade. See `docs/cli-agent-audit.md`.
+- `ai-provider-adapters`: official API/SDK adapters for OpenAI/Codex, Anthropic/Claude, and Google/Gemini with model pins, request budgets, provider request IDs, and transport provenance.
+- `credential-manager`: encrypted local vault, Windows environment variable reader/writer, local JSON fallback warnings, redaction checks, and per-provider credential validation.
+- `runtime-bootstrapper`: first-run dependency inventory, install/update/configuration plan, operator authorization, background execution, CLI authentication flow, and final readiness report.
 - `capability-probe`: pre-session CLI availability/model probe with failure classes.
 - `editorial-session`: job lifecycle, phase transitions, round creation, formal state tracking.
 - `status-parser`: strict parser for structured agent verdicts.
 - `convergence-engine`: strict-only convergence, persisted per-round snapshots.
 - `protocol-engine`: executable gates compiled from Protocolo Editorial v1.10.0.
+- `abnt-citation-engine`: automatic ABNT NBR 10520:2023 and NBR 6023 citation/reference formatting plus blocker generation.
+- `maestro-peer`: deterministic fourth-peer verdict based on protocol, evidence, citation, export, and MainSite compatibility gates.
 - `protocol-library`: UI and storage for importing, replacing, diffing, activating, and archiving mutable editorial protocol documents.
 - `evidence-engine`: link, DOI, ISBN, catalog, PDF, and freshness verification.
+- `web-evidence-engine`: fetch, curl-compatible replay, web search connectors, rendered fetch, default-browser assisted capture, robots/ToS/copyright state, and source hashing.
+- `link-integrity-engine`: extraction, validation, sanitization, correction proposals, and cross-review escalation for every generated/imported link.
 - `quarantine-ledger`: bibliographic quarantine records.
 - `claim-map`: argument-support map by claim, source, locator, certainty, and risk.
+- `posteditor-parity-editor`: MainSite-bound editor copied/adapted from `admin-app/MainSite/PostEditor`, with the same effective TipTap extension set and HTML output contract.
+- `shared-chat-importer`: ChatGPT, Claude, and Gemini shared-link classification, browser-capable extraction, Markdown conversion, and provenance capture.
+- `mainsite-d1-bridge`: guarded read/write/import/export bridge for `bigdata_db.mainsite_posts`, using Cloudflare API as the primary path and `wrangler@latest` only as fallback.
 - `json-store`: event-sourced JSON/NDJSON persistence with locks, atomic writes, checksums, and recovery.
-- `exporter`: Markdown/blog-ready export plus internal audit report and semantic diff.
+- `exporter`: Markdown, Markdown plus HTML, PDF, MainSite-compatible HTML, internal audit report, and semantic diff.
+
+## 4.1 Integrated Editor Gate
+
+TipTap is approved only as PostEditor parity. Maestro must not maintain a separate "similar" TipTap editor for MainSite content.
+
+Required parity surface:
+
+- Same practical toolbar capabilities as PostEditor.
+- Same custom extensions, node views, tables, task lists, mentions, images, YouTube embeds, search/replace, slash commands, and Markdown import semantics.
+- Same `editor.getHTML()` save contract plus target/rel link normalization.
+- Same sanitizer and `PostReader` compatibility checks before direct D1 publishing is stable.
+
+The current compatibility module lives in `src/editor/posteditor/`. Future changes in `admin-app/MainSite/PostEditor` require equivalent Maestro review.
 
 ## 5. JSON Store Design
 
@@ -89,7 +114,9 @@ data/
         blockers.json
         semantic-diff.json
       exports/
-        draft.md
+        texto-final.md
+        ata-da-sessao.md
+        mainsite-content.html
         audit-report.md
 ```
 
@@ -146,6 +173,18 @@ Required capabilities:
 
 Because AI models will keep finding failures and improvements in the editorial rules, protocol update is a first-class workflow, not a maintenance afterthought.
 
+## 7.1 Background Agent UX
+
+Claude CLI, Codex CLI, and Gemini CLI are runtime workers, not visible terminal sessions. The operator experience must keep them in background and translate their activity into clear UI states:
+
+- Current action, phase, progress, and blocker indicators.
+- Agent status cards using `READY`, `NOT_READY`, and `NEEDS_EVIDENCE`.
+- A UI verbosity control with at least summary, detailed, and diagnostic levels.
+- Diagnostic view may show structured event names, retry classes, and log paths, but not raw prompt dumps, secrets, stdout, stderr, or full transcripts.
+- Detailed forensic material remains in ignored local JSON/NDJSON logs and can be attached manually for analysis.
+
+The UI should feel operational and calm: enough transparency for trust, without turning the app into a terminal multiplexer.
+
 ## 8. Evidence Engine
 
 Maestro supplies evidence packs to the agents. Agents may reason about evidence, but Maestro performs the fetch/check work itself.
@@ -162,6 +201,10 @@ Minimum v1 scope:
 - Freshness classifier by domain.
 - Evidence cache as JSON with TTL by source class and explicit revalidation records.
 
+The web evidence engine should behave like a careful human researcher using a browser. It may open URLs in a Maestro-assisted browser window or in the operator's default browser for explicit operator capture, and it may use WebView2 with Maestro's own app-local user data folder. It must not silently copy the user's active browser cookies, session profile, password stores, or fingerprint data.
+
+Interactive states such as `captcha_required`, `login_required`, `consent_required`, `download_confirmation`, `paywall`, `auth_required`, and `forbidden` are first-class evidence results. They pause automation, open the assisted browser/default browser flow, let the operator act, then resume with `human_resolved` provenance when appropriate.
+
 ## 9. Agent Workflow
 
 Phases:
@@ -177,6 +220,20 @@ Phases:
 9. Semantic diff.
 10. Final convergence.
 11. Export.
+
+Final convergence is accepted only when:
+
+```text
+Claude READY
+Codex READY
+Gemini READY
+MaestroPeer READY
+same accepted final round
+```
+
+`MaestroPeer` is computed by the app, not by a model. It must mark `NOT_READY` or `NEEDS_EVIDENCE` when ABNT formatting, source verification, protocol compliance, link evidence, or export structure is unresolved.
+
+Link failures are not cosmetic. Broken, invented, weak, redirected-to-wrong-content, or unsupported links must create blockers and feed the next cross-review round with the mechanical evidence and correction candidates.
 
 Each AI response must close with a structured status block:
 
@@ -195,11 +252,13 @@ Each AI response must close with a structured status block:
 
 ## 10. Failure Handling
 
+- First-run bootstrap failures block full operation until resolved, skipped, or explicitly deferred with a degraded-mode warning.
 - Pre-session probe detects missing CLI, auth failure, model rejection, timeout, rate limit, and prompt-safety rejection.
 - If all peers are unavailable, session aborts.
 - If one peer is unavailable, Maestro may run a degraded audit, but the result cannot be called full trilateral convergence.
 - Mid-round transient failures retry once with backoff and record attempts.
 - Max rounds default: 8. Hitting the cap finalizes as `max-rounds`, not `publicavel`.
+- `max-rounds` is a pause/escalation state, not a final-delivery state. It may produce diagnostics or a non-publicable working draft, but it cannot produce `texto-final.md`.
 - Rate limit is a distinct failure class, not a content objection.
 - `2 READY + 1 NOT_READY/NEEDS_EVIDENCE/status_missing` is non-convergence and creates the next round until resolved or `max-rounds` is reached.
 - Protocol violations are distinct failure classes: malformed status block, peer impersonation, model downgrade evidence, unilateral writes during design-only review, or missing required evidence fields.

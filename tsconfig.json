@@ -3,11 +3,12 @@
     "target": "ES2024",
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "module": "ESNext",
+    "jsx": "react-jsx",
     "moduleResolution": "Bundler",
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src"]
+  "include": ["src", "vite.config.ts"]
 }

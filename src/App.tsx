@@ -38,7 +38,7 @@ type VerbosityMode = 'resumo' | 'detalhado' | 'diagnostico';
 type PhaseState = 'done' | 'active' | 'waiting';
 type ProviderMode = 'cli' | 'api' | 'hybrid';
 type AiCredentialKey = 'openai' | 'anthropic' | 'gemini';
-type CredentialStorageMode = 'vault' | 'windows_env' | 'local_json';
+type CredentialStorageMode = 'local_json' | 'windows_env' | 'cloudflare';
 
 type AgentCard = {
   name: string;
@@ -117,15 +117,30 @@ const bootstrapChecks = [
 const cloudflarePermissionChecks = [
   { label: 'Token ativo', value: 'verify endpoint' },
   { label: 'Conta acessivel', value: 'account id' },
-  { label: 'D1 Read', value: 'importacao' },
-  { label: 'D1 Write', value: 'publicacao' },
+  { label: 'D1 Read/Edit', value: 'maestro_db + mainsite_posts' },
+  { label: 'Secrets Store', value: 'criar e mapear secrets' },
 ];
 
 const credentialStorageModes = [
-  { mode: 'vault', label: 'Vault local', detail: 'JSON criptografado e ignorado' },
-  { mode: 'windows_env', label: 'Env var Windows', detail: 'CurrentUser; maquina exige UAC' },
-  { mode: 'local_json', label: 'JSON local', detail: 'somente com alerta de risco' },
+  { mode: 'local_json', label: 'JSON local', detail: 'configuracoes e segredos em JSON ignorado' },
+  { mode: 'windows_env', label: 'Env var Windows', detail: 'segredos em env var; configs em JSON' },
+  { mode: 'cloudflare', label: 'Cloudflare', detail: 'maestro_db + Secrets Store remoto' },
 ] satisfies Array<{ mode: CredentialStorageMode; label: string; detail: string }>;
+
+const storageModeSummaries: Record<CredentialStorageMode, { title: string; detail: string }> = {
+  local_json: {
+    title: 'JSON local',
+    detail: 'Tudo fica em arquivos JSON locais ignorados pelo Git.',
+  },
+  windows_env: {
+    title: 'Env var hibrido',
+    detail: 'Tokens e API keys ficam em env vars do Windows; demais configuracoes ficam em JSON local.',
+  },
+  cloudflare: {
+    title: 'Cloudflare remoto',
+    detail: 'Configuracoes em D1 maestro_db; segredos no Cloudflare Secrets Store.',
+  },
+};
 
 const aiProviderRows = [
   {
@@ -239,7 +254,7 @@ export function App() {
     '<h1>Artigo em preparacao</h1><p style="text-align: justify">Texto inicial para edicao com o mesmo PostEditor usado pelo MainSite.</p>',
   );
   const [providerMode, setProviderMode] = useState<ProviderMode>('hybrid');
-  const [credentialStorageMode, setCredentialStorageMode] = useState<CredentialStorageMode>('vault');
+  const [credentialStorageMode, setCredentialStorageMode] = useState<CredentialStorageMode>('local_json');
   const [cloudflareAccountId, setCloudflareAccountId] = useState('');
   const [cloudflareApiToken, setCloudflareApiToken] = useState('');
   const [aiCredentials, setAiCredentials] = useState<Record<AiCredentialKey, string>>({
@@ -348,6 +363,8 @@ export function App() {
         token_present: cloudflareApiToken.length > 0,
         target_database: 'bigdata_db',
         target_table: 'mainsite_posts',
+        persistence_database: 'maestro_db',
+        persistence_secret_store: 'maestro',
         credential_storage_mode: credentialStorageMode,
       },
     });
@@ -438,8 +455,8 @@ export function App() {
         <div className="storage-strip">
           <Database size={18} />
           <div>
-            <strong>JSON local</strong>
-            <span>data/logs/*.ndjson pronto para diagnostico</span>
+            <strong>{storageModeSummaries[credentialStorageMode].title}</strong>
+            <span>{storageModeSummaries[credentialStorageMode].detail}</span>
           </div>
         </div>
       </aside>
@@ -821,6 +838,10 @@ export function App() {
             </div>
 
             <div className="credential-form">
+              <div className="storage-note">
+                <strong>{storageModeSummaries[credentialStorageMode].title}</strong>
+                <span>{storageModeSummaries[credentialStorageMode].detail}</span>
+              </div>
               <div className="field-group">
                 <label htmlFor="cloudflare-account-id">Account ID</label>
                 <input
@@ -841,12 +862,20 @@ export function App() {
                   spellCheck={false}
                   value={cloudflareApiToken}
                   onChange={(event) => setCloudflareApiToken(event.target.value)}
-                  placeholder="armazenamento local criptografado"
+                  placeholder="nunca gravar em logs ou artefatos"
                 />
               </div>
               <div className="target-grid">
                 <div>
-                  <span>Banco</span>
+                  <span>Persistencia</span>
+                  <strong>maestro_db</strong>
+                </div>
+                <div>
+                  <span>Secrets</span>
+                  <strong>Cloudflare Secrets Store</strong>
+                </div>
+                <div>
+                  <span>Publicacao</span>
                   <strong>bigdata_db</strong>
                 </div>
                 <div>

@@ -8,7 +8,7 @@ Primary protocol: Protocolo Editorial v1.10.0.
 
 Maestro Editorial AI is an independent portable Windows editorial workbench. It is not a GUI over cross-review-mcp and does not depend on cross-review-mcp at runtime. It incorporates the proven operating logic of cross-review-mcp into its own codebase: agent capability probes, explicit rounds, parsed statuses, NEEDS_EVIDENCE discipline, strict unanimity, persisted convergence snapshots, and operator escalation.
 
-The app lives under `maestro-app`, runs from any folder, uses no installer as a product requirement, writes no Windows registry keys, and persists durable application state only as JSON/NDJSON files under its own folder.
+The app lives under `maestro-app`, runs from any folder, and uses no installer as a product requirement. Local-first operation persists durable application state as JSON/NDJSON files under its own folder. Operator-approved alternatives can store secrets in Windows user environment variables or move all configuration and secret references to Cloudflare D1 plus Cloudflare Secrets Store.
 
 ## 2. Hard Gates
 
@@ -19,8 +19,8 @@ The app lives under `maestro-app`, runs from any folder, uses no installer as a 
 - `NEEDS_EVIDENCE` blocks publication until the requested evidence is supplied or the item is explicitly escalated and the formal state remains below `publicavel`.
 - The operator may provide evidence, revise scope, abort, or export a non-publicable draft, but cannot silently convert unresolved blockers into `publicavel`.
 - Protocolo Editorial v1.10.0 is the initial planning protocol, but the product must treat editorial protocols as mutable operator-managed documents. Every editorial session pins the active protocol by `protocol_id`, declared version, import timestamp, and content hash at intake. Protocol upgrades are explicit import events with semantic diff.
-- No persistent data outside the app folder except unavoidable reads from existing external CLIs/runtimes.
-- No persistent secrets by default. Optional secrets use an app-local encrypted JSON vault with a user passphrase, not DPAPI in v1.
+- No persistent data outside the app folder unless the operator explicitly chooses Windows env-var hybrid persistence or Cloudflare remote persistence.
+- Configuration persistence has exactly three modes: local JSON for everything, Windows env-var hybrid for tokens/API keys plus JSON for non-secret settings, or Cloudflare remote persistence using D1 `maestro_db` plus Cloudflare Secrets Store. See `docs/configuration-persistence.md`.
 - GitHub synchronization begins from the first implementation, with public release only after maturity. Repository hygiene is therefore a day-zero hard gate: no secrets, API keys, credentials, local session data, raw CLI transcripts, user drafts, evidence caches, or generated exports may be committed.
 - Before any future private-to-public repository flip, run a full pre-cloud exposure audit and full-history secret scan.
 - Work as if GitHub Secret Scanning, Code Scanning, CodeQL Default Setup, Dependabot alerts, Dependabot version updates, GitHub Releases, GitHub Packages, GitHub Pages, and GitHub Sponsors are already enabled. Repository files must be compatible with these checks from the first commit.
@@ -48,7 +48,7 @@ Local prerequisite recheck observed 2026-04-26: Rust is installed through rustup
 
 - `agent-adapters`: Codex CLI, Claude CLI, Gemini CLI process adapters with model pins, timeout policy, redaction, stdout/stderr capture, JSON/JSONL parser hardening, auth probes, update probes, and no silent model downgrade. See `docs/cli-agent-audit.md`.
 - `ai-provider-adapters`: official API/SDK adapters for OpenAI/Codex, Anthropic/Claude, and Google/Gemini with model pins, request budgets, provider request IDs, and transport provenance.
-- `credential-manager`: encrypted local vault, Windows environment variable reader/writer, local JSON fallback warnings, redaction checks, and per-provider credential validation.
+- `credential-manager`: local JSON persistence, Windows environment variable reader/writer for secret-only hybrid mode, Cloudflare D1/Secrets Store remote mode, redaction checks, and per-provider credential validation.
 - `runtime-bootstrapper`: first-run dependency inventory, install/update/configuration plan, operator authorization, background execution, CLI authentication flow, and final readiness report.
 - `capability-probe`: pre-session CLI availability/model probe with failure classes.
 - `editorial-session`: job lifecycle, phase transitions, round creation, formal state tracking.
@@ -67,6 +67,7 @@ Local prerequisite recheck observed 2026-04-26: Rust is installed through rustup
 - `shared-chat-importer`: ChatGPT, Claude, and Gemini shared-link classification, browser-capable extraction, Markdown conversion, and provenance capture.
 - `mainsite-d1-bridge`: guarded read/write/import/export bridge for `bigdata_db.mainsite_posts`, using Cloudflare API as the primary path and `wrangler@latest` only as fallback.
 - `json-store`: event-sourced JSON/NDJSON persistence with locks, atomic writes, checksums, and recovery.
+- `cloudflare-persistence-bridge`: API-first provisioning and synchronization for D1 `maestro_db`, schema migrations, Cloudflare Secrets Store, and secret reference mapping.
 - `exporter`: Markdown, Markdown plus HTML, PDF, MainSite-compatible HTML, internal audit report, and semantic diff.
 
 ## 4.1 Integrated Editor Gate

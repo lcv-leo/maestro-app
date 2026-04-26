@@ -57,11 +57,15 @@ If a provider credential is invalid or underfunded, Maestro must explain which p
 
 ## Storage Options
 
-The operator chooses where credentials live:
+The operator chooses one of the three persistence modes defined in `docs/configuration-persistence.md`:
 
-- Encrypted local vault: preferred for normal Maestro use.
-- Windows environment variables: Maestro may read existing variables or write new user-scope variables after explicit authorization.
-- Local JSON config: allowed only with a strong warning that it contains secrets and must remain ignored, protected, and excluded from support bundles unless manually redacted.
+- Local JSON: all provider credentials and configuration are stored in ignored JSON files.
+- Windows environment variables: provider API keys are stored in user-scope env vars; model pins, route preferences, and non-secret settings remain in JSON.
+- Cloudflare: provider profile settings are stored in D1 `maestro_db`; raw API keys are written to Cloudflare Secrets Store and D1 stores only secret references.
+
+Cloudflare mode caveat:
+
+- Secrets Store values are not read back in plaintext. Local desktop adapters that need raw provider keys must either receive a fresh operator-provided value for that session or route through a Cloudflare-side broker that can consume the secret without exposing it to Maestro.
 
 Suggested user-scope Windows environment variable names:
 

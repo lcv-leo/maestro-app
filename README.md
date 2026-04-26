@@ -4,6 +4,7 @@ Portable Windows editorial workbench for protocol-driven AI drafting, source ver
 
 [![CI](https://github.com/lcv-leo/maestro-app/actions/workflows/ci.yml/badge.svg)](https://github.com/lcv-leo/maestro-app/actions/workflows/ci.yml)
 [![Pages](https://github.com/lcv-leo/maestro-app/actions/workflows/pages.yml/badge.svg)](https://github.com/lcv-leo/maestro-app/actions/workflows/pages.yml)
+[![Release](https://github.com/lcv-leo/maestro-app/actions/workflows/release.yml/badge.svg)](https://github.com/lcv-leo/maestro-app/actions/workflows/release.yml)
 ![CodeQL](https://img.shields.io/badge/CodeQL-default%20setup-enabled-brightgreen)
 ![status](https://img.shields.io/badge/status-planning-yellow)
 ![target](https://img.shields.io/badge/target-Windows%2011%2B-blue)
@@ -36,6 +37,8 @@ Cloudflare account/token configuration, D1 permission validation, and API-first 
 
 Official AI provider API/SDK credentials are planned under `docs/ai-provider-credentials.md`, alongside the existing CLI path.
 
+Configuration persistence supports three modes: local JSON for everything, Windows env-var hybrid for tokens/API keys plus JSON for other settings, and Cloudflare remote persistence through D1 `maestro_db` plus Cloudflare Secrets Store. See `docs/configuration-persistence.md`.
+
 Prompt-to-consensus sessions export separate final text and session minutes. See `docs/editorial-session-workflow.md`.
 
 Shared chat import, Markdown/PDF support, and Cloudflare D1 integration are planned under `docs/import-export-cloudflare.md`.
@@ -51,11 +54,12 @@ Link checking, sanitization, correction proposals, and cross-review escalation a
 - No secrets or API keys in the repository.
 - GitHub Secret Scanning, Code Scanning, CodeQL, and Dependabot are assumed active.
 - CodeQL uses GitHub Default Setup. Advanced Setup requires prior justification and explicit operator authorization.
+- Dependabot alert triage is tracked in `docs/dependabot-alert-triage.md`.
 - Operator-supplied editorial protocols are imported through the app and stored locally, not committed.
 - Public release requires pre-cloud exposure audit and full-history secret scan.
 
 ## Release Planning
 
-GitHub Releases, GitHub Packages, GitHub Pages, and GitHub Sponsors are planned from day zero. See `docs/release-engineering-plan.md`.
+GitHub Releases, GitHub Packages, GitHub Pages, and GitHub Sponsors are planned from day zero. Releases publish a portable Windows ZIP; GitHub Packages publishes a GHCR/OCI automation mirror, not NuGet. See `docs/release-engineering-plan.md`.
 
 Version tags, changelog headings, and release labels use the `vX.X.X` format.

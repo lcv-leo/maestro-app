@@ -1,0 +1,245 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing vX.X.X tag to publish"
+        required: true
+        type: string
+      prerelease:
+        description: "Mark the GitHub Release as a prerelease"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  packages: write
+  attestations: write
+  id-token: write
+
+env:
+  NODE_VERSION: 24
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-windows-portable:
+    name: Build Windows portable bundle
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout release ref
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Setup Rust stable
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Tauri portable executable
+        run: npm run tauri -- build --ci --no-bundle
+
+      - name: Create portable release archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = $env:RELEASE_TAG
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Release tag must use vX.X.X, got '$tag'."
+          }
+
+          $binary = "src-tauri\target\release\maestro-editorial-ai.exe"
+          if (!(Test-Path $binary)) {
+            throw "Expected portable executable was not produced at $binary."
+          }
+
+          $releaseRoot = "release"
+          $stage = Join-Path $releaseRoot "Maestro-Editorial-AI-$tag-windows-x64-portable"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          Copy-Item $binary (Join-Path $stage "Maestro Editorial AI.exe")
+          Copy-Item README.md $stage
+          Copy-Item LICENSE $stage
+          Copy-Item CHANGELOG.md $stage
+
+          @"
+          Maestro Editorial AI $tag
+
+          Portable Windows 11+ bundle.
+          Run "Maestro Editorial AI.exe" from this folder.
+
+          This archive is the primary user-facing distribution format.
+          It is intentionally not an installer and does not require a NuGet package.
+          Runtime data is written under local app folders such as data/logs.
+          "@ | Set-Content -Path (Join-Path $stage "PORTABLE-RUN.txt") -Encoding UTF8
+
+          $zip = Join-Path $releaseRoot "maestro-editorial-ai-$tag-windows-x64-portable.zip"
+          Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip -Force
+
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $zipName = Split-Path $zip -Leaf
+          "$hash  $zipName" | Set-Content -Path (Join-Path $releaseRoot "SHA256SUMS.txt") -Encoding ascii
+
+      - name: Upload portable archive artifact
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: maestro-windows-portable-${{ env.RELEASE_TAG }}
+          path: |
+            release/*.zip
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Attest portable archive
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: release/*.zip
+
+  publish-github-release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: build-windows-portable
+
+    steps:
+      - name: Download portable archive
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.1
+        with:
+          name: maestro-windows-portable-${{ env.RELEASE_TAG }}
+          path: release
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${RELEASE_TAG}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must use vX.X.X, got '$tag'." >&2
+            exit 1
+          fi
+
+          cat > RELEASE_NOTES.md <<NOTES
+          Maestro Editorial AI ${tag}
+
+          Primary distribution: portable Windows 11+ ZIP archive.
+
+          This release does not publish a NuGet package. GitHub Packages is used as an optional GHCR/OCI mirror for automation, while GitHub Releases remains the human-facing download channel.
+
+          Verify the ZIP with SHA256SUMS.txt before running it.
+          NOTES
+
+          is_prerelease="false"
+          if [[ "$PRERELEASE" == "true" || "$tag" =~ ^v0\. ]]; then
+            is_prerelease="true"
+          fi
+
+          assets=(release/*.zip release/SHA256SUMS.txt)
+          for asset in "${assets[@]}"; do
+            if [[ ! -f "$asset" ]]; then
+              echo "Missing release asset: $asset" >&2
+              exit 1
+            fi
+          done
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            args=(release create "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --title "Maestro Editorial AI $tag" --notes-file RELEASE_NOTES.md)
+            if [[ "$is_prerelease" == "true" ]]; then
+              args+=(--prerelease --latest=false)
+            else
+              args+=(--latest)
+            fi
+            gh "${args[@]}"
+          fi
+
+  publish-github-package:
+    name: Publish GitHub Package
+    runs-on: ubuntu-latest
+    needs: publish-github-release
+
+    steps:
+      - name: Download portable archive
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.1
+        with:
+          name: maestro-windows-portable-${{ env.RELEASE_TAG }}
+          path: release
+
+      - name: Publish GHCR OCI mirror
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${RELEASE_TAG}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must use vX.X.X, got '$tag'." >&2
+            exit 1
+          fi
+
+          owner="$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${owner}/maestro-app-windows-portable"
+
+          mkdir -p oci-package
+          test -f release/SHA256SUMS.txt
+          test -n "$(find release -maxdepth 1 -type f -name '*.zip' -print -quit)"
+          cp release/*.zip release/SHA256SUMS.txt oci-package/
+
+          cat > oci-package/package-metadata.json <<JSON
+          {
+            "name": "Maestro Editorial AI Windows portable bundle",
+            "tag": "${tag}",
+            "repository": "https://github.com/${GITHUB_REPOSITORY}",
+            "distribution": "github-release-primary-ghcr-oci-mirror",
+            "nuget": false
+          }
+          JSON
+
+          cat > oci-package/README.txt <<README
+          Maestro Editorial AI ${tag}
+
+          This GitHub Package is an OCI mirror of the Windows portable ZIP published in GitHub Releases.
+          Human users should download the ZIP from GitHub Releases.
+          README
+
+          cat > oci-package/Dockerfile <<DOCKERFILE
+          FROM scratch
+          LABEL org.opencontainers.image.title="Maestro Editorial AI Windows Portable Bundle"
+          LABEL org.opencontainers.image.description="OCI mirror of the GitHub Release portable Windows ZIP."
+          LABEL org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}"
+          LABEL org.opencontainers.image.version="${tag}"
+          COPY . /
+          DOCKERFILE
+
+          echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          image_args=(-t "${image}:${tag}")
+          if [[ "$PRERELEASE" != "true" && ! "$tag" =~ ^v0\. ]]; then
+            image_args+=(-t "${image}:latest")
+          fi
+          docker build "${image_args[@]}" oci-package
+          docker push "${image}:${tag}"
+          if [[ "$PRERELEASE" != "true" && ! "$tag" =~ ^v0\. ]]; then
+            docker push "${image}:latest"
+          fi

@@ -4,6 +4,7 @@ dist/
 build/
 out/
 target/
+release/
 .turbo/
 .vite/
 coverage/

@@ -34,17 +34,28 @@ Release readiness requires:
 - Annotated tag.
 - GitHub Release notes that identify installer status, Windows 11+ target, portable layout, checksums, and known limitations.
 
+Distribution policy:
+
+- GitHub Releases is the primary human-facing distribution channel.
+- Windows releases are ZIP archives containing the portable executable, license, README, changelog, and checksum.
+- The release workflow uses `tauri build --no-bundle`; it does not create an MSI, NSIS installer, or NuGet package.
+- Releases are created only from `vX.X.X` tags or an explicit manual workflow dispatch pointing to an existing `vX.X.X` tag.
+- `v0.X.X` releases are marked as GitHub prereleases and are not promoted as `latest`.
+- Portable archives receive GitHub artifact attestation when the release workflow runs.
+
 ## GitHub Packages
 
-GitHub Packages is planned but disabled until package identity and privacy posture are finalized.
+GitHub Packages is enabled through GHCR/OCI publishing in `.github/workflows/release.yml`.
 
-Candidate package surfaces:
+Package policy:
 
-- An npm package for shared schemas or CLI helpers.
-- A package containing reusable editorial protocol schemas.
-- Release artifacts attached to GitHub Releases for the Windows app itself.
+- No NuGet package is used for Maestro's Windows app distribution.
+- The package is an OCI mirror of the same Windows portable ZIP published to GitHub Releases.
+- The package name is `ghcr.io/lcv-leo/maestro-app-windows-portable`.
+- Human users should use GitHub Releases; GitHub Packages is for automation, provenance, and machine retrieval.
+- GHCR `latest` is reserved for stable `v1.0.0+` releases.
 
-No package publishing workflow should be enabled until token handling and package names are explicitly approved.
+Future package surfaces, such as npm packages for shared schemas, require a separate approval before publishing.
 
 ## GitHub Sponsors
 

@@ -867,6 +867,31 @@ button {
   gap: 10px;
 }
 
+.storage-note {
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.storage-note strong,
+.storage-note span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.storage-note strong {
+  color: #202124;
+  font-size: 13px;
+}
+
+.storage-note span {
+  color: #5f6368;
+  font-size: 12px;
+}
+
 .target-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(120px, 1fr));

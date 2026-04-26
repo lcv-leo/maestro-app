@@ -29,7 +29,7 @@ struct LogWriteResult {
 }
 
 #[tauri::command]
-fn runtime_profile(app: tauri::AppHandle) -> RuntimeProfile {
+fn runtime_profile(app: tauri::AppHandle<tauri::Wry>) -> RuntimeProfile {
     RuntimeProfile {
         app_name: "Maestro Editorial AI",
         storage_policy: "app-folder-json-only",
@@ -39,7 +39,10 @@ fn runtime_profile(app: tauri::AppHandle) -> RuntimeProfile {
 }
 
 #[tauri::command]
-fn write_log_event(app: tauri::AppHandle, event: LogEventInput) -> Result<LogWriteResult, String> {
+fn write_log_event(
+    app: tauri::AppHandle<tauri::Wry>,
+    event: LogEventInput,
+) -> Result<LogWriteResult, String> {
     let dir = logs_dir(&app);
     fs::create_dir_all(&dir).map_err(|error| format!("failed to create log dir: {error}"))?;
 
@@ -72,7 +75,7 @@ fn write_log_event(app: tauri::AppHandle, event: LogEventInput) -> Result<LogWri
 }
 
 #[tauri::command]
-fn diagnostics_snapshot(app: tauri::AppHandle) -> Value {
+fn diagnostics_snapshot(app: tauri::AppHandle<tauri::Wry>) -> Value {
     let dir = logs_dir(&app);
     let files = fs::read_dir(&dir)
         .ok()
@@ -98,7 +101,7 @@ fn diagnostics_snapshot(app: tauri::AppHandle) -> Value {
     })
 }
 
-fn app_root(app: &tauri::AppHandle) -> PathBuf {
+fn app_root(app: &tauri::AppHandle<tauri::Wry>) -> PathBuf {
     let _ = app;
 
     std::env::current_exe()
@@ -108,7 +111,7 @@ fn app_root(app: &tauri::AppHandle) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn logs_dir(app: &tauri::AppHandle) -> PathBuf {
+fn logs_dir(app: &tauri::AppHandle<tauri::Wry>) -> PathBuf {
     app_root(app).join("data").join("logs")
 }
 

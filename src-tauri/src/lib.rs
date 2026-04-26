@@ -1,11 +1,14 @@
 use chrono::Utc;
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    collections::BTreeSet,
     fs::{self, OpenOptions},
     io::Write,
-    path::PathBuf,
-    process::{self, Command},
+    path::{Path, PathBuf},
+    process::{self, Command, Output},
+    time::Duration,
 };
 use tauri::Manager;
 
@@ -32,8 +35,32 @@ struct BootstrapConfig {
 struct CloudflareEnvSnapshot {
     account_id: Option<String>,
     account_id_env_var: Option<String>,
+    account_id_env_scope: Option<String>,
     api_token_present: bool,
     api_token_env_var: Option<String>,
+    api_token_env_scope: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CloudflareProbeRequest {
+    account_id: String,
+    api_token: Option<String>,
+    api_token_env_var: String,
+    persistence_database: String,
+    publication_database: String,
+    secret_store: String,
+}
+
+#[derive(Serialize)]
+struct CloudflareProbeRow {
+    label: String,
+    value: String,
+    tone: String,
+}
+
+#[derive(Serialize)]
+struct CloudflareProbeResult {
+    rows: Vec<CloudflareProbeRow>,
 }
 
 impl Default for BootstrapConfig {
@@ -228,11 +255,13 @@ fn cloudflare_env_snapshot() -> CloudflareEnvSnapshot {
     CloudflareEnvSnapshot {
         account_id: account_id
             .as_ref()
-            .map(|(_, value)| sanitize_text(value.trim(), 160))
+            .map(|(_, _, value)| sanitize_text(value.trim(), 160))
             .filter(|value| !value.is_empty()),
-        account_id_env_var: account_id.map(|(name, _)| name),
+        account_id_env_var: account_id.as_ref().map(|(name, _, _)| name.clone()),
+        account_id_env_scope: account_id.map(|(_, scope, _)| scope),
         api_token_present: api_token.is_some(),
-        api_token_env_var: api_token.map(|(name, _)| name),
+        api_token_env_var: api_token.as_ref().map(|(name, _, _)| name.clone()),
+        api_token_env_scope: api_token.map(|(_, scope, _)| scope),
     }
 }
 
@@ -277,6 +306,42 @@ fn dependency_preflight() -> Value {
             }
         ]
     })
+}
+
+#[tauri::command]
+fn verify_cloudflare_credentials(
+    log_session: tauri::State<LogSession>,
+    request: CloudflareProbeRequest,
+) -> CloudflareProbeResult {
+    let result = run_cloudflare_probe(&request);
+    let _ = write_log_record(
+        &log_session,
+        LogEventInput {
+            level: if result
+                .rows
+                .iter()
+                .any(|row| row.tone == "error" || row.tone == "blocked")
+            {
+                "warn".to_string()
+            } else {
+                "info".to_string()
+            },
+            category: "settings.cloudflare.verify_completed".to_string(),
+            message: "Cloudflare credential validation completed".to_string(),
+            context: Some(json!({
+                "account_id_present": !request.account_id.trim().is_empty(),
+                "token_source": token_source_label(&request),
+                "persistence_database": sanitize_short(&request.persistence_database, 80),
+                "publication_database": sanitize_short(&request.publication_database, 80),
+                "secret_store": sanitize_short(&request.secret_store, 80),
+                "rows": result.rows.iter().map(|row| json!({
+                    "label": row.label,
+                    "tone": row.tone
+                })).collect::<Vec<_>>()
+            })),
+        },
+    );
+    result
 }
 
 fn app_root() -> PathBuf {
@@ -334,18 +399,407 @@ fn normalize_cloudflare_token_source(value: &str) -> &'static str {
     }
 }
 
-fn first_env_value(candidates: &[&str]) -> Option<(String, String)> {
+fn first_env_value(candidates: &[&str]) -> Option<(String, String, String)> {
     candidates.iter().find_map(|name| {
-        std::env::var(name)
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .map(|value| ((*name).to_string(), value))
+        env_value_with_scope(name).map(|(scope, value)| ((*name).to_string(), scope, value))
     })
 }
 
+fn env_value_with_scope(name: &str) -> Option<(String, String)> {
+    if let Some(value) = std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return Some(("process".to_string(), value));
+    }
+
+    #[cfg(windows)]
+    {
+        if let Some(value) = windows_registry_env_value(r"HKCU\Environment", name) {
+            return Some(("user".to_string(), value));
+        }
+
+        if let Some(value) = windows_registry_env_value(
+            r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+            name,
+        ) {
+            return Some(("machine".to_string(), value));
+        }
+    }
+
+    None
+}
+
+#[cfg(windows)]
+fn windows_registry_env_value(key: &str, name: &str) -> Option<String> {
+    let output = Command::new("reg.exe")
+        .args(["query", key, "/v", name])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.lines().find_map(|line| {
+        let trimmed = line.trim();
+        if !trimmed.starts_with(name) {
+            return None;
+        }
+        let parts = trimmed.split_whitespace().collect::<Vec<_>>();
+        let type_index = parts.iter().position(|part| part.starts_with("REG_"))?;
+        let value = parts
+            .iter()
+            .skip(type_index + 1)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim()
+            .to_string();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value)
+        }
+    })
+}
+
+fn token_source_label(request: &CloudflareProbeRequest) -> String {
+    if request
+        .api_token
+        .as_ref()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
+        "ui_session_field".to_string()
+    } else if !request.api_token_env_var.trim().is_empty() {
+        format!("env:{}", sanitize_short(&request.api_token_env_var, 80))
+    } else {
+        "env:auto".to_string()
+    }
+}
+
+fn token_from_probe_request(request: &CloudflareProbeRequest) -> Option<(String, String)> {
+    if let Some(token) = request
+        .api_token
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return Some(("campo desta sessao".to_string(), token));
+    }
+
+    let requested_env = request.api_token_env_var.trim();
+    if !requested_env.is_empty() {
+        if let Some((scope, value)) = env_value_with_scope(requested_env) {
+            return Some((format!("{requested_env} ({scope})"), value));
+        }
+    }
+
+    first_env_value(&[
+        "MAESTRO_CLOUDFLARE_API_TOKEN",
+        "CLOUDFLARE_API_TOKEN",
+        "CF_API_TOKEN",
+    ])
+    .map(|(name, _, value)| (name, value))
+}
+
+fn run_cloudflare_probe(request: &CloudflareProbeRequest) -> CloudflareProbeResult {
+    let token = token_from_probe_request(request);
+    let account_id = sanitize_short(request.account_id.trim(), 80);
+    let persistence_database = sanitize_short(&request.persistence_database, 80);
+    let publication_database = sanitize_short(&request.publication_database, 80);
+    let secret_store = sanitize_short(&request.secret_store, 80);
+    let mut rows = Vec::new();
+
+    let Some((token_source, token_value)) = token else {
+        return CloudflareProbeResult {
+            rows: vec![
+                probe_row(
+                    "Token ativo",
+                    "ausente: informe token no campo ou em env var",
+                    "blocked",
+                ),
+                probe_row("Conta acessivel", "nao executado sem token", "blocked"),
+                probe_row("D1 Read/Edit", "nao executado sem token", "blocked"),
+                probe_row("Secrets Store", "nao executado sem token", "blocked"),
+            ],
+        };
+    };
+
+    if token_value.starts_with("cfat_") && account_id.is_empty() {
+        return CloudflareProbeResult {
+            rows: vec![
+                probe_row(
+                    "Token ativo",
+                    "account token exige Account ID para verificacao",
+                    "blocked",
+                ),
+                probe_row("Conta acessivel", "account id ausente", "blocked"),
+                probe_row("D1 Read/Edit", "nao executado sem account id", "blocked"),
+                probe_row("Secrets Store", "nao executado sem account id", "blocked"),
+            ],
+        };
+    }
+
+    let client = match Client::builder()
+        .timeout(Duration::from_secs(20))
+        .user_agent(format!(
+            "Maestro Editorial AI/{}",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return CloudflareProbeResult {
+                rows: vec![
+                    probe_row(
+                        "Token ativo",
+                        format!("cliente HTTP falhou: {error}"),
+                        "error",
+                    ),
+                    probe_row("Conta acessivel", "nao executado", "blocked"),
+                    probe_row("D1 Read/Edit", "nao executado", "blocked"),
+                    probe_row("Secrets Store", "nao executado", "blocked"),
+                ],
+            };
+        }
+    };
+
+    let verify_path = cloudflare_verify_path(&token_value, &account_id);
+    match cloudflare_get(&client, &token_value, &verify_path) {
+        Ok(value) => {
+            let status = value
+                .get("result")
+                .and_then(|result| result.get("status"))
+                .and_then(Value::as_str)
+                .unwrap_or("status desconhecido");
+            if status == "active" {
+                rows.push(probe_row(
+                    "Token ativo",
+                    format!(
+                        "active via {token_source}; {}",
+                        cloudflare_token_kind(&token_value)
+                    ),
+                    "ok",
+                ));
+            } else {
+                rows.push(probe_row(
+                    "Token ativo",
+                    format!("token retornou status {status}"),
+                    "error",
+                ));
+                rows.push(probe_row("Conta acessivel", "nao executado", "blocked"));
+                rows.push(probe_row("D1 Read/Edit", "nao executado", "blocked"));
+                rows.push(probe_row("Secrets Store", "nao executado", "blocked"));
+                return CloudflareProbeResult { rows };
+            }
+        }
+        Err(error) => {
+            rows.push(probe_row("Token ativo", error, "error"));
+            rows.push(probe_row("Conta acessivel", "nao executado", "blocked"));
+            rows.push(probe_row("D1 Read/Edit", "nao executado", "blocked"));
+            rows.push(probe_row("Secrets Store", "nao executado", "blocked"));
+            return CloudflareProbeResult { rows };
+        }
+    }
+
+    if account_id.is_empty() {
+        rows.push(probe_row(
+            "Conta acessivel",
+            "account id ausente",
+            "blocked",
+        ));
+        rows.push(probe_row(
+            "D1 Read/Edit",
+            "nao executado sem account id",
+            "blocked",
+        ));
+        rows.push(probe_row(
+            "Secrets Store",
+            "nao executado sem account id",
+            "blocked",
+        ));
+        return CloudflareProbeResult { rows };
+    }
+
+    let account_path = format!("/accounts/{account_id}");
+    match cloudflare_get(&client, &token_value, &account_path) {
+        Ok(_) => rows.push(probe_row("Conta acessivel", "account id acessivel", "ok")),
+        Err(error) => {
+            rows.push(probe_row("Conta acessivel", error, "error"));
+            rows.push(probe_row("D1 Read/Edit", "nao executado", "blocked"));
+            rows.push(probe_row("Secrets Store", "nao executado", "blocked"));
+            return CloudflareProbeResult { rows };
+        }
+    }
+
+    let d1_path = format!("/accounts/{account_id}/d1/database");
+    match cloudflare_get(&client, &token_value, &d1_path) {
+        Ok(value) => {
+            let names = cloudflare_result_names(&value);
+            let mut missing = Vec::new();
+            if !persistence_database.is_empty() && !names.contains(&persistence_database) {
+                missing.push(persistence_database.clone());
+            }
+            if !publication_database.is_empty() && !names.contains(&publication_database) {
+                missing.push(publication_database.clone());
+            }
+
+            if missing.is_empty() {
+                rows.push(probe_row(
+                    "D1 Read/Edit",
+                    format!("{persistence_database} + {publication_database} acessiveis"),
+                    "ok",
+                ));
+            } else {
+                rows.push(probe_row(
+                    "D1 Read/Edit",
+                    format!("endpoint D1 acessivel; ausente: {}", missing.join(", ")),
+                    "warn",
+                ));
+            }
+        }
+        Err(error) => rows.push(probe_row("D1 Read/Edit", error, "error")),
+    }
+
+    let stores_path = format!("/accounts/{account_id}/secrets_store/stores");
+    match cloudflare_get(&client, &token_value, &stores_path) {
+        Ok(value) => {
+            let stores = cloudflare_result_names(&value);
+            if secret_store.is_empty() {
+                rows.push(probe_row("Secrets Store", "endpoint acessivel", "ok"));
+            } else if stores.contains(&secret_store) {
+                rows.push(probe_row(
+                    "Secrets Store",
+                    format!("store {secret_store} acessivel"),
+                    "ok",
+                ));
+            } else {
+                rows.push(probe_row(
+                    "Secrets Store",
+                    format!("endpoint acessivel; store {secret_store} ausente"),
+                    "warn",
+                ));
+            }
+        }
+        Err(error) => rows.push(probe_row("Secrets Store", error, "error")),
+    }
+
+    CloudflareProbeResult { rows }
+}
+
+fn cloudflare_get(client: &Client, token: &str, path: &str) -> Result<Value, String> {
+    let url = format!("https://api.cloudflare.com/client/v4{path}");
+    let response = client
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .map_err(|error| format!("falha HTTP: {error}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|error| format!("falha ao ler resposta Cloudflare: {error}"))?;
+    let value: Value = serde_json::from_str(&body).map_err(|error| {
+        format!(
+            "resposta Cloudflare invalida (HTTP {}): {}",
+            status.as_u16(),
+            sanitize_text(&error.to_string(), 120)
+        )
+    })?;
+    let success = value
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| status.is_success());
+
+    if status.is_success() && success {
+        Ok(value)
+    } else {
+        Err(cloudflare_error_summary(status.as_u16(), &value))
+    }
+}
+
+fn cloudflare_verify_path(token: &str, account_id: &str) -> String {
+    if token.starts_with("cfat_") && !account_id.is_empty() {
+        format!("/accounts/{account_id}/tokens/verify")
+    } else {
+        "/user/tokens/verify".to_string()
+    }
+}
+
+fn cloudflare_token_kind(token: &str) -> &'static str {
+    if token.starts_with("cfat_") {
+        "account token"
+    } else if token.starts_with("cfut_") {
+        "user token"
+    } else if token.starts_with("cfk_") {
+        "user api key"
+    } else {
+        "legacy token format"
+    }
+}
+
+fn cloudflare_error_summary(status: u16, value: &Value) -> String {
+    let errors = value
+        .get("errors")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    item.get("message")
+                        .and_then(Value::as_str)
+                        .map(|message| sanitize_text(message, 180))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if errors.is_empty() {
+        format!("Cloudflare HTTP {status}")
+    } else {
+        format!("Cloudflare HTTP {status}: {}", errors.join("; "))
+    }
+}
+
+fn cloudflare_result_names(value: &Value) -> BTreeSet<String> {
+    value
+        .get("result")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flat_map(|items| items.iter())
+        .flat_map(|item| {
+            ["name", "id", "uuid"]
+                .into_iter()
+                .filter_map(|key| item.get(key).and_then(Value::as_str))
+        })
+        .map(|name| name.to_string())
+        .collect()
+}
+
+fn probe_row(
+    label: impl Into<String>,
+    value: impl Into<String>,
+    tone: impl Into<String>,
+) -> CloudflareProbeRow {
+    CloudflareProbeRow {
+        label: sanitize_text(&label.into(), 80),
+        value: sanitize_text(&value.into(), 240),
+        tone: sanitize_short(&tone.into(), 16),
+    }
+}
+
 fn command_check(label: &str, command: &str, args: &[&str]) -> Value {
-    match Command::new(command).args(args).output() {
+    let resolved = resolve_command(command);
+    let output = if let Some(path) = resolved.as_ref() {
+        run_resolved_command(path, args)
+    } else {
+        Command::new(command).args(args).output()
+    };
+
+    match output {
         Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -355,26 +809,142 @@ fn command_check(label: &str, command: &str, args: &[&str]) -> Value {
                 .find(|line| !line.trim().is_empty())
                 .unwrap_or("detectado")
                 .trim();
+            let resolved_note = resolved
+                .as_ref()
+                .map(|path| format!(" via {}", path.to_string_lossy()))
+                .unwrap_or_default();
             json!({
                 "label": label,
-                "value": sanitize_text(detail, 160),
+                "value": sanitize_text(&format!("{detail}{resolved_note}"), 220),
                 "tone": "ok"
             })
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let detail = stderr
+                .lines()
+                .chain(stdout.lines())
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("comando retornou falha")
+                .trim();
             json!({
                 "label": label,
-                "value": sanitize_text(stderr.trim(), 160),
+                "value": sanitize_text(detail, 220),
                 "tone": "warn"
             })
         }
-        Err(_) => json!({
+        Err(error) => json!({
             "label": label,
-            "value": "nao encontrado no PATH",
+            "value": sanitize_text(&format!("nao encontrado/executado: {error}"), 220),
             "tone": "blocked"
         }),
     }
+}
+
+fn resolve_command(command: &str) -> Option<PathBuf> {
+    let command_path = Path::new(command);
+    if command_path.is_absolute() || command.contains('\\') || command.contains('/') {
+        return command_candidate_paths(command_path)
+            .into_iter()
+            .find(|path| path.is_file());
+    }
+
+    command_search_dirs()
+        .into_iter()
+        .flat_map(|dir| command_candidate_paths(&dir.join(command)))
+        .find(|path| path.is_file())
+}
+
+fn command_candidate_paths(path: &Path) -> Vec<PathBuf> {
+    if path.extension().is_some() {
+        return vec![path.to_path_buf()];
+    }
+
+    #[cfg(windows)]
+    {
+        ["exe", "cmd", "bat", "ps1", ""]
+            .into_iter()
+            .map(|ext| {
+                if ext.is_empty() {
+                    path.to_path_buf()
+                } else {
+                    path.with_extension(ext)
+                }
+            })
+            .collect()
+    }
+
+    #[cfg(not(windows))]
+    {
+        vec![path.to_path_buf()]
+    }
+}
+
+fn command_search_dirs() -> Vec<PathBuf> {
+    let mut dirs = std::env::var_os("PATH")
+        .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    #[cfg(windows)]
+    {
+        if let Some(user_profile) = std::env::var_os("USERPROFILE") {
+            let user_profile = PathBuf::from(user_profile);
+            dirs.push(user_profile.join(".cargo").join("bin"));
+        }
+        if let Some(app_data) = std::env::var_os("APPDATA") {
+            dirs.push(PathBuf::from(app_data).join("npm"));
+        }
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            let local_app_data = PathBuf::from(local_app_data);
+            dirs.push(local_app_data.join("Programs").join("nodejs"));
+            dirs.push(
+                local_app_data
+                    .join("Microsoft")
+                    .join("WinGet")
+                    .join("Links"),
+            );
+        }
+        dirs.push(PathBuf::from(r"C:\Program Files\nodejs"));
+        dirs.push(PathBuf::from(r"C:\nvm4w\nodejs"));
+        dirs.push(PathBuf::from(r"C:\Program Files\GitHub CLI"));
+    }
+
+    let mut seen = BTreeSet::new();
+    dirs.into_iter()
+        .filter(|dir| seen.insert(dir.to_string_lossy().to_ascii_lowercase()))
+        .collect()
+}
+
+fn run_resolved_command(path: &Path, args: &[&str]) -> std::io::Result<Output> {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    #[cfg(windows)]
+    {
+        if extension == "cmd" || extension == "bat" {
+            return Command::new(
+                std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string()),
+            )
+            .arg("/C")
+            .arg(path)
+            .args(args)
+            .output();
+        }
+
+        if extension == "ps1" {
+            return Command::new("powershell.exe")
+                .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+                .arg(path)
+                .args(args)
+                .output();
+        }
+    }
+
+    Command::new(path).args(args).output()
 }
 
 fn sanitize_short(value: &str, max_len: usize) -> String {
@@ -437,6 +1007,8 @@ fn redact_secrets(value: &str) -> String {
                 || part.starts_with("sk-ant-")
                 || part.starts_with("sk_live_")
                 || part.starts_with("cfut_")
+                || part.starts_with("cfat_")
+                || part.starts_with("cfk_")
                 || part.starts_with("xoxb-")
                 || part.starts_with("xoxa-")
                 || part.starts_with("xoxp-")
@@ -474,6 +1046,33 @@ fn looks_like_aws_access_key(part: &str) -> bool {
             .all(|character| character.is_ascii_uppercase() || character.is_ascii_digit())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routes_account_owned_tokens_to_account_verify_endpoint() {
+        assert_eq!(
+            cloudflare_verify_path("cfat_example", "d65b76a0e64c3791e932edd9163b1c71"),
+            "/accounts/d65b76a0e64c3791e932edd9163b1c71/tokens/verify"
+        );
+    }
+
+    #[test]
+    fn routes_user_tokens_to_user_verify_endpoint() {
+        assert_eq!(
+            cloudflare_verify_path("cfut_example", "d65b76a0e64c3791e932edd9163b1c71"),
+            "/user/tokens/verify"
+        );
+    }
+
+    #[test]
+    fn redacts_cloudflare_token_prefixes() {
+        let text = redact_secrets("cfat_secret cfut_secret cfk_secret");
+        assert_eq!(text, "<redacted> <redacted> <redacted>");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -503,7 +1102,8 @@ pub fn run() {
             read_bootstrap_config,
             write_bootstrap_config,
             cloudflare_env_snapshot,
-            dependency_preflight
+            dependency_preflight,
+            verify_cloudflare_credentials
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Maestro Editorial AI");

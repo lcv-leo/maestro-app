@@ -1139,9 +1139,13 @@ button:disabled {
   color: #16a34a;
 }
 
+.check-row.warn svg {
+  color: #d97706;
+}
+
 .check-row.blocked svg,
 .check-row.error svg {
-  color: #d97706;
+  color: #dc2626;
 }
 
 .credential-row {

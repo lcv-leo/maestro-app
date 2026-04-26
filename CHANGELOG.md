@@ -4,6 +4,14 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.2.1] - 2026-04-26
+
+- Fixed Windows CLI preflight detection for npm-style `.cmd` shims and known user install paths so Codex, Gemini, npm, and similar CLIs are not incorrectly shown as missing when they are installed.
+- Added real Cloudflare credential validation from the settings screen, including token verification, account reachability, D1 database listing, and Secrets Store reachability without logging raw tokens.
+- Fixed Cloudflare token verification for account-owned `cfat_` tokens by using `/accounts/{account_id}/tokens/verify`; user tokens continue to use `/user/tokens/verify`.
+- Added Cloudflare env-var scope reporting so the UI distinguishes process, user, and machine environment sources.
+- Expanded native, frontend, and CI secret redaction/detection to include Cloudflare account-token and global-key prefixes.
+- Updated release engineering policy and end-user instructions to treat beta as a tag suffix (`vX.X.X-betaN`) instead of GitHub prerelease mode.
 - Fixed the repository hygiene secret-shape scanner to avoid false positives on normal identifiers such as `cloudflare_persistence_database` while preserving common token/key detection.
 - Fixed GitHub Release note generation so Markdown code spans are not treated as shell command substitutions and existing releases receive refreshed notes when the release workflow is rerun.
 - Removed GitHub prerelease publishing entirely: beta builds must use explicit `vX.X.X-betaN` tags while still being published as normal GitHub Releases.

@@ -40,7 +40,7 @@ jobs:
       - name: Detect common secret-shaped strings
         shell: bash
         run: |
-          secret_pattern='(^|[^A-Za-z0-9_])(sk-[A-Za-z0-9_-]{20,}|sk-ant-[A-Za-z0-9_-]{20,}|sk_live_[A-Za-z0-9_-]{20,}|cfut_[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z_-]{20,}|re_[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16})'
+          secret_pattern='(^|[^A-Za-z0-9_])(sk-[A-Za-z0-9_-]{20,}|sk-ant-[A-Za-z0-9_-]{20,}|sk_live_[A-Za-z0-9_-]{20,}|cfut_[A-Za-z0-9_-]{20,}|cfat_[A-Za-z0-9_-]{20,}|cfk_[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z_-]{20,}|re_[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16})'
           if grep -RInE "${secret_pattern}" . \
             --exclude-dir=.git \
             --exclude-dir=node_modules \

@@ -19,6 +19,8 @@ const secretValuePattern = new RegExp(
     'sk-ant-[A-Za-z0-9_-]{8,}',
     'sk_live_[A-Za-z0-9_-]{8,}',
     'cfut_[A-Za-z0-9_-]{8,}',
+    'cfat_[A-Za-z0-9_-]{8,}',
+    'cfk_[A-Za-z0-9_-]{8,}',
     'xox[baprs]-[A-Za-z0-9-]{8,}',
     'gh[pousr]_[A-Za-z0-9_]{8,}',
     'AI' + 'za[0-9A-Za-z_-]{8,}',

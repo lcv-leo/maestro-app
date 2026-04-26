@@ -21,7 +21,7 @@ The API token field must be masked, never logged, never exported, and never comm
 When the operator enters a token, Maestro must validate it before enabling Cloudflare operations:
 
 1. Check token syntax and redaction behavior locally.
-2. Call Cloudflare's `/user/tokens/verify` endpoint.
+2. Detect token type before verification. User-scoped tokens such as `cfut_...` use `/user/tokens/verify`; account-owned tokens such as `cfat_...` use `/accounts/{account_id}/tokens/verify`.
 3. Confirm the returned token status is active.
 4. Confirm the configured account is reachable.
 5. Confirm D1 access by listing or resolving the target D1 database.
@@ -74,6 +74,8 @@ Suggested environment variable names:
 - `MAESTRO_CLOUDFLARE_API_TOKEN`
 - `MAESTRO_CLOUDFLARE_D1_DATABASE`
 - `MAESTRO_CLOUDFLARE_D1_TABLE`
+
+Maestro must report whether the env var was found in the process, user, or machine scope. A token found by name is not considered valid until Cloudflare confirms it through the correct verification endpoint for its token type.
 
 Never commit `.env`, local JSON credential files, raw tokens, or generated support bundles containing secrets. Never include the raw token in logs, support bundles, session minutes, Markdown exports, cross-review prompts, or shell command arguments when an environment or stdin handoff is available.
 

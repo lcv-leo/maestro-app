@@ -39,8 +39,8 @@ Distribution policy:
 - GitHub Releases is the primary human-facing distribution channel.
 - Windows releases are ZIP archives containing the portable executable, license, README, changelog, and checksum.
 - The release workflow uses `tauri build --no-bundle`; it does not create an MSI, NSIS installer, or NuGet package.
-- Releases are created only from `vX.X.X` tags or an explicit manual workflow dispatch pointing to an existing `vX.X.X` tag.
-- `v0.X.X` releases are marked as GitHub prereleases and are not promoted as `latest`.
+- Releases are created only from `vX.X.X` or explicit beta `vX.X.X-betaN` tags, or from a manual workflow dispatch pointing to one of those existing tags.
+- GitHub's prerelease flag is not used. Beta status belongs in the tag itself, for example `v0.3.0-beta1`, and is still published as a normal GitHub Release.
 - Portable archives receive GitHub artifact attestation when the release workflow runs.
 
 ## GitHub Packages
@@ -53,7 +53,7 @@ Package policy:
 - The package is an OCI mirror of the same Windows portable ZIP published to GitHub Releases.
 - The package name is `ghcr.io/lcv-leo/maestro-app-windows-portable`.
 - Human users should use GitHub Releases; GitHub Packages is for automation, provenance, and machine retrieval.
-- GHCR `latest` is reserved for stable `v1.0.0+` releases.
+- GHCR publishes the exact tag and `latest` for the version emitted by the release workflow.
 
 Future package surfaces, such as npm packages for shared schemas, require a separate approval before publishing.
 

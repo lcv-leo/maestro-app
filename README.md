@@ -15,7 +15,7 @@ Portable Windows editorial workbench for protocol-driven AI drafting, source ver
 
 Status: foundation build with live bootstrap, diagnostics, navigation, and preflight; editorial agent orchestration is still under implementation.
 
-Current project version: `v0.2.0`.
+Current project version: `v0.2.1`.
 
 Maestro is independent from `cross-review-mcp`; it incorporates the same strict convergence discipline in its own application logic. It is designed to run from a folder, keep runtime data out of Git, and store operator protocols, drafts, evidence, and sessions locally under ignored runtime paths.
 

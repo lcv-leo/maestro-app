@@ -42,6 +42,8 @@ Em toda abertura o app procura estas variaveis:
 
 O app pode preencher o Account ID na tela. O valor do token nao e exibido nem gravado em log; o app registra apenas se ele existe e o nome da env var usada.
 
+Na validacao real, o Maestro diferencia tokens de usuario (`cfut_`) e tokens de conta (`cfat_`). Tokens de conta exigem Account ID e sao verificados pelo endpoint de conta da Cloudflare. A tela informa se a env var foi vista pelo processo, pelo escopo de usuario ou pelo escopo de maquina.
+
 ## Modos de persistencia
 
 - JSON local: configuracoes e segredos ficam em arquivos locais sob `data/`, com aviso de cuidado operacional.

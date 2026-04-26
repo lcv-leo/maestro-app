@@ -88,7 +88,7 @@ type EvidenceRow = {
 type CloudflarePermissionRow = {
   label: string;
   value: string;
-  tone: 'pending' | 'blocked' | 'ok' | 'error';
+  tone: 'pending' | 'blocked' | 'ok' | 'warn' | 'error';
 };
 
 type BootstrapCheckRow = {
@@ -112,12 +112,18 @@ type BootstrapConfig = {
 type CloudflareEnvSnapshot = {
   account_id: string | null;
   account_id_env_var: string | null;
+  account_id_env_scope: string | null;
   api_token_present: boolean;
   api_token_env_var: string | null;
+  api_token_env_scope: string | null;
 };
 
 type DependencyPreflight = {
   checks: BootstrapCheckRow[];
+};
+
+type CloudflareProbeResult = {
+  rows: CloudflarePermissionRow[];
 };
 
 type ProtocolReadingGate = {
@@ -356,6 +362,7 @@ export function App() {
   );
   const [bootstrapRows, setBootstrapRows] = useState<BootstrapCheckRow[]>(initialBootstrapChecks);
   const [bootstrapConfigStatus, setBootstrapConfigStatus] = useState('bootstrap.json ainda nao carregado');
+  const [isVerifyingCloudflare, setIsVerifyingCloudflare] = useState(false);
 
   const readyCount = useMemo(() => agentCards.filter((agent) => agent.state === 'ready').length, [agentCards]);
   const visibleActivity = useMemo(() => {
@@ -448,7 +455,9 @@ export function App() {
       }
       setBootstrapConfigStatus(
         `bootstrap.json carregado; token Cloudflare ${
-          envSnapshot.api_token_present ? `detectado em ${envSnapshot.api_token_env_var}` : 'nao detectado em env var'
+          envSnapshot.api_token_present
+            ? `detectado em ${envSnapshot.api_token_env_var} (${envSnapshot.api_token_env_scope ?? 'process'})`
+            : 'nao detectado em env var'
         }`,
       );
       void logEvent({
@@ -458,8 +467,10 @@ export function App() {
         context: {
           credential_storage_mode: config.credential_storage_mode,
           cloudflare_account_id_source: envSnapshot.account_id_env_var ? 'windows_env' : config.cloudflare_account_id ? 'bootstrap_json' : 'missing',
+          cloudflare_account_id_env_scope: envSnapshot.account_id_env_scope ?? 'missing',
           cloudflare_api_token_source: envSnapshot.api_token_present ? 'windows_env' : config.cloudflare_api_token_source,
           cloudflare_api_token_env_var: envSnapshot.api_token_env_var ?? config.cloudflare_api_token_env_var,
+          cloudflare_api_token_env_scope: envSnapshot.api_token_env_scope ?? 'missing',
           cloudflare_api_token_present: envSnapshot.api_token_present,
         },
       });
@@ -760,31 +771,34 @@ export function App() {
     });
   }
 
-  function verifyCloudflareCredentials() {
-    void persistBootstrapConfig();
+  async function verifyCloudflareCredentials() {
+    setIsVerifyingCloudflare(true);
+    await persistBootstrapConfig();
+    const accountId = cloudflareAccountId.trim() || cloudflareEnvSnapshot?.account_id || '';
+    const tokenEnvVar = cloudflareTokenEnvVar.trim() || cloudflareEnvSnapshot?.api_token_env_var || 'MAESTRO_CLOUDFLARE_API_TOKEN';
     setCloudflarePermissionRows([
       {
         label: 'Token ativo',
-        value: cloudflareTokenAvailable ? `detectado via ${cloudflareTokenEnvVar}` : 'ausente; informe token ou env var',
+        value: cloudflareTokenAvailable ? `verificando via ${tokenEnvVar}` : 'ausente; informe token ou env var',
         tone: cloudflareTokenAvailable ? 'pending' : 'blocked',
       },
       {
         label: 'Conta acessivel',
-        value: cloudflareAccountId.trim() ? 'aguardando chamada real ao verify endpoint' : 'account id ausente',
-        tone: cloudflareAccountId.trim() ? 'pending' : 'blocked',
+        value: accountId ? 'aguardando resposta da API Cloudflare' : 'account id ausente',
+        tone: accountId ? 'pending' : 'blocked',
       },
-      { label: 'D1 Read/Edit', value: 'probe real ainda nao conectado', tone: 'pending' },
-      { label: 'Secrets Store', value: 'probe real ainda nao conectado', tone: 'pending' },
+      { label: 'D1 Read/Edit', value: 'aguardando endpoint D1', tone: 'pending' },
+      { label: 'Secrets Store', value: 'aguardando endpoint Secrets Store', tone: 'pending' },
     ]);
     void logEvent({
       level: 'info',
       category: 'settings.cloudflare.verify_requested',
       message: 'operator requested Cloudflare credential validation',
       context: {
-        account_id_present: cloudflareAccountId.trim().length > 0,
+        account_id_present: accountId.length > 0,
         token_present: cloudflareTokenAvailable,
         token_source: cloudflareEnvSnapshot?.api_token_present ? 'windows_env' : cloudflareTokenSource,
-        token_env_var: cloudflareTokenEnvVar,
+        token_env_var: tokenEnvVar,
         target_database: 'bigdata_db',
         target_table: 'mainsite_posts',
         persistence_database: 'maestro_db',
@@ -792,6 +806,48 @@ export function App() {
         credential_storage_mode: credentialStorageMode,
       },
     });
+
+    try {
+      const result = await invoke<CloudflareProbeResult>('verify_cloudflare_credentials', {
+        request: {
+          account_id: accountId,
+          api_token: cloudflareApiToken.trim() || null,
+          api_token_env_var: tokenEnvVar,
+          persistence_database: 'maestro_db',
+          publication_database: 'bigdata_db',
+          secret_store: 'maestro',
+        },
+      });
+      setCloudflarePermissionRows(result.rows);
+      appendActivity({
+        level: 'diagnostic',
+        title: 'Cloudflare verificado',
+        detail: result.rows.map((row) => `${row.label}: ${row.tone}`).join('; '),
+      });
+      void logEvent({
+        level: result.rows.some((row) => row.tone === 'error' || row.tone === 'blocked') ? 'warn' : 'info',
+        category: 'settings.cloudflare.verify_rendered',
+        message: 'Cloudflare credential validation rendered in UI',
+        context: {
+          rows: result.rows.map((row) => ({ label: row.label, tone: row.tone })),
+        },
+      });
+    } catch (error) {
+      setCloudflarePermissionRows([
+        { label: 'Token ativo', value: 'falha ao executar probe nativo', tone: 'error' },
+        { label: 'Conta acessivel', value: 'nao executado', tone: 'blocked' },
+        { label: 'D1 Read/Edit', value: 'nao executado', tone: 'blocked' },
+        { label: 'Secrets Store', value: 'nao executado', tone: 'blocked' },
+      ]);
+      void logEvent({
+        level: 'error',
+        category: 'settings.cloudflare.verify_failed',
+        message: 'Cloudflare credential validation failed before receiving API result',
+        context: { error },
+      });
+    } finally {
+      setIsVerifyingCloudflare(false);
+    }
   }
 
   function verifyAiProviderCredentials() {
@@ -1424,7 +1480,9 @@ export function App() {
                   <strong>Token Cloudflare inicial</strong>
                   <span>
                     {cloudflareTokenAvailable
-                      ? `detectado via ${cloudflareEnvSnapshot?.api_token_env_var ?? cloudflareTokenEnvVar}`
+                      ? `detectado via ${cloudflareEnvSnapshot?.api_token_env_var ?? cloudflareTokenEnvVar}${
+                          cloudflareEnvSnapshot?.api_token_env_scope ? ` (${cloudflareEnvSnapshot.api_token_env_scope})` : ''
+                        }`
                       : 'nao salvo no bootstrap; informe no campo, env var ou futura cripta local'}
                   </span>
                 </div>
@@ -1469,16 +1527,27 @@ export function App() {
                     <strong>mainsite_posts</strong>
                   </div>
                 </div>
-                <button className="primary-button" type="button" onClick={verifyCloudflareCredentials}>
-                  <ShieldCheck size={18} />
-                  Verificar token
+                <button
+                  className={isVerifyingCloudflare ? 'primary-button busy' : 'primary-button'}
+                  type="button"
+                  onClick={verifyCloudflareCredentials}
+                  disabled={isVerifyingCloudflare}
+                >
+                  {isVerifyingCloudflare ? <RefreshCw size={18} /> : <ShieldCheck size={18} />}
+                  {isVerifyingCloudflare ? 'Verificando...' : 'Verificar token'}
                 </button>
               </div>
 
               <div className="status-checklist" aria-label="Permissoes Cloudflare">
                 {cloudflarePermissionRows.map((item) => (
                   <div className={`check-row ${item.tone}`} key={item.label}>
-                    {item.tone === 'ok' ? <CheckCircle2 size={15} /> : item.tone === 'blocked' ? <AlertTriangle size={15} /> : <Clock3 size={15} />}
+                    {item.tone === 'ok' ? (
+                      <CheckCircle2 size={15} />
+                    ) : item.tone === 'blocked' || item.tone === 'error' || item.tone === 'warn' ? (
+                      <AlertTriangle size={15} />
+                    ) : (
+                      <Clock3 size={15} />
+                    )}
                     <span>{item.label}</span>
                     <strong>{item.value}</strong>
                   </div>
@@ -1587,7 +1656,11 @@ export function App() {
                 </div>
                 <div>
                   <dt>Cloudflare env</dt>
-                  <dd>{cloudflareEnvSnapshot?.api_token_present ? `token em ${cloudflareEnvSnapshot.api_token_env_var}` : 'token nao detectado'}</dd>
+                <dd>
+                  {cloudflareEnvSnapshot?.api_token_present
+                    ? `token em ${cloudflareEnvSnapshot.api_token_env_var} (${cloudflareEnvSnapshot.api_token_env_scope ?? 'process'})`
+                    : 'token nao detectado'}
+                </dd>
                 </div>
               </dl>
             </div>

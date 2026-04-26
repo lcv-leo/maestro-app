@@ -34,7 +34,7 @@ type ProtocolSnapshot = {
   hash: string;
 };
 
-type AgentState = 'ready' | 'blocked' | 'evidence';
+type AgentState = 'ready' | 'blocked' | 'evidence' | 'running';
 type VerbosityMode = 'resumo' | 'detalhado' | 'diagnostico';
 type PhaseState = 'done' | 'active' | 'waiting';
 type ProviderMode = 'cli' | 'api' | 'hybrid';
@@ -42,7 +42,7 @@ type AiCredentialKey = 'openai' | 'anthropic' | 'gemini';
 type CredentialStorageMode = 'local_json' | 'windows_env' | 'cloudflare';
 type CloudflareTokenSource = 'prompt_each_launch' | 'windows_env' | 'local_encrypted';
 type ActiveSection = 'session' | 'protocols' | 'evidence' | 'agents' | 'settings' | 'setup';
-type RunStatus = 'idle' | 'preparing' | 'blocked';
+type RunStatus = 'idle' | 'preparing' | 'running' | 'blocked' | 'completed';
 type ActivityLevel = 'summary' | 'detail' | 'diagnostic';
 
 type OperationSnapshot = {
@@ -126,6 +126,30 @@ type CloudflareProbeResult = {
   rows: CloudflarePermissionRow[];
 };
 
+type EditorialAgentResult = {
+  name: string;
+  cli: string;
+  tone: 'ok' | 'warn' | 'blocked' | 'error';
+  status: string;
+  duration_ms: number;
+  exit_code: number | null;
+  role: string;
+  output_path: string;
+};
+
+type EditorialSessionResult = {
+  run_id: string;
+  session_dir: string;
+  final_markdown_path: string | null;
+  session_minutes_path: string;
+  prompt_path: string;
+  protocol_path: string;
+  draft_path: string | null;
+  agents: EditorialAgentResult[];
+  consensus_ready: boolean;
+  status: string;
+};
+
 type ProtocolReadingGate = {
   agent: string;
   progress: number;
@@ -137,13 +161,6 @@ const initialAgents: AgentCard[] = [
   { name: 'Codex', cli: 'codex', state: 'blocked', note: 'aguardando sessao editorial' },
   { name: 'Gemini', cli: 'gemini', state: 'blocked', note: 'aguardando sessao editorial' },
   { name: 'MaestroPeer', cli: 'deterministico', state: 'blocked', note: 'aguardando preflight local' },
-];
-
-const pendingAdapterAgents: AgentCard[] = [
-  { name: 'Claude', cli: 'claude', state: 'blocked', note: 'adaptador CLI/API ainda nao conectado neste build' },
-  { name: 'Codex', cli: 'codex', state: 'blocked', note: 'adaptador CLI/API ainda nao conectado neste build' },
-  { name: 'Gemini', cli: 'gemini', state: 'blocked', note: 'adaptador CLI/API ainda nao conectado neste build' },
-  { name: 'MaestroPeer', cli: 'deterministico', state: 'evidence', note: 'preflight local e logs estruturados prontos' },
 ];
 
 const initialEvidenceRows: EvidenceRow[] = [
@@ -303,12 +320,14 @@ const idleActivityFeed: ActivityItem[] = [
 
 function stateLabel(state: AgentState) {
   if (state === 'ready') return 'READY';
+  if (state === 'running') return 'RUNNING';
   if (state === 'evidence') return 'NEEDS_EVIDENCE';
   return 'NOT_READY';
 }
 
 function stateIcon(state: AgentState) {
   if (state === 'ready') return <CheckCircle2 size={16} />;
+  if (state === 'running') return <RefreshCw size={16} />;
   if (state === 'evidence') return <Clock3 size={16} />;
   return <AlertTriangle size={16} />;
 }
@@ -321,13 +340,13 @@ async function sha256(text: string) {
 
 export function App() {
   const inputRef = useRef<HTMLInputElement>(null);
-  const runTimersRef = useRef<number[]>([]);
   const [protocol, setProtocol] = useState<ProtocolSnapshot>({
-    name: 'protocolo-editorial-v1-10-0.md',
+    name: 'Nenhum protocolo carregado',
     size: 0,
-    lines: 558,
-    hash: 'artefato local ignorado pelo Git',
+    lines: 0,
+    hash: 'aguardando importacao',
   });
+  const [protocolText, setProtocolText] = useState('');
   const [sessionName, setSessionName] = useState('Artigo academico sem titulo');
   const [verbosity, setVerbosity] = useState<VerbosityMode>('detalhado');
   const [editorialPrompt, setEditorialPrompt] = useState(
@@ -370,10 +389,19 @@ export function App() {
     if (verbosity === 'detalhado') return activityItems.filter((item) => item.level !== 'diagnostic');
     return activityItems;
   }, [activityItems, verbosity]);
-  const isRunPreparing = operation.status === 'preparing';
-  const runActionLabel = operation.status === 'blocked' ? 'Reiniciar sessao' : 'Iniciar sessao';
+  const isRunPreparing = operation.status === 'preparing' || operation.status === 'running';
+  const runActionLabel =
+    operation.status === 'blocked' || operation.status === 'completed' ? 'Nova sessao' : 'Iniciar sessao';
   const formalState =
-    operation.status === 'idle' ? 'aguardando_prompt' : operation.status === 'preparing' ? 'preflight_em_execucao' : 'bloqueado';
+    operation.status === 'idle'
+      ? 'aguardando_prompt'
+      : operation.status === 'preparing'
+        ? 'preflight_em_execucao'
+        : operation.status === 'running'
+          ? 'agentes_em_execucao'
+          : operation.status === 'completed'
+            ? 'final_disponivel'
+            : 'bloqueado';
   const linkEvidenceState = evidenceRows.find((item) => item.label === 'Links')?.value ?? 'nao iniciado';
   const activeNavItem = navItems.find((item) => item.section === activeSection) ?? navItems[0];
   const cloudflareTokenAvailable = cloudflareApiToken.length > 0 || Boolean(cloudflareEnvSnapshot?.api_token_present);
@@ -394,18 +422,6 @@ export function App() {
   useEffect(() => {
     void loadBootstrapConfig();
   }, []);
-
-  useEffect(() => () => clearRunTimers(), []);
-
-  function clearRunTimers() {
-    runTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-    runTimersRef.current = [];
-  }
-
-  function scheduleRunStep(delayMs: number, callback: () => void) {
-    const timer = window.setTimeout(callback, delayMs);
-    runTimersRef.current.push(timer);
-  }
 
   function activityTimestamp() {
     return new Date().toLocaleTimeString('pt-BR', {
@@ -544,6 +560,7 @@ export function App() {
       hash: await sha256(text),
     };
     setProtocol(nextProtocol);
+    setProtocolText(text);
     void logEvent({
       level: 'info',
       category: 'protocol.imported',
@@ -551,6 +568,12 @@ export function App() {
       context: nextProtocol,
     });
     event.target.value = '';
+  }
+
+  function agentStateFromTone(tone: EditorialAgentResult['tone']): AgentState {
+    if (tone === 'ok') return 'ready';
+    if (tone === 'warn') return 'evidence';
+    return 'blocked';
   }
 
   function startEditorialSession() {
@@ -579,7 +602,33 @@ export function App() {
       return;
     }
 
-    clearRunTimers();
+    if (protocolText.trim().length < 100) {
+      setOperation({
+        title: 'Protocolo integral ausente',
+        progress: 0,
+        current: 'Importe o arquivo Markdown integral do protocolo antes de iniciar a sessao real.',
+        eta: 'aguardando protocolo',
+        status: 'blocked',
+      });
+      appendActivity({
+        level: 'summary',
+        title: 'Protocolo ausente',
+        detail: 'A sessao foi bloqueada porque o texto integral do protocolo ainda nao foi carregado ou e curto demais.',
+      });
+      void logEvent({
+        level: 'warn',
+        category: 'session.protocol.rejected',
+        message: 'operator tried to start an editorial session without full protocol text loaded',
+        context: {
+          session_name: sessionName,
+          protocol_name: protocol.name,
+          protocol_lines: protocol.lines,
+          protocol_hash: protocol.hash,
+        },
+      });
+      return;
+    }
+
     setSessionRunId(runId);
     setOperation({
       title: 'Preparando sessao editorial',
@@ -623,6 +672,7 @@ export function App() {
         prompt_chars: editorialPrompt.length,
         protocol_name: protocol.name,
         protocol_lines: protocol.lines,
+        protocol_chars: protocolText.length,
         required_outputs: finalArtifacts.map((artifact) => artifact.name),
         consensus_gate: 'trilateral_ready_same_round',
       },
@@ -634,116 +684,227 @@ export function App() {
       context: { run_id: runId, provider_mode: providerMode, credential_storage_mode: credentialStorageMode },
     });
 
-    scheduleRunStep(350, () => {
-      setOperation({
-        title: 'Protocolo fixado',
-        progress: 22,
-        current: `Protocolo ativo registrado com ${protocol.lines.toLocaleString('pt-BR')} linhas.`,
-        eta: runId,
-        status: 'preparing',
-      });
-      setPhaseItems([
-        { label: 'Protocolo', detail: 'registrado no log', state: 'done' },
-        { label: 'Preflight', detail: 'checando motor local', state: 'active' },
-        { label: 'Orquestracao', detail: 'nao iniciada', state: 'waiting' },
-        { label: 'Entrega', detail: 'bloqueada ate unanimidade', state: 'waiting' },
-      ]);
-      appendActivity({
-        level: 'detail',
-        title: 'Protocolo registrado',
-        detail: `Arquivo ${protocol.name}; linhas=${protocol.lines}; hash=${protocol.hash.slice(0, 16)}.`,
-      });
-      void logEvent({
-        level: 'info',
-        category: 'session.protocol.pinned',
-        message: 'editorial protocol pinned for current visible session',
-        context: { run_id: runId, protocol_name: protocol.name, protocol_lines: protocol.lines, protocol_hash: protocol.hash },
-      });
+    setOperation({
+      title: 'Protocolo fixado',
+      progress: 22,
+      current: `Protocolo ativo registrado com ${protocol.lines.toLocaleString('pt-BR')} linhas.`,
+      eta: runId,
+      status: 'preparing',
+    });
+    setPhaseItems([
+      { label: 'Protocolo', detail: 'registrado no log', state: 'done' },
+      { label: 'Preflight', detail: 'concluido', state: 'done' },
+      { label: 'Orquestracao', detail: 'acionando agentes', state: 'active' },
+      { label: 'Entrega', detail: 'bloqueada ate unanimidade', state: 'waiting' },
+    ]);
+    setEvidenceRows([
+      { label: 'DOI', value: 'aguardando motor', tone: 'info' },
+      { label: 'Links', value: 'aguardando motor', tone: 'info' },
+      { label: 'ABNT', value: 'aguardando motor', tone: 'info' },
+      { label: 'Quarentena', value: 'aguardando motor', tone: 'info' },
+    ]);
+    appendActivity({
+      level: 'detail',
+      title: 'Protocolo registrado',
+      detail: `Arquivo ${protocol.name}; linhas=${protocol.lines}; hash=${protocol.hash.slice(0, 16)}.`,
+    });
+    void logEvent({
+      level: 'info',
+      category: 'session.protocol.pinned',
+      message: 'editorial protocol pinned for current visible session',
+      context: { run_id: runId, protocol_name: protocol.name, protocol_lines: protocol.lines, protocol_hash: protocol.hash },
+    });
+    void logEvent({
+      level: 'info',
+      category: 'session.preflight.completed',
+      message: 'local visible preflight completed',
+      context: { run_id: runId },
+    });
+    void runRealEditorialSession(runId, promptText);
+  }
+
+  async function runRealEditorialSession(runId: string, promptText: string) {
+    setOperation({
+      title: 'Executando sessao editorial real',
+      progress: 44,
+      current: 'Claude, Codex e Gemini serao executados em background com o protocolo integral.',
+      eta: runId,
+      status: 'running',
+    });
+    setPhaseItems([
+      { label: 'Protocolo', detail: 'registrado', state: 'done' },
+      { label: 'Preflight', detail: 'concluido', state: 'done' },
+      { label: 'Orquestracao', detail: 'executando agentes reais', state: 'active' },
+      { label: 'Entrega', detail: 'aguardando unanimidade real', state: 'waiting' },
+    ]);
+    setAgentCards([
+      { name: 'Claude', cli: 'claude', state: 'running', note: 'rascunho e revisao em andamento' },
+      { name: 'Codex', cli: 'codex', state: 'running', note: 'revisao em andamento' },
+      { name: 'Gemini', cli: 'gemini', state: 'running', note: 'revisao em andamento' },
+      { name: 'MaestroPeer', cli: 'deterministico', state: 'running', note: 'monitorando unanimidade' },
+    ]);
+    appendActivity({
+      level: 'diagnostic',
+      title: 'Agentes acionados',
+      detail: 'Maestro iniciou uma sessao real via Tauri; os artefatos serao salvos em data/sessions.',
+    });
+    void logEvent({
+      level: 'info',
+      category: 'session.editorial.requested',
+      message: 'frontend requested real editorial session',
+      context: {
+        run_id: runId,
+        session_name: sessionName,
+        prompt_chars: promptText.length,
+        protocol_name: protocol.name,
+        protocol_lines: protocol.lines,
+        protocol_chars: protocolText.length,
+        protocol_hash: protocol.hash,
+        provider_mode: providerMode,
+        credential_storage_mode: credentialStorageMode,
+      },
     });
 
-    scheduleRunStep(800, () => {
-      setOperation({
-        title: 'Preflight local concluido',
-        progress: 38,
-        current: 'UI, protocolo e log da sessao estao vivos; checagens editoriais reais aguardam adaptadores.',
-        eta: runId,
-        status: 'preparing',
+    try {
+      const result = await invoke<EditorialSessionResult>('run_editorial_session', {
+        request: {
+          run_id: runId,
+          session_name: sessionName,
+          prompt: promptText,
+          protocol_name: protocol.name,
+          protocol_text: protocolText,
+          protocol_hash: protocol.hash,
+        },
       });
+      const nextAgentCards = result.agents.map((agent) => ({
+        name: agent.name,
+        cli: agent.cli,
+        state: agentStateFromTone(agent.tone),
+        note: `${agent.role}: ${agent.status}; ${Math.round(agent.duration_ms / 1000)}s`,
+      }));
+      setAgentCards([
+        ...nextAgentCards,
+        {
+          name: 'MaestroPeer',
+          cli: 'deterministico',
+          state: result.consensus_ready ? 'ready' : 'blocked',
+          note: result.consensus_ready ? 'unanimidade registrada' : 'bloqueou entrega sem unanimidade',
+        },
+      ]);
+      setProtocolGateItems(
+        result.agents.map((agent) => ({
+          agent: agent.name,
+          progress: agent.tone === 'ok' ? 100 : agent.tone === 'warn' ? 60 : 0,
+          status: agent.tone === 'ok' ? 'protocolo submetido ao agente nesta rodada' : agent.status,
+        })),
+      );
       setEvidenceRows([
-        { label: 'DOI', value: 'aguardando motor', tone: 'info' },
-        { label: 'Links', value: 'aguardando motor', tone: 'info' },
-        { label: 'ABNT', value: 'aguardando motor', tone: 'info' },
-        { label: 'Quarentena', value: 'aguardando motor', tone: 'info' },
-      ]);
-      appendActivity({
-        level: 'detail',
-        title: 'Preflight registrado',
-        detail: 'O app confirmou que a acao do usuario saiu da interface e foi para o log da sessao.',
-      });
-      void logEvent({
-        level: 'info',
-        category: 'session.preflight.completed',
-        message: 'local visible preflight completed',
-        context: { run_id: runId },
-      });
-    });
-
-    scheduleRunStep(1250, () => {
-      setOperation({
-        title: 'Orquestracao bloqueada',
-        progress: 40,
-        current: 'Nenhuma CLI/API foi executada: os adaptadores reais de Claude, Codex e Gemini ainda nao estao conectados neste build.',
-        eta: 'bloqueado',
-        status: 'blocked',
-      });
-      setPhaseItems([
-        { label: 'Protocolo', detail: 'registrado', state: 'done' },
-        { label: 'Preflight', detail: 'concluido', state: 'done' },
-        { label: 'Orquestracao', detail: 'adaptadores ausentes', state: 'active' },
-        { label: 'Entrega', detail: 'sem unanimidade', state: 'waiting' },
-      ]);
-      setProtocolGateItems([
-        { agent: 'Claude', progress: 0, status: 'nao lido: adaptador nao executado' },
-        { agent: 'Codex', progress: 0, status: 'nao lido: adaptador nao executado' },
-        { agent: 'Gemini', progress: 0, status: 'nao lido: adaptador nao executado' },
-      ]);
-      setAgentCards(pendingAdapterAgents);
-      setEvidenceRows([
-        { label: 'DOI', value: 'bloqueado', tone: 'warn' },
-        { label: 'Links', value: 'bloqueado', tone: 'warn' },
-        { label: 'ABNT', value: 'bloqueado', tone: 'warn' },
-        { label: 'Quarentena', value: 'bloqueado', tone: 'warn' },
+        { label: 'DOI', value: 'revisado pelos peers', tone: result.consensus_ready ? 'ok' : 'warn' },
+        { label: 'Links', value: 'exige motor mecanico dedicado', tone: 'warn' },
+        { label: 'ABNT', value: 'revisado pelos peers', tone: result.consensus_ready ? 'ok' : 'warn' },
+        {
+          label: 'Quarentena',
+          value: result.consensus_ready ? 'liberado por unanimidade' : 'texto bloqueado',
+          tone: result.consensus_ready ? 'ok' : 'danger',
+        },
       ]);
       setDiscussionItems((current) => [
         {
           round: '001',
-          status: 'BLOCKED',
-          note: 'Nenhum peer foi chamado. O texto final continua bloqueado porque ainda nao houve unanimidade real.',
+          status: result.status,
+          note: result.consensus_ready
+            ? `Texto final liberado em ${result.final_markdown_path}; ata em ${result.session_minutes_path}.`
+            : `Sem unanimidade. Ata em ${result.session_minutes_path}; artefatos dos agentes em ${result.session_dir}.`,
         },
         ...current,
       ]);
       appendActivity({
         level: 'summary',
-        title: 'Execucao bloqueada sem fingir progresso',
-        detail: 'O monitor agora mostra explicitamente que o motor real ainda precisa ser conectado; nada sera entregue sem consenso trilateral.',
+        title: result.consensus_ready ? 'Texto final liberado' : 'Entrega bloqueada',
+        detail: result.agents.map((agent) => `${agent.name}: ${agent.tone}`).join('; '),
       });
-      appendActivity({
-        level: 'diagnostic',
-        title: 'Evento de bloqueio gravado',
-        detail: 'Procure session.orchestration.blocked no NDJSON desta execucao.',
+
+      if (result.consensus_ready) {
+        setOperation({
+          title: 'Texto final liberado',
+          progress: 100,
+          current: `Unanimidade trilateral registrada. Texto: ${result.final_markdown_path}`,
+          eta: `Ata: ${result.session_minutes_path}`,
+          status: 'completed',
+        });
+        setPhaseItems([
+          { label: 'Protocolo', detail: 'registrado', state: 'done' },
+          { label: 'Preflight', detail: 'concluido', state: 'done' },
+          { label: 'Orquestracao', detail: 'agentes concluiram', state: 'done' },
+          { label: 'Entrega', detail: 'unanimidade registrada', state: 'done' },
+        ]);
+        void logEvent({
+          level: 'info',
+          category: 'session.editorial.final_available',
+          message: 'final editorial markdown available after real unanimous session',
+          context: {
+            run_id: runId,
+            final_markdown_path: result.final_markdown_path,
+            session_minutes_path: result.session_minutes_path,
+            agents: result.agents.map((agent) => ({ name: agent.name, tone: agent.tone })),
+          },
+        });
+      } else {
+        setOperation({
+          title: 'Entrega bloqueada por decisao real',
+          progress: 66,
+          current: 'Pelo menos um peer nao retornou READY. A regra de unanimidade bloqueou o texto final.',
+          eta: `Ata: ${result.session_minutes_path}`,
+          status: 'blocked',
+        });
+        setPhaseItems([
+          { label: 'Protocolo', detail: 'registrado', state: 'done' },
+          { label: 'Preflight', detail: 'concluido', state: 'done' },
+          { label: 'Orquestracao', detail: 'rodada real concluida', state: 'done' },
+          { label: 'Entrega', detail: 'sem unanimidade', state: 'waiting' },
+        ]);
+        void logEvent({
+          level: 'warn',
+          category: 'session.editorial.blocked',
+          message: 'real editorial session completed without unanimous approval',
+          context: {
+            run_id: runId,
+            status: result.status,
+            session_minutes_path: result.session_minutes_path,
+            session_dir: result.session_dir,
+            agents: result.agents.map((agent) => ({
+              name: agent.name,
+              role: agent.role,
+              tone: agent.tone,
+              status: agent.status,
+              exit_code: agent.exit_code,
+              output_path: agent.output_path,
+            })),
+            final_delivery: 'blocked_without_trilateral_unanimity',
+          },
+        });
+      }
+    } catch (error) {
+      setOperation({
+        title: 'Sessao editorial falhou',
+        progress: 42,
+        current: 'O comando nativo de sessao editorial falhou antes de retornar resultado estruturado.',
+        eta: 'ver logs',
+        status: 'blocked',
       });
+      setAgentCards([
+        { name: 'Claude', cli: 'claude', state: 'blocked', note: 'falha antes de resultado estruturado' },
+        { name: 'Codex', cli: 'codex', state: 'blocked', note: 'falha antes de resultado estruturado' },
+        { name: 'Gemini', cli: 'gemini', state: 'blocked', note: 'falha antes de resultado estruturado' },
+        { name: 'MaestroPeer', cli: 'deterministico', state: 'blocked', note: 'ver NDJSON e data/sessions' },
+      ]);
       void logEvent({
-        level: 'warn',
-        category: 'session.orchestration.blocked',
-        message: 'editorial orchestration did not start because CLI/API adapters are not implemented in this build',
-        context: {
-          run_id: runId,
-          blocked_capability: 'cli_api_agent_adapter_execution',
-          affected_agents: ['claude', 'codex', 'gemini'],
-          final_delivery: 'blocked_without_unanimity',
-        },
+        level: 'error',
+        category: 'session.editorial.invoke_failed',
+        message: 'native real editorial session invoke failed',
+        context: { run_id: runId, error },
       });
-    });
+    }
   }
 
   function updateAiCredential(provider: AiCredentialKey, value: string) {

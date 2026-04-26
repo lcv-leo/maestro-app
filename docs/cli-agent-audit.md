@@ -13,9 +13,9 @@ Observed on this Windows 11+ development machine:
 
 | Agent | Local command | Local version | Headless smoke | Structured output |
 | --- | --- | --- | --- | --- |
-| Codex | `codex` | `0.124.0` | `codex exec --ephemeral --json "Return exactly: READY"` returned `READY` | JSONL events |
-| Claude | `claude` | `2.1.119` | `claude -p "Return exactly: READY" --output-format json --no-session-persistence` returned `READY` | JSON object |
-| Gemini | `gemini` | `0.39.1` | `gemini -p "Return exactly: READY" --output-format json` returned `READY` | JSON object plus terminal warning noise |
+| Codex | `codex` | `0.125.0` | `codex --ask-for-approval never exec --skip-git-repo-check --sandbox read-only --color never "<short prompt>"` accepted stdin appended as a `<stdin>` block and returned the requested marker; stdin-only `-` mode was observed hanging in one local probe | Text/JSONL-capable events depending on flags |
+| Claude | `claude` | `2.1.119` | `claude --print --input-format text --output-format text --permission-mode dontAsk` accepted stdin and returned the requested marker | Text, JSON object, or stream JSON depending on flags |
+| Gemini | `gemini` | `0.39.1` | `gemini --prompt "Read stdin and comply." --output-format text --approval-mode yolo --skip-trust` accepted stdin and returned the requested marker, with terminal warning noise possible | Text or JSON object depending on flags |
 
 Auth was present for the local smoke tests, but Maestro must never assume the operator's machine is already authenticated.
 
@@ -83,6 +83,8 @@ Required adapter choices:
 - Monitor release cadence. Gemini stable releases are frequent; Maestro should run a version probe before long sessions.
 
 ## Cross-Agent Adapter Contract
+
+`v0.3.0` now has the first Tauri-native process adapter pass for real background sessions. It writes full per-agent artifacts under `data/sessions/<run>/agent-runs/` and logs sanitized lifecycle summaries as `session.agent.started` / `session.agent.finished`. The adapter is still a defensive text parser, not the final structured-output implementation described below.
 
 Every CLI adapter must produce this internal record before a peer response can enter convergence:
 

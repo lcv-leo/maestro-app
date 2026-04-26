@@ -6,16 +6,16 @@ Portable Windows editorial workbench for protocol-driven AI drafting, source ver
 [![Pages](https://github.com/lcv-leo/maestro-app/actions/workflows/pages.yml/badge.svg)](https://github.com/lcv-leo/maestro-app/actions/workflows/pages.yml)
 [![Release](https://github.com/lcv-leo/maestro-app/actions/workflows/release.yml/badge.svg)](https://github.com/lcv-leo/maestro-app/actions/workflows/release.yml)
 ![CodeQL](https://img.shields.io/badge/CodeQL-default%20setup-enabled-brightgreen)
-![status](https://img.shields.io/badge/status-foundation-blue)
+![status](https://img.shields.io/badge/status-functional%20alpha-blue)
 ![target](https://img.shields.io/badge/target-Windows%2011%2B-blue)
 ![stack](https://img.shields.io/badge/stack-Tauri%202%20%2B%20React%2019-blueviolet)
 ![runtime](https://img.shields.io/badge/runtime-portable-green)
 ![state](https://img.shields.io/badge/state-JSON%2FNDJSON-informational)
 ![license](https://img.shields.io/badge/license-AGPL--3.0-blue)
 
-Status: foundation build with live bootstrap, diagnostics, navigation, and preflight; editorial agent orchestration is still under implementation.
+Status: functional alpha with live bootstrap, diagnostics, navigation, Cloudflare credential probing, PostEditor parity, and a first real background Claude/Codex/Gemini editorial session path.
 
-Current project version: `v0.2.1`.
+Current project version: `v0.3.0`.
 
 Maestro is independent from `cross-review-mcp`; it incorporates the same strict convergence discipline in its own application logic. It is designed to run from a folder, keep runtime data out of Git, and store operator protocols, drafts, evidence, and sessions locally under ignored runtime paths.
 
@@ -23,9 +23,9 @@ Target platform: Windows 11+.
 
 Planned modern stack: Tauri 2 + WebView2, React 19, Vite 8, TypeScript 6, Vitest, Biome, ESLint, and lucide-react.
 
-Diagnostic logs are structured NDJSON files under `data/logs/` so failures can be attached for precise analysis. See `docs/logging.md`.
+Diagnostic logs are structured NDJSON files under `data/logs/`, one file per app execution, with native/frontend context and per-agent process events so failures can be attached for precise analysis. See `docs/logging.md`.
 
-CLI agents run in background by design. The operator sees friendly progress, phase status, and a selectable UI verbosity level, while raw prompts, stdout, stderr, and transcripts stay out of the normal interface and remain protected as local runtime artifacts.
+CLI agents run in background by design. The operator sees friendly progress, phase status, and a selectable UI verbosity level, while raw prompts, stdout, stderr, and transcripts stay out of the normal interface and remain protected as ignored local runtime artifacts under `data/sessions/`.
 
 MainSite-bound editing uses a PostEditor parity module, not a generic editor. See `docs/text-editor-decision.md` and `docs/mainsite-compatibility-contract.md`.
 

@@ -458,6 +458,16 @@ button:disabled {
   background: #e8f0fe;
 }
 
+.run-state-badge.running {
+  color: #0f766e;
+  background: #ccfbf1;
+}
+
+.run-state-badge.completed {
+  color: #166534;
+  background: #dcfce7;
+}
+
 .run-state-badge.blocked {
   color: #b45309;
   background: #fff7ed;
@@ -519,6 +529,17 @@ button:disabled {
   animation: softPulse 1.2s ease-in-out infinite;
 }
 
+.pulse-icon.running {
+  color: #0f766e;
+  background: #ccfbf1;
+  animation: softPulseTeal 1s ease-in-out infinite;
+}
+
+.pulse-icon.completed {
+  color: #166534;
+  background: #dcfce7;
+}
+
 .pulse-icon.blocked {
   color: #b45309;
   background: #fff7ed;
@@ -532,6 +553,17 @@ button:disabled {
 
   50% {
     box-shadow: 0 0 0 8px rgb(26 115 232 / 0%);
+  }
+}
+
+@keyframes softPulseTeal {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgb(15 118 110 / 24%);
+  }
+
+  50% {
+    box-shadow: 0 0 0 8px rgb(15 118 110 / 0%);
   }
 }
 
@@ -574,6 +606,14 @@ button:disabled {
 
 .progress-fill.blocked {
   background: #d97706;
+}
+
+.progress-fill.running {
+  background: #0f766e;
+}
+
+.progress-fill.completed {
+  background: #16a34a;
 }
 
 .progress-stack span {
@@ -872,6 +912,14 @@ button:disabled {
 
 .agent-row.evidence {
   border-left-color: #d97706;
+}
+
+.agent-row.running {
+  border-left-color: #0f766e;
+}
+
+.agent-row.running .agent-icon svg {
+  animation: buttonSpin 900ms linear infinite;
 }
 
 .agent-row.blocked {

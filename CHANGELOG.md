@@ -4,6 +4,19 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.0] - 2026-04-26
+
+- Replaced the UI-only CLI smoke path with a real first-pass editorial session command that runs Claude for draft generation and Claude, Codex, and Gemini for review in background.
+- Added strict protocol text gating: sessions now block if the full Markdown protocol content was not imported, instead of proceeding with metadata only.
+- Added session artifacts under ignored `data/sessions/<run>/`: `prompt.md`, `protocolo.md`, agent run outputs, `ata-da-sessao.md`, and `texto-final.md` only when unanimity is reached.
+- Expanded NDJSON diagnostics with frontend runtime context, UI/network/visibility events, console warn/error capture, native panic capture, native log sequence, resolved command paths, and per-agent start/finish records.
+- Improved diagnostic redaction so logs keep safe metadata such as token presence, env-var name, source, and scope while continuing to redact raw tokens, API keys, authorization values, cookies, and private material.
+- Added live running/completed UI states and agent progress styling so long background operations no longer look static.
+- Added Rust coverage for diagnostic redaction rules to protect against future regression.
+- Removed previously tracked local AI handoff files from the repository index while preserving them on disk, and expanded `.gitignore` so local AI memory/instruction folders stay out of the public remote.
+- Adjusted the Codex CLI adapter away from stdin-only `-` mode to a short prompt argument plus appended stdin payload, avoiding hangs observed in local headless probes.
+- Fixed cross-review blockers before release: failed draft generation now stops before reviewer calls, command stdout/stderr are drained concurrently to avoid pipe-buffer stalls, native redaction now matches secret-shaped values inside URLs/JSON/header text, and the UI starts with no protocol loaded until a real Markdown import occurs.
+
 ## [v0.2.1] - 2026-04-26
 
 - Fixed Windows CLI preflight detection for npm-style `.cmd` shims and known user install paths so Codex, Gemini, npm, and similar CLIs are not incorrectly shown as missing when they are installed.

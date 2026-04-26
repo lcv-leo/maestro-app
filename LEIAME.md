@@ -7,14 +7,16 @@ Este pacote e portatil para Windows 11+. Ele nao instala servicos, nao cria entr
 1. Extraia o ZIP em uma pasta local.
 2. Execute `Maestro Editorial AI.exe`.
 3. Abra `Ajustes` e escolha o modo de persistencia.
-4. Abra `Setup` para conferir o estado de bootstrap e logs.
-5. Se algo falhar, envie o arquivo NDJSON mais recente de `data/logs/`.
+4. Importe o protocolo editorial Markdown integral antes de iniciar uma sessao.
+5. Abra `Setup` para conferir o estado de bootstrap e logs.
+6. Se algo falhar, envie o arquivo NDJSON mais recente de `data/logs/`.
 
 ## Arquivos locais criados pelo app
 
 - `data/config/bootstrap.json`: arquivo local sem segredos. Ele informa ao app qual arranjo de configuracao foi escolhido.
 - `data/logs/maestro-<timestamp>-pid<id>.ndjson`: um arquivo novo por execucao do app.
-- Futuras pastas de sessoes, cache e artefatos ficam sob `data/` e continuam fora do Git.
+- `data/sessions/<run>/`: prompt, protocolo fixado, saidas dos agentes, ata da sessao e texto final quando houver unanimidade.
+- Cache e artefatos ficam sob `data/` e continuam fora do Git.
 
 ## Bootstrap de configuracao
 
@@ -52,6 +54,8 @@ Na validacao real, o Maestro diferencia tokens de usuario (`cfut_`) e tokens de 
 
 ## Estado deste build
 
-Este build ja mostra estados vivos de UI, navegacao lateral, logs por execucao e bloqueios honestos. O motor real de orquestracao Claude/Codex/Gemini ainda precisa ser conectado antes de gerar textos finais.
+Este build ja executa uma primeira sessao editorial real em background: Claude gera o rascunho inicial, e Claude, Codex e Gemini revisam o texto contra o protocolo integral importado. Se qualquer peer nao retornar aprovacao, a entrega fica bloqueada e a ata fica disponivel em `data/sessions/<run>/ata-da-sessao.md`.
+
+Os logs foram ampliados para diagnostico: eles registram contexto de UI, estado do runtime, caminhos resolvidos das CLIs, inicio/fim de cada agente, duracao, exit code, timeout e caminho dos artefatos. O conteudo bruto dos agentes fica nos arquivos de sessao, nao embutido no NDJSON geral.
 
 Regra inviolavel: nenhum texto final deve ser entregue sem unanimidade trilateral real.

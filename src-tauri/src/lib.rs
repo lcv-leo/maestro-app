@@ -1,16 +1,24 @@
 use chrono::Utc;
+use regex::Regex;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
-    process::{self, Command, Output},
-    time::Duration,
+    process::{self, Command, Output, Stdio},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        OnceLock,
+    },
+    thread,
+    time::{Duration, Instant},
 };
 use tauri::Manager;
+
+static NATIVE_LOG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 struct LogSession {
@@ -61,6 +69,84 @@ struct CloudflareProbeRow {
 #[derive(Serialize)]
 struct CloudflareProbeResult {
     rows: Vec<CloudflareProbeRow>,
+}
+
+#[derive(Clone, Deserialize)]
+struct CliAdapterSmokeRequest {
+    run_id: String,
+    prompt_chars: usize,
+    protocol_name: String,
+    protocol_lines: usize,
+    protocol_hash: String,
+}
+
+#[derive(Serialize)]
+struct CliAdapterSmokeResult {
+    run_id: String,
+    agents: Vec<CliAdapterProbeResult>,
+    all_ready: bool,
+}
+
+#[derive(Serialize)]
+struct CliAdapterProbeResult {
+    name: String,
+    cli: String,
+    tone: String,
+    status: String,
+    duration_ms: u128,
+    exit_code: Option<i32>,
+    marker_found: bool,
+}
+
+#[derive(Clone, Deserialize)]
+struct EditorialSessionRequest {
+    run_id: String,
+    session_name: String,
+    prompt: String,
+    protocol_name: String,
+    protocol_text: String,
+    protocol_hash: String,
+}
+
+#[derive(Serialize)]
+struct EditorialSessionResult {
+    run_id: String,
+    session_dir: String,
+    final_markdown_path: Option<String>,
+    session_minutes_path: String,
+    prompt_path: String,
+    protocol_path: String,
+    draft_path: Option<String>,
+    agents: Vec<EditorialAgentResult>,
+    consensus_ready: bool,
+    status: String,
+}
+
+#[derive(Clone, Serialize)]
+struct EditorialAgentResult {
+    name: String,
+    role: String,
+    cli: String,
+    tone: String,
+    status: String,
+    duration_ms: u128,
+    exit_code: Option<i32>,
+    output_path: String,
+}
+
+#[derive(Clone)]
+struct CliAdapterSpec {
+    name: &'static str,
+    command: &'static str,
+    marker: &'static str,
+    args: Vec<String>,
+    timeout: Duration,
+}
+
+struct TimedCommandOutput {
+    output: Output,
+    duration_ms: u128,
+    timed_out: bool,
 }
 
 impl Default for BootstrapConfig {
@@ -129,10 +215,12 @@ fn write_log_record(
 ) -> Result<LogWriteResult, String> {
     let dir = logs_dir();
     fs::create_dir_all(&dir).map_err(|error| format!("failed to create log dir: {error}"))?;
+    let sequence = NATIVE_LOG_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
 
     let record = json!({
         "schema_version": 1,
         "timestamp": Utc::now().to_rfc3339(),
+        "native_log_sequence": sequence,
         "level": sanitize_short(&event.level, 16),
         "category": sanitize_short(&event.category, 80),
         "message": sanitize_text(&event.message, 500),
@@ -142,6 +230,11 @@ fn write_log_record(
             "version": env!("CARGO_PKG_VERSION"),
             "target": std::env::consts::OS,
             "arch": std::env::consts::ARCH
+        },
+        "process": {
+            "pid": process::id(),
+            "cwd": std::env::current_dir().ok().map(|path| path.to_string_lossy().to_string()),
+            "app_root": app_root().to_string_lossy().to_string()
         },
         "session": {
             "id": log_session.id.clone(),
@@ -344,6 +437,156 @@ fn verify_cloudflare_credentials(
     result
 }
 
+#[tauri::command]
+fn run_cli_adapter_smoke(
+    log_session: tauri::State<LogSession>,
+    request: CliAdapterSmokeRequest,
+) -> CliAdapterSmokeResult {
+    let _ = write_log_record(
+        &log_session,
+        LogEventInput {
+            level: "info".to_string(),
+            category: "session.cli_adapters.smoke_started".to_string(),
+            message: "CLI adapter smoke started".to_string(),
+            context: Some(json!({
+                "run_id": sanitize_short(&request.run_id, 120),
+                "prompt_chars": request.prompt_chars,
+                "protocol_name": sanitize_text(&request.protocol_name, 160),
+                "protocol_lines": request.protocol_lines,
+                "protocol_hash_prefix": sanitize_short(&request.protocol_hash, 16),
+                "agents": ["claude", "codex", "gemini"]
+            })),
+        },
+    );
+
+    let handles = cli_adapter_specs(&request)
+        .into_iter()
+        .map(|spec| thread::spawn(move || run_cli_adapter_probe(spec)))
+        .collect::<Vec<_>>();
+    let agents = handles
+        .into_iter()
+        .map(|handle| {
+            handle.join().unwrap_or_else(|_| CliAdapterProbeResult {
+                name: "Unknown".to_string(),
+                cli: "unknown".to_string(),
+                tone: "error".to_string(),
+                status: "thread do adaptador falhou".to_string(),
+                duration_ms: 0,
+                exit_code: None,
+                marker_found: false,
+            })
+        })
+        .collect::<Vec<_>>();
+    let all_ready = agents.iter().all(|agent| agent.tone == "ok");
+    let result = CliAdapterSmokeResult {
+        run_id: sanitize_short(&request.run_id, 120),
+        all_ready,
+        agents,
+    };
+
+    let _ = write_log_record(
+        &log_session,
+        LogEventInput {
+            level: if all_ready { "info" } else { "warn" }.to_string(),
+            category: "session.cli_adapters.smoke_completed".to_string(),
+            message: "CLI adapter smoke completed".to_string(),
+            context: Some(json!({
+                "run_id": result.run_id,
+                "all_ready": result.all_ready,
+                "agents": result.agents.iter().map(|agent| json!({
+                    "name": agent.name,
+                    "cli": agent.cli,
+                    "tone": agent.tone,
+                    "duration_ms": agent.duration_ms,
+                    "exit_code": agent.exit_code,
+                    "marker_found": agent.marker_found
+                })).collect::<Vec<_>>()
+            })),
+        },
+    );
+
+    result
+}
+
+#[tauri::command]
+fn run_editorial_session(
+    log_session: tauri::State<LogSession>,
+    request: EditorialSessionRequest,
+) -> Result<EditorialSessionResult, String> {
+    let _ = write_log_record(
+        &log_session,
+        LogEventInput {
+            level: "info".to_string(),
+            category: "session.editorial.started".to_string(),
+            message: "real editorial session command received".to_string(),
+            context: Some(json!({
+                "run_id": sanitize_short(&request.run_id, 120),
+                "session_name": sanitize_text(&request.session_name, 200),
+                "prompt_chars": request.prompt.chars().count(),
+                "protocol_name": sanitize_text(&request.protocol_name, 200),
+                "protocol_chars": request.protocol_text.chars().count(),
+                "protocol_lines": request.protocol_text.lines().count(),
+                "protocol_hash_prefix": sanitize_short(&request.protocol_hash, 16),
+                "agents": ["claude", "codex", "gemini"],
+                "artifact_policy": "raw agent outputs are written under data/sessions, not embedded in NDJSON"
+            })),
+        },
+    );
+
+    let result = match run_editorial_session_inner(&request, &log_session) {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = write_log_record(
+                &log_session,
+                LogEventInput {
+                    level: "error".to_string(),
+                    category: "session.editorial.failed".to_string(),
+                    message: "real editorial session failed before structured result".to_string(),
+                    context: Some(json!({
+                        "run_id": sanitize_short(&request.run_id, 120),
+                        "error": sanitize_text(&error, 500),
+                        "session_name": sanitize_text(&request.session_name, 200),
+                        "prompt_chars": request.prompt.chars().count(),
+                        "protocol_chars": request.protocol_text.chars().count(),
+                        "protocol_hash_prefix": sanitize_short(&request.protocol_hash, 16)
+                    })),
+                },
+            );
+            return Err(error);
+        }
+    };
+    let _ = write_log_record(
+        &log_session,
+        LogEventInput {
+            level: if result.consensus_ready {
+                "info"
+            } else {
+                "warn"
+            }
+            .to_string(),
+            category: "session.editorial.completed".to_string(),
+            message: "real editorial session completed".to_string(),
+            context: Some(json!({
+                "run_id": result.run_id,
+                "status": result.status,
+                "consensus_ready": result.consensus_ready,
+                "session_dir": result.session_dir,
+                "final_markdown_path": result.final_markdown_path,
+                "session_minutes_path": result.session_minutes_path,
+                "agents": result.agents.iter().map(|agent| json!({
+                    "name": agent.name,
+                    "role": agent.role,
+                    "tone": agent.tone,
+                    "duration_ms": agent.duration_ms,
+                    "exit_code": agent.exit_code,
+                    "output_path": agent.output_path
+                })).collect::<Vec<_>>()
+            })),
+        },
+    );
+    Ok(result)
+}
+
 fn app_root() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -362,6 +605,10 @@ fn config_dir() -> PathBuf {
 
 fn bootstrap_config_path() -> PathBuf {
     config_dir().join("bootstrap.json")
+}
+
+fn sessions_dir() -> PathBuf {
+    app_root().join("data").join("sessions")
 }
 
 fn create_log_session() -> LogSession {
@@ -463,6 +710,645 @@ fn windows_registry_env_value(key: &str, name: &str) -> Option<String> {
             Some(value)
         }
     })
+}
+
+fn run_editorial_session_inner(
+    request: &EditorialSessionRequest,
+    log_session: &LogSession,
+) -> Result<EditorialSessionResult, String> {
+    let run_id = sanitize_short(&request.run_id, 120);
+    if run_id.is_empty() {
+        return Err("run_id vazio".to_string());
+    }
+
+    let prompt = request.prompt.trim();
+    if prompt.is_empty() {
+        return Err("prompt editorial vazio".to_string());
+    }
+    if request.protocol_text.trim().len() < 100 {
+        return Err("protocolo editorial integral nao foi carregado".to_string());
+    }
+
+    let session_dir = sessions_dir().join(&run_id);
+    let agent_dir = session_dir.join("agent-runs");
+    fs::create_dir_all(&agent_dir)
+        .map_err(|error| format!("failed to create session dir: {error}"))?;
+
+    let prompt_path = session_dir.join("prompt.md");
+    let protocol_path = session_dir.join("protocolo.md");
+    write_text_file(
+        &prompt_path,
+        &format!(
+            "# Prompt da Sessao\n\nSessao: {}\nRun: `{}`\n\n{}",
+            sanitize_text(&request.session_name, 200),
+            run_id,
+            prompt
+        ),
+    )?;
+    write_text_file(&protocol_path, &request.protocol_text)?;
+
+    let draft_output_path = agent_dir.join("round-001-claude-draft.md");
+    let draft_run = run_editorial_agent(
+        log_session,
+        &run_id,
+        "Claude",
+        "draft",
+        "claude",
+        claude_args(),
+        build_draft_prompt(request, &run_id),
+        &draft_output_path,
+        Duration::from_secs(300),
+    );
+    let mut agents = vec![draft_run.clone()];
+    let draft_artifact = fs::read_to_string(&draft_output_path).unwrap_or_default();
+    let draft_text = extract_stdout_block(&draft_artifact).unwrap_or(draft_artifact.as_str());
+
+    if draft_run.tone == "error" || draft_run.tone == "blocked" || draft_text.trim().is_empty() {
+        let minutes_path = session_dir.join("ata-da-sessao.md");
+        write_text_file(
+            &minutes_path,
+            &build_session_minutes(request, &run_id, &agents, false, None),
+        )?;
+
+        return Ok(EditorialSessionResult {
+            run_id,
+            session_dir: session_dir.to_string_lossy().to_string(),
+            final_markdown_path: None,
+            session_minutes_path: minutes_path.to_string_lossy().to_string(),
+            prompt_path: prompt_path.to_string_lossy().to_string(),
+            protocol_path: protocol_path.to_string_lossy().to_string(),
+            draft_path: Some(draft_output_path.to_string_lossy().to_string()),
+            agents,
+            consensus_ready: false,
+            status: "BLOCKED_DRAFT_UNAVAILABLE".to_string(),
+        });
+    }
+
+    let review_specs = [
+        (
+            "Claude",
+            "review",
+            "claude",
+            claude_args(),
+            agent_dir.join("round-001-claude-review.md"),
+        ),
+        (
+            "Codex",
+            "review",
+            "codex",
+            codex_args(),
+            agent_dir.join("round-001-codex-review.md"),
+        ),
+        (
+            "Gemini",
+            "review",
+            "gemini",
+            gemini_args(),
+            agent_dir.join("round-001-gemini-review.md"),
+        ),
+    ];
+    let review_handles = review_specs
+        .into_iter()
+        .map(|(name, role, command, args, output_path)| {
+            let prompt = build_review_prompt(request, &run_id, draft_text);
+            let run_id = run_id.clone();
+            let log_session = log_session.clone();
+            thread::spawn(move || {
+                run_editorial_agent(
+                    &log_session,
+                    &run_id,
+                    name,
+                    role,
+                    command,
+                    args,
+                    prompt,
+                    &output_path,
+                    Duration::from_secs(300),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for handle in review_handles {
+        agents.push(handle.join().unwrap_or_else(|_| EditorialAgentResult {
+            name: "Unknown".to_string(),
+            role: "review".to_string(),
+            cli: "unknown".to_string(),
+            tone: "error".to_string(),
+            status: "thread de revisao falhou".to_string(),
+            duration_ms: 0,
+            exit_code: None,
+            output_path: String::new(),
+        }));
+    }
+
+    let review_agents = agents
+        .iter()
+        .filter(|agent| agent.role == "review")
+        .collect::<Vec<_>>();
+    let consensus_ready = !draft_text.trim().is_empty()
+        && draft_run.tone != "error"
+        && review_agents
+            .iter()
+            .all(|agent| agent.tone == "ok" && agent.status == "READY");
+    let minutes_path = session_dir.join("ata-da-sessao.md");
+    let final_path = if consensus_ready {
+        let final_path = session_dir.join("texto-final.md");
+        write_text_file(&final_path, draft_text)?;
+        Some(final_path)
+    } else {
+        None
+    };
+    write_text_file(
+        &minutes_path,
+        &build_session_minutes(
+            request,
+            &run_id,
+            &agents,
+            consensus_ready,
+            final_path.as_ref(),
+        ),
+    )?;
+
+    Ok(EditorialSessionResult {
+        run_id,
+        session_dir: session_dir.to_string_lossy().to_string(),
+        final_markdown_path: final_path.map(|path| path.to_string_lossy().to_string()),
+        session_minutes_path: minutes_path.to_string_lossy().to_string(),
+        prompt_path: prompt_path.to_string_lossy().to_string(),
+        protocol_path: protocol_path.to_string_lossy().to_string(),
+        draft_path: Some(draft_output_path.to_string_lossy().to_string()),
+        agents,
+        consensus_ready,
+        status: if consensus_ready {
+            "READY_UNANIMOUS".to_string()
+        } else {
+            "BLOCKED_WITH_REAL_AGENT_OUTPUTS".to_string()
+        },
+    })
+}
+
+fn write_text_file(path: &Path, text: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create artifact dir: {error}"))?;
+    }
+    fs::write(path, text).map_err(|error| format!("failed to write artifact: {error}"))
+}
+
+fn claude_args() -> Vec<String> {
+    vec![
+        "--print".to_string(),
+        "--input-format".to_string(),
+        "text".to_string(),
+        "--output-format".to_string(),
+        "text".to_string(),
+        "--permission-mode".to_string(),
+        "dontAsk".to_string(),
+    ]
+}
+
+fn codex_args() -> Vec<String> {
+    vec![
+        "--ask-for-approval".to_string(),
+        "never".to_string(),
+        "exec".to_string(),
+        "--skip-git-repo-check".to_string(),
+        "--sandbox".to_string(),
+        "read-only".to_string(),
+        "--color".to_string(),
+        "never".to_string(),
+        "Leia integralmente o bloco <stdin> fornecido pelo Maestro e responda conforme as instrucoes.".to_string(),
+    ]
+}
+
+fn gemini_args() -> Vec<String> {
+    vec![
+        "--prompt".to_string(),
+        "Leia o stdin integralmente e responda conforme as instrucoes do Maestro.".to_string(),
+        "--output-format".to_string(),
+        "text".to_string(),
+        "--approval-mode".to_string(),
+        "yolo".to_string(),
+        "--skip-trust".to_string(),
+    ]
+}
+
+fn build_draft_prompt(request: &EditorialSessionRequest, run_id: &str) -> String {
+    format!(
+        r#"# Maestro Editorial AI - Geracao Real
+
+Run: `{run_id}`
+Sessao: {}
+
+Voce e o primeiro peer editorial. Leia integralmente o protocolo abaixo antes de escrever.
+Gere um rascunho em Markdown puro para a solicitacao do operador.
+Nao invente links. Se faltar evidencia, marque explicitamente `[EVIDENCIA_PENDENTE]`.
+
+## Solicitacao do operador
+
+{}
+
+## Protocolo editorial integral
+
+```markdown
+{}
+```
+"#,
+        sanitize_text(&request.session_name, 200),
+        request.prompt,
+        request.protocol_text
+    )
+}
+
+fn build_review_prompt(request: &EditorialSessionRequest, run_id: &str, draft: &str) -> String {
+    format!(
+        r#"# Maestro Editorial AI - Revisao Real
+
+Run: `{run_id}`
+Sessao: {}
+
+Leia integralmente o protocolo editorial e revise o rascunho abaixo.
+Responda em Markdown.
+
+Obrigatorio:
+- A primeira linha deve ser exatamente `MAESTRO_STATUS: READY` ou `MAESTRO_STATUS: NOT_READY`.
+- Use READY somente se o rascunho pode ser entregue como texto final conforme o protocolo.
+- Use NOT_READY se houver falhas, links a verificar, violacao ABNT, falta de evidencia, confabulacao, ou problema editorial.
+- Liste correcoes concretas.
+
+## Solicitacao do operador
+
+{}
+
+## Protocolo editorial integral
+
+```markdown
+{}
+```
+
+## Rascunho a revisar
+
+```markdown
+{}
+```
+"#,
+        sanitize_text(&request.session_name, 200),
+        request.prompt,
+        request.protocol_text,
+        draft
+    )
+}
+
+fn run_editorial_agent(
+    log_session: &LogSession,
+    run_id: &str,
+    name: &str,
+    role: &str,
+    command: &str,
+    args: Vec<String>,
+    stdin_text: String,
+    output_path: &Path,
+    timeout: Duration,
+) -> EditorialAgentResult {
+    let started = Instant::now();
+    let _ = write_log_record(
+        log_session,
+        LogEventInput {
+            level: "info".to_string(),
+            category: "session.agent.started".to_string(),
+            message: "editorial agent process starting".to_string(),
+            context: Some(json!({
+                "run_id": sanitize_short(run_id, 120),
+                "agent": name,
+                "role": role,
+                "cli": command,
+                "stdin_chars": stdin_text.chars().count(),
+                "timeout_seconds": timeout.as_secs(),
+                "output_path": output_path.to_string_lossy().to_string()
+            })),
+        },
+    );
+    let Some(path) = resolve_command(command) else {
+        let _ = write_text_file(
+            output_path,
+            &format!(
+                "# {name} - {role}\n\n- CLI: `{command}`\n- Status: `CLI_NOT_FOUND`\n- PATH dirs checked: `{}`\n\nCLI nao encontrada no PATH efetivo.\n",
+                command_search_dirs().len()
+            ),
+        );
+        let result = EditorialAgentResult {
+            name: name.to_string(),
+            role: role.to_string(),
+            cli: command.to_string(),
+            tone: "blocked".to_string(),
+            status: "CLI_NOT_FOUND".to_string(),
+            duration_ms: started.elapsed().as_millis(),
+            exit_code: None,
+            output_path: output_path.to_string_lossy().to_string(),
+        };
+        log_editorial_agent_finished(log_session, run_id, &result, None, None, None, false);
+        return result;
+    };
+
+    match run_resolved_command_with_timeout(&path, &args, timeout, Some(&stdin_text)) {
+        Ok(result) => {
+            let stdout = String::from_utf8_lossy(&result.output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&result.output.stderr).to_string();
+            let exit_code = result.output.status.code();
+            let status = if role == "review" {
+                extract_maestro_status(&stdout).unwrap_or("NOT_READY")
+            } else if stdout.trim().is_empty() {
+                "EMPTY_DRAFT"
+            } else {
+                "DRAFT_CREATED"
+            };
+            let tone = if result.timed_out {
+                "error"
+            } else if result.output.status.success()
+                && (status == "READY" || status == "DRAFT_CREATED")
+            {
+                "ok"
+            } else if result.output.status.success() {
+                "warn"
+            } else {
+                "error"
+            };
+            let artifact = format!(
+                "# {name} - {role}\n\n- CLI: `{command}`\n- Resolved path: `{}`\n- Args: `{}`\n- Status: `{status}`\n- Exit code: `{}`\n- Duration ms: `{}`\n- Timed out: `{}`\n- Stdin chars: `{}`\n- Stdout chars: `{}`\n- Stderr chars: `{}`\n\n## Stdout\n\n```text\n{}\n```\n\n## Stderr\n\n```text\n{}\n```\n",
+                path.to_string_lossy(),
+                sanitize_text(&args.join(" "), 1000),
+                exit_code
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                result.duration_ms,
+                result.timed_out,
+                stdin_text.chars().count(),
+                stdout.chars().count(),
+                stderr.chars().count(),
+                stdout,
+                sanitize_text(&stderr, 8000)
+            );
+            let _ = write_text_file(output_path, &artifact);
+
+            let agent_result = EditorialAgentResult {
+                name: name.to_string(),
+                role: role.to_string(),
+                cli: command.to_string(),
+                tone: tone.to_string(),
+                status: status.to_string(),
+                duration_ms: result.duration_ms,
+                exit_code,
+                output_path: output_path.to_string_lossy().to_string(),
+            };
+            log_editorial_agent_finished(
+                log_session,
+                run_id,
+                &agent_result,
+                Some(stdout.chars().count()),
+                Some(stderr.chars().count()),
+                Some(path.to_string_lossy().to_string()),
+                result.timed_out,
+            );
+            agent_result
+        }
+        Err(error) => {
+            let status = sanitize_text(&format!("EXEC_ERROR: {error}"), 240);
+            let _ = write_text_file(output_path, &status);
+            let agent_result = EditorialAgentResult {
+                name: name.to_string(),
+                role: role.to_string(),
+                cli: command.to_string(),
+                tone: "error".to_string(),
+                status,
+                duration_ms: started.elapsed().as_millis(),
+                exit_code: None,
+                output_path: output_path.to_string_lossy().to_string(),
+            };
+            log_editorial_agent_finished(
+                log_session,
+                run_id,
+                &agent_result,
+                None,
+                None,
+                Some(path.to_string_lossy().to_string()),
+                false,
+            );
+            agent_result
+        }
+    }
+}
+
+fn log_editorial_agent_finished(
+    log_session: &LogSession,
+    run_id: &str,
+    result: &EditorialAgentResult,
+    stdout_chars: Option<usize>,
+    stderr_chars: Option<usize>,
+    resolved_path: Option<String>,
+    timed_out: bool,
+) {
+    let _ = write_log_record(
+        log_session,
+        LogEventInput {
+            level: if result.tone == "ok" {
+                "info".to_string()
+            } else if result.tone == "warn" || result.tone == "blocked" {
+                "warn".to_string()
+            } else {
+                "error".to_string()
+            },
+            category: "session.agent.finished".to_string(),
+            message: "editorial agent process finished".to_string(),
+            context: Some(json!({
+                "run_id": sanitize_short(run_id, 120),
+                "agent": result.name,
+                "role": result.role,
+                "cli": result.cli,
+                "tone": result.tone,
+                "status": result.status,
+                "duration_ms": result.duration_ms,
+                "exit_code": result.exit_code,
+                "timed_out": timed_out,
+                "resolved_path": resolved_path,
+                "stdout_chars": stdout_chars,
+                "stderr_chars": stderr_chars,
+                "output_path": result.output_path
+            })),
+        },
+    );
+}
+
+fn extract_maestro_status(output: &str) -> Option<&'static str> {
+    output.lines().find_map(|line| {
+        let normalized = line.trim().to_ascii_uppercase();
+        if normalized == "MAESTRO_STATUS: READY" {
+            Some("READY")
+        } else if normalized == "MAESTRO_STATUS: NOT_READY" {
+            Some("NOT_READY")
+        } else {
+            None
+        }
+    })
+}
+
+fn extract_stdout_block(artifact: &str) -> Option<&str> {
+    let marker = "## Stdout\n\n```text\n";
+    let start = artifact.find(marker)? + marker.len();
+    let rest = &artifact[start..];
+    let end = rest.find("\n```\n\n## Stderr")?;
+    Some(rest[..end].trim())
+}
+
+fn build_session_minutes(
+    request: &EditorialSessionRequest,
+    run_id: &str,
+    agents: &[EditorialAgentResult],
+    consensus_ready: bool,
+    final_path: Option<&PathBuf>,
+) -> String {
+    let mut text = format!(
+        "# Ata da Sessao Maestro\n\n- Run: `{run_id}`\n- Sessao: {}\n- Protocolo: `{}`\n- Hash do protocolo: `{}`\n- Consenso unanime: `{}`\n- Texto final: `{}`\n\n## Solicitacao\n\n{}\n\n## Rodada 001\n\n",
+        sanitize_text(&request.session_name, 200),
+        sanitize_text(&request.protocol_name, 200),
+        sanitize_short(&request.protocol_hash, 80),
+        consensus_ready,
+        final_path
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_else(|| "bloqueado".to_string()),
+        request.prompt
+    );
+
+    for agent in agents {
+        text.push_str(&format!(
+            "- **{} / {}**: `{}` (`{}`), {} ms, artifact: `{}`\n",
+            agent.name, agent.role, agent.status, agent.tone, agent.duration_ms, agent.output_path
+        ));
+    }
+
+    if !consensus_ready {
+        text.push_str(
+            "\n## Decisao\n\nTexto final bloqueado. Pelo menos um peer nao retornou `MAESTRO_STATUS: READY` na mesma rodada ou houve falha de execucao.\n",
+        );
+    } else {
+        text.push_str(
+            "\n## Decisao\n\nTexto final liberado por unanimidade trilateral na rodada 001.\n",
+        );
+    }
+
+    text
+}
+
+fn cli_adapter_specs(request: &CliAdapterSmokeRequest) -> Vec<CliAdapterSpec> {
+    let run_id = sanitize_short(&request.run_id, 120);
+    let protocol_name = sanitize_text(&request.protocol_name, 160);
+    let protocol_hash_prefix = sanitize_short(&request.protocol_hash, 16);
+    let prompt_base = format!(
+        "Maestro Editorial AI adapter smoke. Run {run_id}. Prompt chars: {}. Protocol: {protocol_name}; lines: {}; hash prefix: {protocol_hash_prefix}. Do not use tools. Reply only with the exact marker requested.",
+        request.prompt_chars, request.protocol_lines
+    );
+
+    vec![
+        CliAdapterSpec {
+            name: "Claude",
+            command: "claude",
+            marker: "MAESTRO_CLI_SMOKE_CLAUDE_READY",
+            args: vec![
+                "--print".to_string(),
+                "--output-format".to_string(),
+                "text".to_string(),
+                "--permission-mode".to_string(),
+                "dontAsk".to_string(),
+                format!("{prompt_base} Marker: MAESTRO_CLI_SMOKE_CLAUDE_READY"),
+            ],
+            timeout: Duration::from_secs(90),
+        },
+        CliAdapterSpec {
+            name: "Codex",
+            command: "codex",
+            marker: "MAESTRO_CLI_SMOKE_CODEX_READY",
+            args: vec![
+                "--ask-for-approval".to_string(),
+                "never".to_string(),
+                "exec".to_string(),
+                "--skip-git-repo-check".to_string(),
+                "--sandbox".to_string(),
+                "read-only".to_string(),
+                "--color".to_string(),
+                "never".to_string(),
+                format!("{prompt_base} Marker: MAESTRO_CLI_SMOKE_CODEX_READY"),
+            ],
+            timeout: Duration::from_secs(90),
+        },
+        CliAdapterSpec {
+            name: "Gemini",
+            command: "gemini",
+            marker: "MAESTRO_CLI_SMOKE_GEMINI_READY",
+            args: vec![
+                "--prompt".to_string(),
+                format!("{prompt_base} Marker: MAESTRO_CLI_SMOKE_GEMINI_READY"),
+                "--output-format".to_string(),
+                "text".to_string(),
+                "--approval-mode".to_string(),
+                "yolo".to_string(),
+                "--skip-trust".to_string(),
+            ],
+            timeout: Duration::from_secs(90),
+        },
+    ]
+}
+
+fn run_cli_adapter_probe(spec: CliAdapterSpec) -> CliAdapterProbeResult {
+    let started = Instant::now();
+    let Some(path) = resolve_command(spec.command) else {
+        return CliAdapterProbeResult {
+            name: spec.name.to_string(),
+            cli: spec.command.to_string(),
+            tone: "blocked".to_string(),
+            status: "CLI nao encontrada no PATH efetivo".to_string(),
+            duration_ms: started.elapsed().as_millis(),
+            exit_code: None,
+            marker_found: false,
+        };
+    };
+
+    match run_resolved_command_with_timeout(&path, &spec.args, spec.timeout, None) {
+        Ok(result) => {
+            let exit_code = result.output.status.code();
+            let stdout = String::from_utf8_lossy(&result.output.stdout);
+            let stderr = String::from_utf8_lossy(&result.output.stderr);
+            let marker_found = stdout.contains(spec.marker) || stderr.contains(spec.marker);
+
+            let (tone, status) = if result.timed_out {
+                ("error", "timeout aguardando resposta da CLI")
+            } else if result.output.status.success() && marker_found {
+                ("ok", "CLI executada e marcador recebido")
+            } else if result.output.status.success() {
+                ("warn", "CLI executada, mas marcador esperado nao apareceu")
+            } else {
+                ("error", "CLI retornou codigo de saida diferente de zero")
+            };
+
+            CliAdapterProbeResult {
+                name: spec.name.to_string(),
+                cli: spec.command.to_string(),
+                tone: tone.to_string(),
+                status: status.to_string(),
+                duration_ms: result.duration_ms,
+                exit_code,
+                marker_found,
+            }
+        }
+        Err(error) => CliAdapterProbeResult {
+            name: spec.name.to_string(),
+            cli: spec.command.to_string(),
+            tone: "error".to_string(),
+            status: sanitize_text(&format!("falha ao executar CLI: {error}"), 240),
+            duration_ms: started.elapsed().as_millis(),
+            exit_code: None,
+            marker_found: false,
+        },
+    }
 }
 
 fn token_source_label(request: &CloudflareProbeRequest) -> String {
@@ -947,6 +1833,110 @@ fn run_resolved_command(path: &Path, args: &[&str]) -> std::io::Result<Output> {
     Command::new(path).args(args).output()
 }
 
+fn run_resolved_command_with_timeout(
+    path: &Path,
+    args: &[String],
+    timeout: Duration,
+    stdin_text: Option<&str>,
+) -> std::io::Result<TimedCommandOutput> {
+    let started = Instant::now();
+    let mut command = resolved_command_builder(path, args);
+    command
+        .current_dir(app_root())
+        .stdin(if stdin_text.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    if let Some(text) = stdin_text {
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(text.as_bytes())?;
+        }
+    }
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_handle = thread::spawn(move || read_pipe_to_end(stdout));
+    let stderr_handle = thread::spawn(move || read_pipe_to_end(stderr));
+
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let stdout = stdout_handle.join().unwrap_or_default();
+            let stderr = stderr_handle.join().unwrap_or_default();
+            let output = Output {
+                status,
+                stdout,
+                stderr,
+            };
+            return Ok(TimedCommandOutput {
+                output,
+                duration_ms: started.elapsed().as_millis(),
+                timed_out: false,
+            });
+        }
+
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let status = child.wait()?;
+            let stdout = stdout_handle.join().unwrap_or_default();
+            let stderr = stderr_handle.join().unwrap_or_default();
+            let output = Output {
+                status,
+                stdout,
+                stderr,
+            };
+            return Ok(TimedCommandOutput {
+                output,
+                duration_ms: started.elapsed().as_millis(),
+                timed_out: true,
+            });
+        }
+
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn read_pipe_to_end(pipe: Option<impl Read>) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    if let Some(mut pipe) = pipe {
+        let _ = pipe.read_to_end(&mut buffer);
+    }
+    buffer
+}
+
+fn resolved_command_builder(path: &Path, args: &[String]) -> Command {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    #[cfg(windows)]
+    {
+        if extension == "cmd" || extension == "bat" {
+            let mut command =
+                Command::new(std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string()));
+            command.arg("/C").arg(path).args(args);
+            return command;
+        }
+
+        if extension == "ps1" {
+            let mut command = Command::new("powershell.exe");
+            command
+                .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+                .arg(path)
+                .args(args);
+            return command;
+        }
+    }
+
+    let mut command = Command::new(path);
+    command.args(args);
+    command
+}
+
 fn sanitize_short(value: &str, max_len: usize) -> String {
     sanitize_text(value, max_len)
         .chars()
@@ -979,14 +1969,11 @@ fn sanitize_value(value: Value, depth: usize) -> Value {
             map.into_iter()
                 .take(120)
                 .map(|(key, value)| {
-                    let lowered = key.to_ascii_lowercase();
-                    if lowered.contains("secret")
-                        || lowered.contains("token")
-                        || lowered.contains("password")
-                        || lowered.contains("credential")
-                        || lowered.contains("api_key")
-                    {
-                        (key, Value::String("<redacted>".to_string()))
+                    if should_redact_key(&key) {
+                        (
+                            sanitize_text(&key, 80),
+                            Value::String("<redacted>".to_string()),
+                        )
                     } else {
                         (sanitize_text(&key, 80), sanitize_value(value, depth - 1))
                     }
@@ -997,53 +1984,66 @@ fn sanitize_value(value: Value, depth: usize) -> Value {
     }
 }
 
+fn should_redact_key(key: &str) -> bool {
+    let lowered = key.to_ascii_lowercase();
+    if matches!(
+        lowered.as_str(),
+        "credential_storage_mode"
+            | "cloudflare_api_token_source"
+            | "cloudflare_api_token_env_var"
+            | "cloudflare_api_token_env_scope"
+            | "cloudflare_api_token_present"
+            | "token_source"
+            | "token_env_var"
+            | "token_present"
+            | "secret_store"
+    ) {
+        return false;
+    }
+
+    let safe_suffixes = [
+        "_present",
+        "_source",
+        "_scope",
+        "_env_var",
+        "_env_scope",
+        "_mode",
+        "_label",
+        "_name",
+        "_status",
+        "_tone",
+        "_kind",
+        "_prefix",
+    ];
+    if safe_suffixes.iter().any(|suffix| lowered.ends_with(suffix)) {
+        return false;
+    }
+
+    lowered.contains("secret")
+        || lowered.contains("token")
+        || lowered.contains("password")
+        || lowered.contains("credential")
+        || lowered.contains("api_key")
+        || lowered.contains("api-key")
+        || lowered.contains("authorization")
+        || lowered.contains("cookie")
+        || lowered.contains("private")
+}
+
 fn redact_secrets(value: &str) -> String {
-    let private_block_marker = format!("{}BEGIN", "-".repeat(5));
-
-    value
-        .split_whitespace()
-        .map(|part| {
-            if part.starts_with("sk-")
-                || part.starts_with("sk-ant-")
-                || part.starts_with("sk_live_")
-                || part.starts_with("cfut_")
-                || part.starts_with("cfat_")
-                || part.starts_with("cfk_")
-                || part.starts_with("xoxb-")
-                || part.starts_with("xoxa-")
-                || part.starts_with("xoxp-")
-                || part.starts_with("xoxr-")
-                || part.starts_with("xoxs-")
-                || part.starts_with("ghp_")
-                || part.starts_with("gho_")
-                || part.starts_with("ghu_")
-                || part.starts_with("ghs_")
-                || part.starts_with("ghr_")
-                || part.starts_with("AIza")
-                || looks_like_resend_key(part)
-                || looks_like_aws_access_key(part)
-                || part.contains(&private_block_marker)
-            {
-                "<redacted>"
-            } else {
-                part
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    secret_value_regex()
+        .replace_all(value, "<redacted>")
+        .to_string()
 }
 
-fn looks_like_resend_key(part: &str) -> bool {
-    part.starts_with("re_") && part.len() >= 23
-}
-
-fn looks_like_aws_access_key(part: &str) -> bool {
-    part.len() >= 20
-        && part.starts_with("AKIA")
-        && part
-            .chars()
-            .take(20)
-            .all(|character| character.is_ascii_uppercase() || character.is_ascii_digit())
+fn secret_value_regex() -> &'static Regex {
+    static SECRET_VALUE_REGEX: OnceLock<Regex> = OnceLock::new();
+    SECRET_VALUE_REGEX.get_or_init(|| {
+        Regex::new(
+            r"(?m)(sk-ant-[A-Za-z0-9_-]{8,}|sk_live_[A-Za-z0-9_-]{8,}|sk-[A-Za-z0-9_-]{8,}|cfut_[A-Za-z0-9_-]{8,}|cfat_[A-Za-z0-9_-]{8,}|cfk_[A-Za-z0-9_-]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|AIza[0-9A-Za-z_-]{8,}|re_[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN[^\r\n]*(?:\r?\n[^\r\n]*){0,80})",
+        )
+        .expect("valid secret redaction regex")
+    })
 }
 
 #[cfg(test)]
@@ -1068,8 +2068,40 @@ mod tests {
 
     #[test]
     fn redacts_cloudflare_token_prefixes() {
-        let text = redact_secrets("cfat_secret cfut_secret cfk_secret");
+        let text = redact_secrets("cfat_secret123 cfut_secret123 cfk_secret123");
         assert_eq!(text, "<redacted> <redacted> <redacted>");
+    }
+
+    #[test]
+    fn redacts_embedded_secret_values_without_whitespace_boundary() {
+        let text = redact_secrets(
+            r#"url=https://example.test/?key=AIza12345678 header=Authorization:Bearer cfut_12345678 json={"api_key":"sk-ant-12345678"}"#,
+        );
+        assert!(!text.contains("AIza12345678"));
+        assert!(!text.contains("cfut_12345678"));
+        assert!(!text.contains("sk-ant-12345678"));
+        assert!(text.contains("<redacted>"));
+    }
+
+    #[test]
+    fn preserves_whitespace_when_redacting() {
+        let text = redact_secrets("line1\nline2\tcfat_12345678");
+        assert_eq!(text, "line1\nline2\t<redacted>");
+    }
+
+    #[test]
+    fn keeps_safe_diagnostic_token_metadata_visible() {
+        assert!(!should_redact_key("cloudflare_api_token_present"));
+        assert!(!should_redact_key("cloudflare_api_token_env_var"));
+        assert!(!should_redact_key("token_source"));
+        assert!(!should_redact_key("credential_storage_mode"));
+    }
+
+    #[test]
+    fn redacts_raw_secret_like_keys() {
+        assert!(should_redact_key("api_token"));
+        assert!(should_redact_key("authorization"));
+        assert!(should_redact_key("private_key"));
     }
 }
 
@@ -1079,6 +2111,35 @@ pub fn run() {
         .manage(create_log_session())
         .setup(|app| {
             let log_session = app.state::<LogSession>();
+            let panic_log_session = log_session.inner().clone();
+            std::panic::set_hook(Box::new(move |panic_info| {
+                let payload = panic_info
+                    .payload()
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| panic_info.payload().downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("unknown panic payload");
+                let location = panic_info.location().map(|location| {
+                    format!(
+                        "{}:{}:{}",
+                        location.file(),
+                        location.line(),
+                        location.column()
+                    )
+                });
+                let _ = write_log_record(
+                    &panic_log_session,
+                    LogEventInput {
+                        level: "fatal".to_string(),
+                        category: "native.panic".to_string(),
+                        message: "native panic captured".to_string(),
+                        context: Some(json!({
+                            "payload": sanitize_text(payload, 1000),
+                            "location": location
+                        })),
+                    },
+                );
+            }));
             let _ = write_log_record(
                 &log_session,
                 LogEventInput {
@@ -1089,7 +2150,19 @@ pub fn run() {
                         "app_root": app_root().to_string_lossy(),
                         "log_dir": logs_dir().to_string_lossy(),
                         "log_file": log_session.path.to_string_lossy(),
-                        "log_session_id": log_session.id.clone()
+                        "log_session_id": log_session.id.clone(),
+                        "current_exe": std::env::current_exe().ok().map(|path| path.to_string_lossy().to_string()),
+                        "args_count": std::env::args().count(),
+                        "path_entries": command_search_dirs().len(),
+                        "resolved_commands": {
+                            "claude": resolve_command("claude").map(|path| path.to_string_lossy().to_string()),
+                            "codex": resolve_command("codex").map(|path| path.to_string_lossy().to_string()),
+                            "gemini": resolve_command("gemini").map(|path| path.to_string_lossy().to_string()),
+                            "node": resolve_command("node").map(|path| path.to_string_lossy().to_string()),
+                            "npm": resolve_command("npm").map(|path| path.to_string_lossy().to_string()),
+                            "cargo": resolve_command("cargo").map(|path| path.to_string_lossy().to_string()),
+                            "gh": resolve_command("gh").map(|path| path.to_string_lossy().to_string())
+                        }
                     })),
                 },
             );
@@ -1103,7 +2176,9 @@ pub fn run() {
             write_bootstrap_config,
             cloudflare_env_snapshot,
             dependency_preflight,
-            verify_cloudflare_credentials
+            verify_cloudflare_credentials,
+            run_cli_adapter_smoke,
+            run_editorial_session
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Maestro Editorial AI");

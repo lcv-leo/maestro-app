@@ -9,15 +9,14 @@ updates:
       - "github-actions"
     open-pull-requests-limit: 5
 
-  # Enable when package.json exists.
-  # - package-ecosystem: "npm"
-  #   directory: "/"
-  #   schedule:
-  #     interval: "weekly"
-  #   labels:
-  #     - "dependencies"
-  #     - "npm"
-  #   open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "npm"
+    open-pull-requests-limit: 5
 
   # Enable when src-tauri/Cargo.toml exists.
   # - package-ecosystem: "cargo"

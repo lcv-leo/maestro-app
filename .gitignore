@@ -1,23 +1,84 @@
-### AL ###
-#Template for AL projects for Dynamics 365 Business Central
-#launch.json folder
-.vscode/
-#Cache folder
-.alcache/
-#Symbols folder
-.alpackages/
-#Snapshots folder
-.snapshots/
-#Testing Output folder
-.output/
-#Extension App-file
-*.app
-#Rapid Application Development File
-rad.json
-#Translation Base-file
-*.g.xlf
-#License-files
-*.bclicense
-*.flf
-#Test results file
-TestResults.xml
+# Dependencies and build output
+node_modules/
+dist/
+build/
+out/
+target/
+.turbo/
+.vite/
+coverage/
+
+# Portable runtime data - never commit user/editorial state
+data/
+sessions/
+exports/
+logs/
+cache/
+tmp/
+temp/
+*.log
+*.pid
+
+# WebView/browser runtime folders
+*.WebView2/
+webview/
+GPUCache/
+Code Cache/
+Service Worker/
+IndexedDB/
+Local Storage/
+Session Storage/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+*.crt
+*.cer
+secrets.json
+credentials.json
+token.json
+vault.json
+vault*.json
+oauth_creds.json
+
+# AI/CLI runtime transcripts and prompt dumps
+*.transcript.json
+*.transcript.ndjson
+*.prompt.json
+*.conversation.json
+*.conversation.ndjson
+cli-output/
+agent-runs/
+sessions/**/*.prompt.md
+sessions/**/*.response.json
+cli-output/**/*.prompt.md
+cli-output/**/*.response.json
+agent-runs/**/*.prompt.md
+agent-runs/**/*.response.json
+
+# Local drafts/evidence unless explicitly promoted as public fixtures
+drafts/
+evidence/
+source-cache/
+pdf-cache/
+link-cache/
+docs/source-protocols/*.md
+!docs/source-protocols/README.md
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+*.bak
+*.swp
+*~
+~$*
+* (Conflicted Copy *).*
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.example.json

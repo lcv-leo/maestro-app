@@ -16,9 +16,10 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tauri::Manager;
+use tauri::{path::BaseDirectory, Manager};
 
 static NATIVE_LOG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static APP_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
 #[derive(Clone)]
 struct LogSession {
@@ -625,11 +626,31 @@ fn run_editorial_session_blocking(
 }
 
 fn app_root() -> PathBuf {
-    std::env::current_exe()
-        .expect("failed to resolve current executable path")
-        .parent()
-        .expect("current executable must have a parent directory")
-        .to_path_buf()
+    if let Some(path) = APP_ROOT.get() {
+        return path.clone();
+    }
+
+    #[cfg(test)]
+    {
+        return std::env::temp_dir().join("maestro-editorial-ai-tests");
+    }
+
+    #[cfg(not(test))]
+    {
+        panic!("Maestro app root must be initialized by Tauri setup before use");
+    }
+}
+
+fn initialize_app_root(app: &tauri::App) -> Result<(), String> {
+    let root = app
+        .path()
+        .resolve("", BaseDirectory::Executable)
+        .map_err(|error| format!("failed to resolve portable executable dir: {error}"))?;
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("failed to canonicalize portable executable dir: {error}"))?;
+    let _ = APP_ROOT.set(root);
+    Ok(())
 }
 
 fn data_dir() -> PathBuf {
@@ -664,12 +685,50 @@ fn checked_data_child_path(path: &Path) -> Result<PathBuf, String> {
 
     if relative
         .components()
-        .any(|component| !matches!(component, Component::Normal(_)))
+        .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
     {
         return Err("internal data path contains unsafe segments".to_string());
     }
 
-    Ok(path.to_path_buf())
+    fs::create_dir_all(&data_root)
+        .map_err(|error| format!("failed to create Maestro data root: {error}"))?;
+    let canonical_data_root = data_root
+        .canonicalize()
+        .map_err(|error| format!("failed to canonicalize Maestro data root: {error}"))?;
+
+    if path.exists() {
+        let canonical_path = path
+            .canonicalize()
+            .map_err(|error| format!("failed to canonicalize Maestro data path: {error}"))?;
+        if !canonical_path.starts_with(&canonical_data_root) {
+            return Err("internal data path escaped canonical Maestro data directory".to_string());
+        }
+        return Ok(canonical_path);
+    }
+
+    let existing_ancestor = path
+        .ancestors()
+        .skip(1)
+        .find(|ancestor| ancestor.exists())
+        .ok_or_else(|| "internal data path has no existing ancestor".to_string())?;
+    let canonical_ancestor = existing_ancestor
+        .canonicalize()
+        .map_err(|error| format!("failed to canonicalize Maestro data ancestor: {error}"))?;
+    if !canonical_ancestor.starts_with(&canonical_data_root) {
+        return Err("internal data path escaped canonical Maestro data directory".to_string());
+    }
+
+    let suffix = path
+        .strip_prefix(existing_ancestor)
+        .map_err(|_| "internal data path could not be rebased".to_string())?;
+    if suffix
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+    {
+        return Err("internal data path contains unsafe rebased segments".to_string());
+    }
+
+    Ok(canonical_ancestor.join(suffix))
 }
 
 fn sanitize_path_segment(value: &str, max_len: usize) -> String {
@@ -2440,8 +2499,9 @@ mod tests {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .manage(create_log_session())
         .setup(|app| {
+            initialize_app_root(app)?;
+            app.manage(create_log_session());
             let log_session = app.state::<LogSession>();
             let panic_log_session = log_session.inner().clone();
             std::panic::set_hook(Box::new(move |panic_info| {

@@ -140,13 +140,46 @@ jobs:
           fi
 
           cat > RELEASE_NOTES.md <<NOTES
-          Maestro Editorial AI ${tag}
+          # Maestro Editorial AI ${tag}
 
-          Primary distribution: portable Windows 11+ ZIP archive.
+          Portable Windows 11+ editorial workbench for protocol-driven AI drafting, source verification, and multi-agent convergence.
 
-          This release does not publish a NuGet package. GitHub Packages is used as an optional GHCR/OCI mirror for automation, while GitHub Releases remains the human-facing download channel.
+          ## Download
 
-          Verify the ZIP with SHA256SUMS.txt before running it.
+          - Portable app: `maestro-editorial-ai-${tag}-windows-x64-portable.zip`
+          - Checksum file: `SHA256SUMS.txt`
+
+          ## How to Test
+
+          1. Download the portable ZIP from this release.
+          2. Download `SHA256SUMS.txt`.
+          3. Verify the ZIP checksum.
+          4. Extract the ZIP into a local folder.
+          5. Run `Maestro Editorial AI.exe`.
+
+          ## What This Pre-Release Contains
+
+          - Tauri 2 / WebView2 Windows shell.
+          - React workbench UI for the planned editorial session flow.
+          - Protocol import surface.
+          - PostEditor parity surface for MainSite-compatible HTML editing.
+          - Friendly background-operation indicators.
+          - Settings UI for Cloudflare credentials and AI provider credentials.
+          - Three persistence modes in the product contract: local JSON, Windows env-var hybrid, and Cloudflare D1 `maestro_db` plus Secrets Store.
+          - Structured NDJSON diagnostic logging plan and runtime hooks.
+
+          ## Current Limits
+
+          - This is a pre-release scaffold for practical smoke testing, not the final editorial engine.
+          - CLI agent orchestration, Cloudflare persistence provisioning, link validation, ABNT formatting, and MainSite D1 publishing are planned but not production-complete in this build.
+          - No NuGet package is published. GitHub Releases is the human-facing distribution channel; GitHub Packages/GHCR is only an automation mirror.
+
+          ## Verification
+
+          - Release workflow builds the portable executable on GitHub-hosted Windows runner.
+          - ZIP receives a SHA-256 checksum.
+          - ZIP receives GitHub artifact attestation.
+          - CI, CodeQL Default Setup, and Dependabot checks are expected to be green on the release commit.
           NOTES
 
           is_prerelease="false"

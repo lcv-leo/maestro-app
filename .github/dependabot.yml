@@ -1,0 +1,30 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    open-pull-requests-limit: 5
+
+  # Enable when package.json exists.
+  # - package-ecosystem: "npm"
+  #   directory: "/"
+  #   schedule:
+  #     interval: "weekly"
+  #   labels:
+  #     - "dependencies"
+  #     - "npm"
+  #   open-pull-requests-limit: 5
+
+  # Enable when src-tauri/Cargo.toml exists.
+  # - package-ecosystem: "cargo"
+  #   directory: "/src-tauri"
+  #   schedule:
+  #     interval: "weekly"
+  #   labels:
+  #     - "dependencies"
+  #     - "rust"
+  #   open-pull-requests-limit: 5

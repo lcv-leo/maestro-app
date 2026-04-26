@@ -1,0 +1,5 @@
+# Rename to FUNDING.yml only after the operator confirms the GitHub Sponsors
+# account or external funding URL that should be shown on the public repository.
+#
+# github: ["lcv-leo"]
+# custom: ["https://example.com/funding"]

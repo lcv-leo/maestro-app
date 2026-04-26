@@ -39,7 +39,7 @@ If WebView2 is absent, the app fails closed with a clear diagnostic. It must not
 
 Current baseline verified on 2026-04-26 via npm metadata: `@tauri-apps/cli 2.10.1`, `@tauri-apps/api 2.10.1`, `vite 8.0.10`, `react 19.2.5`, `react-dom 19.2.5`, `typescript 6.0.3`, `vitest 4.1.5`, `@vitejs/plugin-react 6.0.1`, `@biomejs/biome 2.4.13`, `eslint 10.2.1`, `lucide-react 1.11.0`. Scaffold must use latest stable versions at implementation time and pin them in lockfiles.
 
-Local prerequisite gap observed 2026-04-26: `rustc`, `cargo`, and `rustup` are not on PATH. The Tauri scaffold cannot be validated until a stable Rust toolchain is installed and pinned with `rust-toolchain.toml`.
+Local prerequisite recheck observed 2026-04-26: Rust is installed through rustup at `C:\Users\leona\.cargo\bin` with `stable-x86_64-pc-windows-msvc` as the default toolchain. If a running terminal cannot resolve `rustc`, restart the terminal/session or reload the user `PATH`; the persistent user `PATH` already contains `.cargo\bin`.
 
 ## 4. Core Modules
 
@@ -242,4 +242,4 @@ The repository is assumed private during early synchronization and public later.
 - Choose the first set of external catalog APIs after validating availability, terms, and rate limits.
 - Decide whether the optional encrypted JSON vault is in v1 or deferred.
 - Decide the first public package names for GitHub Packages and whether app binaries are released only through GitHub Releases or also package registries.
-- Install and pin a stable Rust toolchain before Tauri scaffolding.
+- Pin the verified stable Rust toolchain with `rust-toolchain.toml` before Tauri scaffolding.

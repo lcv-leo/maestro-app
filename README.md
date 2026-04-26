@@ -2,6 +2,15 @@
 
 Portable Windows editorial workbench for protocol-driven AI drafting, source verification, and multi-agent editorial convergence.
 
+[![CI](https://github.com/lcv-leo/maestro-app/actions/workflows/ci.yml/badge.svg)](https://github.com/lcv-leo/maestro-app/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/lcv-leo/maestro-app/actions/workflows/codeql.yml/badge.svg)](https://github.com/lcv-leo/maestro-app/actions/workflows/codeql.yml)
+![status](https://img.shields.io/badge/status-planning-yellow)
+![target](https://img.shields.io/badge/target-Windows%2011%2B-blue)
+![stack](https://img.shields.io/badge/stack-Tauri%202%20%2B%20React%2019-blueviolet)
+![runtime](https://img.shields.io/badge/runtime-portable-green)
+![state](https://img.shields.io/badge/state-JSON%2FNDJSON-informational)
+![license](https://img.shields.io/badge/license-AGPL--3.0-blue)
+
 Status: planning stage.
 
 Maestro is independent from `cross-review-mcp`; it incorporates the same strict convergence discipline in its own application logic. It is designed to run from a folder, keep runtime data out of Git, and store operator protocols, drafts, evidence, and sessions locally under ignored runtime paths.

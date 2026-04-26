@@ -35,3 +35,7 @@ jobs:
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4
+        with:
+          # Private repository bootstrap: run analysis now, publish SARIF after
+          # GitHub Code Scanning/GHAS is enabled or the repository becomes public.
+          upload: never

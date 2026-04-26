@@ -21,7 +21,8 @@ The app lives under `maestro-app`, runs from any folder, uses no installer as a 
 - No persistent secrets by default. Optional secrets use an app-local encrypted JSON vault with a user passphrase, not DPAPI in v1.
 - GitHub synchronization begins from the first implementation, with public release only after maturity. Repository hygiene is therefore a day-zero hard gate: no secrets, API keys, credentials, local session data, raw CLI transcripts, user drafts, evidence caches, or generated exports may be committed.
 - Before any future private-to-public repository flip, run a full pre-cloud exposure audit and full-history secret scan.
-- Work as if GitHub Secret Scanning, Code Scanning, CodeQL, Dependabot alerts, Dependabot version updates, GitHub Releases, GitHub Packages, and GitHub Sponsors are already enabled. Repository files must be compatible with these checks from the first commit.
+- Work as if GitHub Secret Scanning, Code Scanning, CodeQL Default Setup, Dependabot alerts, Dependabot version updates, GitHub Releases, GitHub Packages, GitHub Pages, and GitHub Sponsors are already enabled. Repository files must be compatible with these checks from the first commit.
+- CodeQL must remain on GitHub Default Setup. Advanced Setup requires prior technical justification and explicit operator authorization.
 
 ## 3. Runtime Architecture
 
@@ -227,12 +228,12 @@ The repository is assumed private during early synchronization and public later.
 - Keep `.env.example` and `config.example.json` sanitized and documented.
 - CI must include secret scanning before public release.
 - Add Dependabot configuration for npm, GitHub Actions, and Rust/Cargo once those manifests exist.
-- Add CodeQL/code scanning workflow as soon as code is scaffolded. Treat alerts as release blockers unless explicitly triaged.
+- Use GitHub CodeQL Default Setup for code scanning. Treat alerts as release blockers unless explicitly triaged.
 - README, LICENSE, SECURITY, CONTRIBUTING, CODE_OF_CONDUCT, CHANGELOG, release notes, package metadata, and GitHub Packages publication plan are day-zero deliverables, not post-maturity cleanup.
 - GitHub Releases use annotated tags and generated release notes only after local validation and pre-release audit.
 - GitHub Packages publishing is planned but disabled until package identity, privacy posture, and token handling are settled.
-- GitHub Sponsors support is planned through `.github/FUNDING.yml` only after the operator confirms the funding account/URL.
-- CodeQL workflow starts with JavaScript/TypeScript analysis. Add Rust analysis when `src-tauri` exists and the Rust build path is deterministic.
+- GitHub Sponsors support is active through `.github/FUNDING.yml`, mirroring the public `cross-review-mcp` funding model with the Maestro Pages URL.
+- GitHub Pages uses the modern GitHub Actions artifact deployment model from `site/`, not a legacy `gh-pages` publishing branch.
 - Dependabot starts with GitHub Actions updates and enables npm/Cargo blocks as soon as the corresponding manifests exist.
 
 ## 14. Open Implementation Checks

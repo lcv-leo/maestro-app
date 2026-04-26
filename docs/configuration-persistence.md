@@ -5,6 +5,12 @@ Date: 2026-04-26.
 
 Maestro supports exactly three operator-selectable persistence modes for configuration, tokens, and API keys.
 
+Every mode starts from a local, non-secret bootstrap file:
+
+- `data/config/bootstrap.json`
+
+This file is created automatically and tells Maestro where the rest of the configuration lives. It may store account IDs, mode names, env-var names, database names, and secret-store names. It must not store API tokens, provider API keys, OAuth refresh tokens, private keys, or raw secrets.
+
 ## Mode 1 - Local JSON
 
 Everything is saved in local JSON files under ignored runtime paths.
@@ -52,6 +58,14 @@ Rules:
 ## Mode 3 - Cloudflare Remote
 
 Everything is persisted in the operator's Cloudflare account.
+
+One bootstrap exception is unavoidable: the Cloudflare API token needed to enter the Cloudflare account cannot live only inside that same Cloudflare account. On each app start, Maestro must get that initial token from one of these sources:
+
+- Windows env var, preferably `MAESTRO_CLOUDFLARE_API_TOKEN`.
+- A temporary operator entry in the local UI for that run.
+- A future local encrypted vault bound to the Windows user.
+
+The local `bootstrap.json` stores only the token source and env-var name, not the token value.
 
 Cloudflare resources:
 

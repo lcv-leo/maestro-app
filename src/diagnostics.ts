@@ -79,7 +79,7 @@ export function installGlobalDiagnostics() {
     level: 'info',
     category: 'app.lifecycle',
     message: 'frontend runtime booted',
-    context: { app: 'Maestro Editorial AI' },
+    context: { app: 'Maestro Editorial AI', log_policy: 'one_ndjson_file_per_app_execution' },
   });
 
   window.addEventListener('error', (event) => {

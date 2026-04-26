@@ -4,8 +4,19 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-04-26
+
 - Updated the release artifact upload/download actions to Node 24-capable versions to remove GitHub Actions Node 20 deprecation warnings.
 - Expanded the GitHub Release notes template so future releases include download, verification, scope, and current-limit sections.
+- Removed the empty Windows console window from release builds by setting the Rust Windows subsystem to `windows`.
+- Replaced static/fake session status with a live session monitor that changes state after prompt submission, records visible preflight stages, and explicitly blocks delivery when the real Claude/Codex/Gemini adapters are not connected.
+- Made the sidebar navigation functional so session, protocols, evidence, agents, settings, and setup render as separate app sections instead of dumping all configuration panels on the main screen.
+- Changed diagnostic logging to create one NDJSON log file per app execution, with a per-run `log_session_id` recorded in each event.
+- Added button hover, active, focus, and busy animations so operator actions have immediate visual feedback.
+- Added `data/config/bootstrap.json` as the local non-secret pointer file that tells Maestro which persistence backend to use on each app start.
+- Added automatic Cloudflare env-var discovery for account ID and API token presence without exposing token values in the UI or logs.
+- Added native dependency preflight for Setup so the app reports detected CLI/runtime versions instead of static checklist text.
+- Added `LEIAME.md` to the portable release package with first-run configuration, Cloudflare bootstrap, env-var, and logging instructions.
 
 ## [v0.1.0] - 2026-04-26
 

@@ -78,7 +78,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
           Copy-Item $binary (Join-Path $stage "Maestro Editorial AI.exe")
-          Copy-Item README.md $stage
+          Copy-Item LEIAME.md $stage
           Copy-Item LICENSE $stage
           Copy-Item CHANGELOG.md $stage
 

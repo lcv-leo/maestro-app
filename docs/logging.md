@@ -3,8 +3,10 @@
 Maestro records structured diagnostic events as newline-delimited JSON under:
 
 ```text
-data/logs/maestro-YYYY-MM-DD.ndjson
+data/logs/maestro-<timestamp>-pid<id>.ndjson
 ```
+
+Each app execution creates a new NDJSON file. Events inside one app execution are appended only to that execution's file and include a `session.id` plus `session.log_file`.
 
 During early development the logs are intentionally detailed. They should make UI actions, protocol imports, native runtime startup, frontend errors, unhandled promise rejections, session context, agent context, evidence context, and file paths understandable without replaying the whole session.
 
@@ -24,6 +26,7 @@ Each log line is standalone JSON with:
 - `message`
 - `context`
 - `app`
+- `session`
 
 Recommended bootstrap categories:
 

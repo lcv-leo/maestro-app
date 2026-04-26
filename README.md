@@ -6,16 +6,16 @@ Portable Windows editorial workbench for protocol-driven AI drafting, source ver
 [![Pages](https://github.com/lcv-leo/maestro-app/actions/workflows/pages.yml/badge.svg)](https://github.com/lcv-leo/maestro-app/actions/workflows/pages.yml)
 [![Release](https://github.com/lcv-leo/maestro-app/actions/workflows/release.yml/badge.svg)](https://github.com/lcv-leo/maestro-app/actions/workflows/release.yml)
 ![CodeQL](https://img.shields.io/badge/CodeQL-default%20setup-enabled-brightgreen)
-![status](https://img.shields.io/badge/status-planning-yellow)
+![status](https://img.shields.io/badge/status-foundation-blue)
 ![target](https://img.shields.io/badge/target-Windows%2011%2B-blue)
 ![stack](https://img.shields.io/badge/stack-Tauri%202%20%2B%20React%2019-blueviolet)
 ![runtime](https://img.shields.io/badge/runtime-portable-green)
 ![state](https://img.shields.io/badge/state-JSON%2FNDJSON-informational)
 ![license](https://img.shields.io/badge/license-AGPL--3.0-blue)
 
-Status: planning stage.
+Status: foundation build with live bootstrap, diagnostics, navigation, and preflight; editorial agent orchestration is still under implementation.
 
-Current project version: `v0.1.0`.
+Current project version: `v0.2.0`.
 
 Maestro is independent from `cross-review-mcp`; it incorporates the same strict convergence discipline in its own application logic. It is designed to run from a folder, keep runtime data out of Git, and store operator protocols, drafts, evidence, and sessions locally under ignored runtime paths.
 
@@ -38,6 +38,8 @@ Cloudflare account/token configuration, D1 permission validation, and API-first 
 Official AI provider API/SDK credentials are planned under `docs/ai-provider-credentials.md`, alongside the existing CLI path.
 
 Configuration persistence supports three modes: local JSON for everything, Windows env-var hybrid for tokens/API keys plus JSON for other settings, and Cloudflare remote persistence through D1 `maestro_db` plus Cloudflare Secrets Store. See `docs/configuration-persistence.md`.
+
+The portable ZIP includes `LEIAME.md` with first-run instructions for end users, including `data/config/bootstrap.json`, Cloudflare environment variables, and per-execution NDJSON logs.
 
 Prompt-to-consensus sessions export separate final text and session minutes. See `docs/editorial-session-workflow.md`.
 

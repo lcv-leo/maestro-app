@@ -32,6 +32,32 @@ select {
 
 button {
   cursor: pointer;
+  user-select: none;
+  transition:
+    transform 140ms ease,
+    box-shadow 140ms ease,
+    border-color 140ms ease,
+    background 140ms ease,
+    color 140ms ease,
+    opacity 140ms ease;
+}
+
+button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+button:active:not(:disabled) {
+  transform: translateY(1px) scale(0.98);
+}
+
+button:focus-visible {
+  outline: 3px solid rgba(26, 115, 232, 0.24);
+  outline-offset: 2px;
+}
+
+button:disabled {
+  cursor: progress;
+  opacity: 0.72;
 }
 
 .app-shell {
@@ -192,10 +218,34 @@ button {
   font-weight: 700;
 }
 
+.primary-button svg,
+.secondary-button svg,
+.icon-button svg,
+.nav-item svg {
+  flex: 0 0 auto;
+  transition: transform 140ms ease;
+}
+
+.primary-button:active:not(:disabled) svg,
+.secondary-button:active:not(:disabled) svg,
+.icon-button:active:not(:disabled) svg,
+.nav-item:active:not(:disabled) svg {
+  transform: scale(0.88);
+}
+
 .primary-button {
   padding: 0 14px;
   background: #1a73e8;
   color: #ffffff;
+}
+
+.primary-button:hover:not(:disabled) {
+  background: #1765cc;
+  box-shadow: 0 8px 20px rgb(26 115 232 / 20%);
+}
+
+.primary-button.busy svg {
+  animation: buttonSpin 900ms linear infinite;
 }
 
 .secondary-button {
@@ -205,11 +255,23 @@ button {
   border-color: #dadce0;
 }
 
+.secondary-button:hover:not(:disabled),
+.icon-button:hover:not(:disabled) {
+  border-color: #a8c7fa;
+  box-shadow: 0 6px 16px rgb(60 64 67 / 12%);
+}
+
 .icon-button {
   width: 40px;
   background: #ffffff;
   color: #5f6368;
   border-color: #dadce0;
+}
+
+@keyframes buttonSpin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .status-grid {
@@ -294,6 +356,7 @@ button {
   color: #5f6368;
   font-size: 12px;
   font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 .reading-panel {
@@ -376,6 +439,30 @@ button {
   gap: 16px;
 }
 
+.run-state-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  margin-top: 8px;
+  padding: 0 8px;
+  border-radius: 999px;
+  color: #475569;
+  background: #eef2f7;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.run-state-badge.preparing {
+  color: #1a73e8;
+  background: #e8f0fe;
+}
+
+.run-state-badge.blocked {
+  color: #b45309;
+  background: #fff7ed;
+}
+
 .verbosity-control {
   padding: 4px;
   border: 1px solid #d8dee8;
@@ -428,6 +515,26 @@ button {
   color: #1a73e8;
 }
 
+.pulse-icon.preparing {
+  animation: softPulse 1.2s ease-in-out infinite;
+}
+
+.pulse-icon.blocked {
+  color: #b45309;
+  background: #fff7ed;
+}
+
+@keyframes softPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgb(26 115 232 / 22%);
+  }
+
+  50% {
+    box-shadow: 0 0 0 8px rgb(26 115 232 / 0%);
+  }
+}
+
 .operation-summary strong,
 .operation-summary span {
   display: block;
@@ -462,6 +569,11 @@ button {
   height: 100%;
   border-radius: inherit;
   background: #1a73e8;
+  transition: width 260ms ease, background 160ms ease;
+}
+
+.progress-fill.blocked {
+  background: #d97706;
 }
 
 .progress-stack span {
@@ -828,6 +940,10 @@ button {
   border-left: 4px solid #16a34a;
 }
 
+.evidence-tile.idle {
+  border-left: 4px solid #94a3b8;
+}
+
 .evidence-tile.warn {
   border-left: 4px solid #d97706;
 }
@@ -1016,7 +1132,16 @@ button {
 }
 
 .check-row svg {
+  color: #64748b;
+}
+
+.check-row.ok svg {
   color: #16a34a;
+}
+
+.check-row.blocked svg,
+.check-row.error svg {
+  color: #d97706;
 }
 
 .credential-row {
@@ -1075,6 +1200,19 @@ button {
 .pipeline-row {
   grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
   align-items: center;
+}
+
+.pipeline-row.ok {
+  border-left: 4px solid #16a34a;
+}
+
+.pipeline-row.warn,
+.pipeline-row.pending {
+  border-left: 4px solid #d97706;
+}
+
+.pipeline-row.blocked {
+  border-left: 4px solid #dc2626;
 }
 
 @media (max-width: 980px) {

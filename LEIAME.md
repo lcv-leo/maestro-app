@@ -1,0 +1,55 @@
+# LEIAME - Maestro Editorial AI
+
+Este pacote e portatil para Windows 11+. Ele nao instala servicos, nao cria entrada de instalador e nao deve gravar segredos no repositorio.
+
+## Primeira execucao
+
+1. Extraia o ZIP em uma pasta local.
+2. Execute `Maestro Editorial AI.exe`.
+3. Abra `Ajustes` e escolha o modo de persistencia.
+4. Abra `Setup` para conferir o estado de bootstrap e logs.
+5. Se algo falhar, envie o arquivo NDJSON mais recente de `data/logs/`.
+
+## Arquivos locais criados pelo app
+
+- `data/config/bootstrap.json`: arquivo local sem segredos. Ele informa ao app qual arranjo de configuracao foi escolhido.
+- `data/logs/maestro-<timestamp>-pid<id>.ndjson`: um arquivo novo por execucao do app.
+- Futuras pastas de sessoes, cache e artefatos ficam sob `data/` e continuam fora do Git.
+
+## Bootstrap de configuracao
+
+O `bootstrap.json` sempre existe, mesmo quando o usuario escolhe Cloudflare. Ele guarda apenas ponteiros nao secretos:
+
+- `credential_storage_mode`: `local_json`, `windows_env` ou `cloudflare`.
+- `cloudflare_account_id`: identificador da conta, quando informado ou detectado.
+- `cloudflare_api_token_source`: onde buscar o token inicial da Cloudflare.
+- `cloudflare_api_token_env_var`: nome da env var que contem o token, quando aplicavel.
+- `cloudflare_persistence_database`: `maestro_db`.
+- `cloudflare_secret_store`: `maestro`.
+
+O token da Cloudflare nao pode ficar apenas na Cloudflare, porque ele e necessario antes de o app conseguir entrar na Cloudflare. Por isso o acesso inicial deve usar uma destas opcoes:
+
+- Env var do Windows, recomendado para testes atuais.
+- Campo temporario no app a cada execucao.
+- Cofre local criptografado por usuario do Windows, planejado para versao futura.
+
+## Env vars Cloudflare lidas automaticamente
+
+Em toda abertura o app procura estas variaveis:
+
+- Account ID: `MAESTRO_CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_ACCOUNT_ID`, `CF_ACCOUNT_ID`.
+- API token: `MAESTRO_CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_API_TOKEN`, `CF_API_TOKEN`.
+
+O app pode preencher o Account ID na tela. O valor do token nao e exibido nem gravado em log; o app registra apenas se ele existe e o nome da env var usada.
+
+## Modos de persistencia
+
+- JSON local: configuracoes e segredos ficam em arquivos locais sob `data/`, com aviso de cuidado operacional.
+- Env var Windows: tokens e API keys ficam em env vars; demais configuracoes ficam no JSON local.
+- Cloudflare: configuracoes remotas ficam em D1 `maestro_db`; segredos de agentes ficam no Cloudflare Secrets Store. Ainda e necessario um segredo de bootstrap local ou digitado para entrar na Cloudflare.
+
+## Estado deste build
+
+Este build ja mostra estados vivos de UI, navegacao lateral, logs por execucao e bloqueios honestos. O motor real de orquestracao Claude/Codex/Gemini ainda precisa ser conectado antes de gerar textos finais.
+
+Regra inviolavel: nenhum texto final deve ser entregue sem unanimidade trilateral real.

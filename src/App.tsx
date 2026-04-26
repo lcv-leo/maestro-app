@@ -21,6 +21,7 @@ import {
   Upload,
   Globe2,
 } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
 import type { ChangeEvent, ComponentType } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { logEvent } from './diagnostics';
@@ -39,6 +40,18 @@ type PhaseState = 'done' | 'active' | 'waiting';
 type ProviderMode = 'cli' | 'api' | 'hybrid';
 type AiCredentialKey = 'openai' | 'anthropic' | 'gemini';
 type CredentialStorageMode = 'local_json' | 'windows_env' | 'cloudflare';
+type CloudflareTokenSource = 'prompt_each_launch' | 'windows_env' | 'local_encrypted';
+type ActiveSection = 'session' | 'protocols' | 'evidence' | 'agents' | 'settings' | 'setup';
+type RunStatus = 'idle' | 'preparing' | 'blocked';
+type ActivityLevel = 'summary' | 'detail' | 'diagnostic';
+
+type OperationSnapshot = {
+  title: string;
+  progress: number;
+  current: string;
+  eta: string;
+  status: RunStatus;
+};
 
 type AgentCard = {
   name: string;
@@ -47,36 +60,101 @@ type AgentCard = {
   note: string;
 };
 
+type ActivityItem = {
+  level: ActivityLevel;
+  time: string;
+  title: string;
+  detail: string;
+};
+
+type PhaseItem = {
+  label: string;
+  detail: string;
+  state: PhaseState;
+};
+
+type DiscussionRound = {
+  round: string;
+  status: string;
+  note: string;
+};
+
+type EvidenceRow = {
+  label: string;
+  value: string;
+  tone: 'idle' | 'ok' | 'warn' | 'danger' | 'info';
+};
+
+type CloudflarePermissionRow = {
+  label: string;
+  value: string;
+  tone: 'pending' | 'blocked' | 'ok' | 'error';
+};
+
+type BootstrapCheckRow = {
+  label: string;
+  value: string;
+  tone: 'pending' | 'blocked' | 'ok' | 'warn';
+};
+
+type BootstrapConfig = {
+  schema_version: number;
+  credential_storage_mode: CredentialStorageMode;
+  cloudflare_account_id: string | null;
+  cloudflare_api_token_source: CloudflareTokenSource;
+  cloudflare_api_token_env_var: string;
+  cloudflare_persistence_database: string;
+  cloudflare_secret_store: string;
+  windows_env_prefix: string;
+  updated_at: string;
+};
+
+type CloudflareEnvSnapshot = {
+  account_id: string | null;
+  account_id_env_var: string | null;
+  api_token_present: boolean;
+  api_token_env_var: string | null;
+};
+
+type DependencyPreflight = {
+  checks: BootstrapCheckRow[];
+};
+
 type ProtocolReadingGate = {
   agent: string;
   progress: number;
   status: string;
 };
 
-const agents: AgentCard[] = [
-  { name: 'Claude', cli: 'claude', state: 'ready', note: '12 regras editoriais ativas' },
-  { name: 'Codex', cli: 'codex', state: 'evidence', note: '2 links aguardando HEAD/GET' },
-  { name: 'Gemini', cli: 'gemini', state: 'blocked', note: '1 fonte em quarentena' },
-  { name: 'MaestroPeer', cli: 'deterministico', state: 'evidence', note: 'ABNT: 2 citacoes sem localizador' },
+const initialAgents: AgentCard[] = [
+  { name: 'Claude', cli: 'claude', state: 'blocked', note: 'aguardando sessao editorial' },
+  { name: 'Codex', cli: 'codex', state: 'blocked', note: 'aguardando sessao editorial' },
+  { name: 'Gemini', cli: 'gemini', state: 'blocked', note: 'aguardando sessao editorial' },
+  { name: 'MaestroPeer', cli: 'deterministico', state: 'blocked', note: 'aguardando preflight local' },
 ];
 
-const evidenceRows = [
-  { label: 'DOI', value: '0 pendente', tone: 'ok' },
-  { label: 'Links', value: '2 em cross-review', tone: 'warn' },
-  { label: 'ABNT', value: '2 bloqueios', tone: 'warn' },
-  { label: 'Quarentena', value: '1 item', tone: 'danger' },
+const pendingAdapterAgents: AgentCard[] = [
+  { name: 'Claude', cli: 'claude', state: 'blocked', note: 'adaptador CLI/API ainda nao conectado neste build' },
+  { name: 'Codex', cli: 'codex', state: 'blocked', note: 'adaptador CLI/API ainda nao conectado neste build' },
+  { name: 'Gemini', cli: 'gemini', state: 'blocked', note: 'adaptador CLI/API ainda nao conectado neste build' },
+  { name: 'MaestroPeer', cli: 'deterministico', state: 'evidence', note: 'preflight local e logs estruturados prontos' },
 ];
 
-const protocolReadingGates: ProtocolReadingGate[] = [
-  { agent: 'Claude', progress: 100, status: '558/558 linhas confirmadas' },
-  { agent: 'Codex', progress: 100, status: 'hash + checklist validados' },
-  { agent: 'Gemini', progress: 100, status: 'anexos e regras indexados' },
+const initialEvidenceRows: EvidenceRow[] = [
+  { label: 'DOI', value: 'nao iniciado', tone: 'idle' },
+  { label: 'Links', value: 'nao iniciado', tone: 'idle' },
+  { label: 'ABNT', value: 'nao iniciado', tone: 'idle' },
+  { label: 'Quarentena', value: 'nao iniciado', tone: 'idle' },
 ];
 
-const discussionRounds = [
-  { round: '001', status: 'NEEDS_EVIDENCE', note: 'Codex pediu conferencia mecanica de 2 URLs.' },
-  { round: '002', status: 'NOT_READY', note: 'Claude manteve 4 bloqueios bibliograficos.' },
-  { round: '003', status: 'READY pendente', note: 'Aguardando Gemini reler a ata parcial.' },
+const initialProtocolReadingGates: ProtocolReadingGate[] = [
+  { agent: 'Claude', progress: 0, status: 'aguardando motor de orquestracao' },
+  { agent: 'Codex', progress: 0, status: 'aguardando motor de orquestracao' },
+  { agent: 'Gemini', progress: 0, status: 'aguardando motor de orquestracao' },
+];
+
+const initialDiscussionRounds: DiscussionRound[] = [
+  { round: '--', status: 'Sem rodada', note: 'Submeta um prompt para criar a primeira ata operacional.' },
 ];
 
 const finalArtifacts = [
@@ -105,20 +183,20 @@ const webEvidenceTools = [
   { label: 'navegador assistido', value: 'CAPTCHA/login com humano' },
 ];
 
-const bootstrapChecks = [
-  { label: 'WebView2', value: 'pronto' },
-  { label: 'Claude CLI', value: 'auth requerida' },
-  { label: 'Codex CLI', value: 'verificar versao' },
-  { label: 'Gemini CLI', value: 'instalar/configurar' },
-  { label: 'Cloudflare API', value: 'D1 principal' },
-  { label: 'Wrangler', value: '@latest fallback' },
+const initialBootstrapChecks: BootstrapCheckRow[] = [
+  { label: 'WebView2', value: 'probe pendente', tone: 'pending' },
+  { label: 'Claude CLI', value: 'probe pendente', tone: 'pending' },
+  { label: 'Codex CLI', value: 'probe pendente', tone: 'pending' },
+  { label: 'Gemini CLI', value: 'probe pendente', tone: 'pending' },
+  { label: 'Cloudflare env', value: 'probe pendente', tone: 'pending' },
+  { label: 'Wrangler', value: 'aguardando autorizacao', tone: 'pending' },
 ];
 
-const cloudflarePermissionChecks = [
-  { label: 'Token ativo', value: 'verify endpoint' },
-  { label: 'Conta acessivel', value: 'account id' },
-  { label: 'D1 Read/Edit', value: 'maestro_db + mainsite_posts' },
-  { label: 'Secrets Store', value: 'criar e mapear secrets' },
+const initialCloudflarePermissionChecks: CloudflarePermissionRow[] = [
+  { label: 'Token ativo', value: 'pendente de verificacao', tone: 'pending' },
+  { label: 'Conta acessivel', value: 'pendente de verificacao', tone: 'pending' },
+  { label: 'D1 Read/Edit', value: 'pendente de verificacao', tone: 'pending' },
+  { label: 'Secrets Store', value: 'pendente de verificacao', tone: 'pending' },
 ];
 
 const credentialStorageModes = [
@@ -178,44 +256,42 @@ const verbosityOptions = [
   { mode: 'diagnostico', label: 'Diagnostico', icon: ListChecks },
 ] satisfies Array<{ mode: VerbosityMode; label: string; icon: ComponentType<{ size?: number }> }>;
 
-const backgroundOperation = {
-  title: 'Conferencia editorial em background',
-  progress: 62,
-  current: 'Checando links e consolidando evidencias',
-  eta: 'rodada 001',
+const navItems = [
+  { section: 'session', label: 'Sessao', icon: GitBranch },
+  { section: 'protocols', label: 'Protocolos', icon: FileText },
+  { section: 'evidence', label: 'Evidencias', icon: Globe2 },
+  { section: 'agents', label: 'Agentes', icon: Bot },
+  { section: 'settings', label: 'Ajustes', icon: Settings },
+  { section: 'setup', label: 'Setup', icon: HardDriveDownload },
+] satisfies Array<{ section: ActiveSection; label: string; icon: ComponentType<{ size?: number }> }>;
+
+const idleOperation: OperationSnapshot = {
+  title: 'Aguardando sessao editorial',
+  progress: 0,
+  current: 'Nenhum prompt foi submetido nesta execucao.',
+  eta: 'ocioso',
+  status: 'idle',
 };
 
-const phases = [
-  { label: 'Protocolo', detail: 'hash fixado', state: 'done' },
-  { label: 'Triagem', detail: 'texto segmentado', state: 'done' },
-  { label: 'Evidencias', detail: 'links em HEAD/GET', state: 'active' },
-  { label: 'Consenso', detail: 'aguardando unanimidade', state: 'waiting' },
-] satisfies Array<{ label: string; detail: string; state: PhaseState }>;
+const idlePhases: PhaseItem[] = [
+  { label: 'Protocolo', detail: 'aguardando prompt', state: 'waiting' },
+  { label: 'Preflight', detail: 'nao iniciado', state: 'waiting' },
+  { label: 'Orquestracao', detail: 'nao iniciada', state: 'waiting' },
+  { label: 'Entrega', detail: 'bloqueada ate unanimidade', state: 'waiting' },
+];
 
-const activityFeed = [
+const idleActivityFeed: ActivityItem[] = [
   {
     level: 'summary',
-    time: 'agora',
-    title: 'Motor editorial ativo',
-    detail: 'As CLIs rodam ocultas; a interface mostra somente estados operacionais.',
-  },
-  {
-    level: 'detail',
-    time: '00:18',
-    title: 'Codex solicitou evidencia externa',
-    detail: '2 URLs foram movidas para verificacao mecanica antes da proxima rodada.',
-  },
-  {
-    level: 'detail',
-    time: '00:24',
-    title: 'Claude marcou correcoes objetivas',
-    detail: '12 itens editoriais continuam bloqueando a aceitacao formal.',
+    time: 'pronto',
+    title: 'Runtime carregado',
+    detail: 'Logs estruturados ativos. Ao submeter um prompt, o monitor deve registrar cada etapa visivel.',
   },
   {
     level: 'diagnostic',
-    time: '00:31',
-    title: 'Evento estruturado gravado',
-    detail: 'agent.round.status em data/logs/maestro-YYYY-MM-DD.ndjson.',
+    time: 'log',
+    title: 'Pasta de diagnostico',
+    detail: 'Anexe o data/logs/maestro-<timestamp>-pid<id>.ndjson mais recente quando pedir analise de falhas.',
   },
 ];
 
@@ -239,6 +315,7 @@ async function sha256(text: string) {
 
 export function App() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const runTimersRef = useRef<number[]>([]);
   const [protocol, setProtocol] = useState<ProtocolSnapshot>({
     name: 'protocolo-editorial-v1-10-0.md',
     size: 0,
@@ -255,20 +332,44 @@ export function App() {
   );
   const [providerMode, setProviderMode] = useState<ProviderMode>('hybrid');
   const [credentialStorageMode, setCredentialStorageMode] = useState<CredentialStorageMode>('local_json');
+  const [activeSection, setActiveSection] = useState<ActiveSection>('session');
   const [cloudflareAccountId, setCloudflareAccountId] = useState('');
   const [cloudflareApiToken, setCloudflareApiToken] = useState('');
+  const [cloudflareTokenSource, setCloudflareTokenSource] = useState<CloudflareTokenSource>('prompt_each_launch');
+  const [cloudflareTokenEnvVar, setCloudflareTokenEnvVar] = useState('MAESTRO_CLOUDFLARE_API_TOKEN');
+  const [cloudflareEnvSnapshot, setCloudflareEnvSnapshot] = useState<CloudflareEnvSnapshot | null>(null);
   const [aiCredentials, setAiCredentials] = useState<Record<AiCredentialKey, string>>({
     openai: '',
     anthropic: '',
     gemini: '',
   });
+  const [sessionRunId, setSessionRunId] = useState<string | null>(null);
+  const [operation, setOperation] = useState<OperationSnapshot>(idleOperation);
+  const [phaseItems, setPhaseItems] = useState<PhaseItem[]>(idlePhases);
+  const [activityItems, setActivityItems] = useState<ActivityItem[]>(idleActivityFeed);
+  const [discussionItems, setDiscussionItems] = useState<DiscussionRound[]>(initialDiscussionRounds);
+  const [agentCards, setAgentCards] = useState<AgentCard[]>(initialAgents);
+  const [evidenceRows, setEvidenceRows] = useState<EvidenceRow[]>(initialEvidenceRows);
+  const [protocolGateItems, setProtocolGateItems] = useState<ProtocolReadingGate[]>(initialProtocolReadingGates);
+  const [cloudflarePermissionRows, setCloudflarePermissionRows] = useState<CloudflarePermissionRow[]>(
+    initialCloudflarePermissionChecks,
+  );
+  const [bootstrapRows, setBootstrapRows] = useState<BootstrapCheckRow[]>(initialBootstrapChecks);
+  const [bootstrapConfigStatus, setBootstrapConfigStatus] = useState('bootstrap.json ainda nao carregado');
 
-  const readyCount = useMemo(() => agents.filter((agent) => agent.state === 'ready').length, []);
+  const readyCount = useMemo(() => agentCards.filter((agent) => agent.state === 'ready').length, [agentCards]);
   const visibleActivity = useMemo(() => {
-    if (verbosity === 'resumo') return activityFeed.slice(0, 1);
-    if (verbosity === 'detalhado') return activityFeed.filter((item) => item.level !== 'diagnostic');
-    return activityFeed;
-  }, [verbosity]);
+    if (verbosity === 'resumo') return activityItems.slice(0, 1);
+    if (verbosity === 'detalhado') return activityItems.filter((item) => item.level !== 'diagnostic');
+    return activityItems;
+  }, [activityItems, verbosity]);
+  const isRunPreparing = operation.status === 'preparing';
+  const runActionLabel = operation.status === 'blocked' ? 'Reiniciar sessao' : 'Iniciar sessao';
+  const formalState =
+    operation.status === 'idle' ? 'aguardando_prompt' : operation.status === 'preparing' ? 'preflight_em_execucao' : 'bloqueado';
+  const linkEvidenceState = evidenceRows.find((item) => item.label === 'Links')?.value ?? 'nao iniciado';
+  const activeNavItem = navItems.find((item) => item.section === activeSection) ?? navItems[0];
+  const cloudflareTokenAvailable = cloudflareApiToken.length > 0 || Boolean(cloudflareEnvSnapshot?.api_token_present);
 
   useEffect(() => {
     void logEvent({
@@ -283,6 +384,124 @@ export function App() {
     });
   }, []);
 
+  useEffect(() => {
+    void loadBootstrapConfig();
+  }, []);
+
+  useEffect(() => () => clearRunTimers(), []);
+
+  function clearRunTimers() {
+    runTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    runTimersRef.current = [];
+  }
+
+  function scheduleRunStep(delayMs: number, callback: () => void) {
+    const timer = window.setTimeout(callback, delayMs);
+    runTimersRef.current.push(timer);
+  }
+
+  function activityTimestamp() {
+    return new Date().toLocaleTimeString('pt-BR', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+  }
+
+  function appendActivity(item: Omit<ActivityItem, 'time'>) {
+    setActivityItems((current) => [{ ...item, time: activityTimestamp() }, ...current].slice(0, 8));
+  }
+
+  function createRunId() {
+    return `run-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  }
+
+  function buildBootstrapConfig(nextMode = credentialStorageMode): BootstrapConfig {
+    return {
+      schema_version: 1,
+      credential_storage_mode: nextMode,
+      cloudflare_account_id: cloudflareAccountId.trim() || cloudflareEnvSnapshot?.account_id || null,
+      cloudflare_api_token_source: cloudflareTokenSource,
+      cloudflare_api_token_env_var: cloudflareTokenEnvVar.trim() || 'MAESTRO_CLOUDFLARE_API_TOKEN',
+      cloudflare_persistence_database: 'maestro_db',
+      cloudflare_secret_store: 'maestro',
+      windows_env_prefix: 'MAESTRO_',
+      updated_at: new Date().toISOString(),
+    };
+  }
+
+  async function loadBootstrapConfig() {
+    try {
+      const [config, envSnapshot, preflight] = await Promise.all([
+        invoke<BootstrapConfig>('read_bootstrap_config'),
+        invoke<CloudflareEnvSnapshot>('cloudflare_env_snapshot'),
+        invoke<DependencyPreflight>('dependency_preflight'),
+      ]);
+
+      setBootstrapRows(preflight.checks);
+      setCredentialStorageMode(config.credential_storage_mode);
+      setCloudflareTokenSource(envSnapshot.api_token_present ? 'windows_env' : config.cloudflare_api_token_source);
+      setCloudflareTokenEnvVar(envSnapshot.api_token_env_var ?? config.cloudflare_api_token_env_var);
+      setCloudflareEnvSnapshot(envSnapshot);
+      if (!cloudflareAccountId.trim() && (envSnapshot.account_id || config.cloudflare_account_id)) {
+        setCloudflareAccountId(envSnapshot.account_id ?? config.cloudflare_account_id ?? '');
+      }
+      setBootstrapConfigStatus(
+        `bootstrap.json carregado; token Cloudflare ${
+          envSnapshot.api_token_present ? `detectado em ${envSnapshot.api_token_env_var}` : 'nao detectado em env var'
+        }`,
+      );
+      void logEvent({
+        level: 'info',
+        category: 'bootstrap.config.loaded',
+        message: 'bootstrap configuration and Cloudflare environment snapshot loaded',
+        context: {
+          credential_storage_mode: config.credential_storage_mode,
+          cloudflare_account_id_source: envSnapshot.account_id_env_var ? 'windows_env' : config.cloudflare_account_id ? 'bootstrap_json' : 'missing',
+          cloudflare_api_token_source: envSnapshot.api_token_present ? 'windows_env' : config.cloudflare_api_token_source,
+          cloudflare_api_token_env_var: envSnapshot.api_token_env_var ?? config.cloudflare_api_token_env_var,
+          cloudflare_api_token_present: envSnapshot.api_token_present,
+        },
+      });
+    } catch (error) {
+      setBootstrapConfigStatus('falha ao carregar bootstrap.json');
+      void logEvent({
+        level: 'error',
+        category: 'bootstrap.config.load_failed',
+        message: 'failed to load bootstrap configuration',
+        context: { error },
+      });
+    }
+  }
+
+  async function persistBootstrapConfig(nextMode = credentialStorageMode) {
+    try {
+      const saved = await invoke<BootstrapConfig>('write_bootstrap_config', {
+        config: buildBootstrapConfig(nextMode),
+      });
+      setBootstrapConfigStatus(`bootstrap.json salvo em ${saved.updated_at}`);
+      void logEvent({
+        level: 'info',
+        category: 'bootstrap.config.saved',
+        message: 'bootstrap configuration saved without secrets',
+        context: {
+          credential_storage_mode: saved.credential_storage_mode,
+          cloudflare_account_id_present: Boolean(saved.cloudflare_account_id),
+          cloudflare_api_token_source: saved.cloudflare_api_token_source,
+          cloudflare_api_token_env_var: saved.cloudflare_api_token_env_var,
+        },
+      });
+    } catch (error) {
+      setBootstrapConfigStatus('falha ao salvar bootstrap.json');
+      void logEvent({
+        level: 'error',
+        category: 'bootstrap.config.save_failed',
+        message: 'failed to save bootstrap configuration',
+        context: { error },
+      });
+    }
+  }
+
   function chooseVerbosity(nextVerbosity: VerbosityMode) {
     setVerbosity(nextVerbosity);
     void logEvent({
@@ -290,6 +509,16 @@ export function App() {
       category: 'ui.verbosity.changed',
       message: 'operator changed interface verbosity',
       context: { verbosity: nextVerbosity, session_name: sessionName },
+    });
+  }
+
+  function chooseSection(nextSection: ActiveSection) {
+    setActiveSection(nextSection);
+    void logEvent({
+      level: 'info',
+      category: 'ui.navigation.changed',
+      message: 'operator changed active Maestro section',
+      context: { active_section: nextSection, session_name: sessionName },
     });
   }
 
@@ -314,11 +543,71 @@ export function App() {
   }
 
   function startEditorialSession() {
+    const promptText = editorialPrompt.trim();
+    const runId = createRunId();
+
+    if (!promptText) {
+      setOperation({
+        title: 'Prompt ausente',
+        progress: 0,
+        current: 'Escreva uma solicitacao antes de iniciar a sessao.',
+        eta: 'aguardando entrada',
+        status: 'blocked',
+      });
+      appendActivity({
+        level: 'summary',
+        title: 'Prompt vazio bloqueado',
+        detail: 'Nenhum agente sera acionado sem uma solicitacao editorial concreta.',
+      });
+      void logEvent({
+        level: 'warn',
+        category: 'session.prompt.rejected',
+        message: 'operator tried to start an editorial session without a prompt',
+        context: { session_name: sessionName },
+      });
+      return;
+    }
+
+    clearRunTimers();
+    setSessionRunId(runId);
+    setOperation({
+      title: 'Preparando sessao editorial',
+      progress: 8,
+      current: 'Prompt recebido; fixando protocolo e abrindo ata operacional.',
+      eta: runId,
+      status: 'preparing',
+    });
+    setPhaseItems([
+      { label: 'Protocolo', detail: 'fixando hash', state: 'active' },
+      { label: 'Preflight', detail: 'aguardando protocolo', state: 'waiting' },
+      { label: 'Orquestracao', detail: 'nao iniciada', state: 'waiting' },
+      { label: 'Entrega', detail: 'bloqueada ate unanimidade', state: 'waiting' },
+    ]);
+    setAgentCards(initialAgents.map((agent) => ({ ...agent, note: 'aguardando preflight desta sessao' })));
+    setEvidenceRows(initialEvidenceRows.map((item) => ({ ...item, value: 'aguardando preflight' })));
+    setProtocolGateItems(initialProtocolReadingGates);
+    setDiscussionItems([
+      {
+        round: '000',
+        status: 'SESSION_CREATED',
+        note: 'Prompt recebido. Nenhum peer foi chamado ainda; entrega final permanece bloqueada.',
+      },
+    ]);
+    setActivityItems([
+      {
+        level: 'summary',
+        time: activityTimestamp(),
+        title: 'Prompt recebido',
+        detail: 'Sessao criada no monitor local. A partir daqui, cada etapa precisa aparecer na UI e no NDJSON.',
+      },
+      ...idleActivityFeed,
+    ]);
     void logEvent({
       level: 'info',
       category: 'session.prompt.submitted',
       message: 'operator submitted editorial generation prompt',
       context: {
+        run_id: runId,
         session_name: sessionName,
         prompt_chars: editorialPrompt.length,
         protocol_name: protocol.name,
@@ -326,6 +615,123 @@ export function App() {
         required_outputs: finalArtifacts.map((artifact) => artifact.name),
         consensus_gate: 'trilateral_ready_same_round',
       },
+    });
+    void logEvent({
+      level: 'info',
+      category: 'session.orchestration.started',
+      message: 'visible editorial session monitor started',
+      context: { run_id: runId, provider_mode: providerMode, credential_storage_mode: credentialStorageMode },
+    });
+
+    scheduleRunStep(350, () => {
+      setOperation({
+        title: 'Protocolo fixado',
+        progress: 22,
+        current: `Protocolo ativo registrado com ${protocol.lines.toLocaleString('pt-BR')} linhas.`,
+        eta: runId,
+        status: 'preparing',
+      });
+      setPhaseItems([
+        { label: 'Protocolo', detail: 'registrado no log', state: 'done' },
+        { label: 'Preflight', detail: 'checando motor local', state: 'active' },
+        { label: 'Orquestracao', detail: 'nao iniciada', state: 'waiting' },
+        { label: 'Entrega', detail: 'bloqueada ate unanimidade', state: 'waiting' },
+      ]);
+      appendActivity({
+        level: 'detail',
+        title: 'Protocolo registrado',
+        detail: `Arquivo ${protocol.name}; linhas=${protocol.lines}; hash=${protocol.hash.slice(0, 16)}.`,
+      });
+      void logEvent({
+        level: 'info',
+        category: 'session.protocol.pinned',
+        message: 'editorial protocol pinned for current visible session',
+        context: { run_id: runId, protocol_name: protocol.name, protocol_lines: protocol.lines, protocol_hash: protocol.hash },
+      });
+    });
+
+    scheduleRunStep(800, () => {
+      setOperation({
+        title: 'Preflight local concluido',
+        progress: 38,
+        current: 'UI, protocolo e log da sessao estao vivos; checagens editoriais reais aguardam adaptadores.',
+        eta: runId,
+        status: 'preparing',
+      });
+      setEvidenceRows([
+        { label: 'DOI', value: 'aguardando motor', tone: 'info' },
+        { label: 'Links', value: 'aguardando motor', tone: 'info' },
+        { label: 'ABNT', value: 'aguardando motor', tone: 'info' },
+        { label: 'Quarentena', value: 'aguardando motor', tone: 'info' },
+      ]);
+      appendActivity({
+        level: 'detail',
+        title: 'Preflight registrado',
+        detail: 'O app confirmou que a acao do usuario saiu da interface e foi para o log da sessao.',
+      });
+      void logEvent({
+        level: 'info',
+        category: 'session.preflight.completed',
+        message: 'local visible preflight completed',
+        context: { run_id: runId },
+      });
+    });
+
+    scheduleRunStep(1250, () => {
+      setOperation({
+        title: 'Orquestracao bloqueada',
+        progress: 40,
+        current: 'Nenhuma CLI/API foi executada: os adaptadores reais de Claude, Codex e Gemini ainda nao estao conectados neste build.',
+        eta: 'bloqueado',
+        status: 'blocked',
+      });
+      setPhaseItems([
+        { label: 'Protocolo', detail: 'registrado', state: 'done' },
+        { label: 'Preflight', detail: 'concluido', state: 'done' },
+        { label: 'Orquestracao', detail: 'adaptadores ausentes', state: 'active' },
+        { label: 'Entrega', detail: 'sem unanimidade', state: 'waiting' },
+      ]);
+      setProtocolGateItems([
+        { agent: 'Claude', progress: 0, status: 'nao lido: adaptador nao executado' },
+        { agent: 'Codex', progress: 0, status: 'nao lido: adaptador nao executado' },
+        { agent: 'Gemini', progress: 0, status: 'nao lido: adaptador nao executado' },
+      ]);
+      setAgentCards(pendingAdapterAgents);
+      setEvidenceRows([
+        { label: 'DOI', value: 'bloqueado', tone: 'warn' },
+        { label: 'Links', value: 'bloqueado', tone: 'warn' },
+        { label: 'ABNT', value: 'bloqueado', tone: 'warn' },
+        { label: 'Quarentena', value: 'bloqueado', tone: 'warn' },
+      ]);
+      setDiscussionItems((current) => [
+        {
+          round: '001',
+          status: 'BLOCKED',
+          note: 'Nenhum peer foi chamado. O texto final continua bloqueado porque ainda nao houve unanimidade real.',
+        },
+        ...current,
+      ]);
+      appendActivity({
+        level: 'summary',
+        title: 'Execucao bloqueada sem fingir progresso',
+        detail: 'O monitor agora mostra explicitamente que o motor real ainda precisa ser conectado; nada sera entregue sem consenso trilateral.',
+      });
+      appendActivity({
+        level: 'diagnostic',
+        title: 'Evento de bloqueio gravado',
+        detail: 'Procure session.orchestration.blocked no NDJSON desta execucao.',
+      });
+      void logEvent({
+        level: 'warn',
+        category: 'session.orchestration.blocked',
+        message: 'editorial orchestration did not start because CLI/API adapters are not implemented in this build',
+        context: {
+          run_id: runId,
+          blocked_capability: 'cli_api_agent_adapter_execution',
+          affected_agents: ['claude', 'codex', 'gemini'],
+          final_delivery: 'blocked_without_unanimity',
+        },
+      });
     });
   }
 
@@ -345,6 +751,7 @@ export function App() {
 
   function chooseCredentialStorage(nextMode: CredentialStorageMode) {
     setCredentialStorageMode(nextMode);
+    void persistBootstrapConfig(nextMode);
     void logEvent({
       level: 'info',
       category: 'settings.credential_storage.changed',
@@ -354,13 +761,30 @@ export function App() {
   }
 
   function verifyCloudflareCredentials() {
+    void persistBootstrapConfig();
+    setCloudflarePermissionRows([
+      {
+        label: 'Token ativo',
+        value: cloudflareTokenAvailable ? `detectado via ${cloudflareTokenEnvVar}` : 'ausente; informe token ou env var',
+        tone: cloudflareTokenAvailable ? 'pending' : 'blocked',
+      },
+      {
+        label: 'Conta acessivel',
+        value: cloudflareAccountId.trim() ? 'aguardando chamada real ao verify endpoint' : 'account id ausente',
+        tone: cloudflareAccountId.trim() ? 'pending' : 'blocked',
+      },
+      { label: 'D1 Read/Edit', value: 'probe real ainda nao conectado', tone: 'pending' },
+      { label: 'Secrets Store', value: 'probe real ainda nao conectado', tone: 'pending' },
+    ]);
     void logEvent({
       level: 'info',
       category: 'settings.cloudflare.verify_requested',
       message: 'operator requested Cloudflare credential validation',
       context: {
         account_id_present: cloudflareAccountId.trim().length > 0,
-        token_present: cloudflareApiToken.length > 0,
+        token_present: cloudflareTokenAvailable,
+        token_source: cloudflareEnvSnapshot?.api_token_present ? 'windows_env' : cloudflareTokenSource,
+        token_env_var: cloudflareTokenEnvVar,
         target_database: 'bigdata_db',
         target_table: 'mainsite_posts',
         persistence_database: 'maestro_db',
@@ -426,30 +850,21 @@ export function App() {
         </div>
 
         <nav className="nav-list" aria-label="Principal">
-          <button className="nav-item active" type="button">
-            <GitBranch size={18} />
-            Sessao
-          </button>
-          <button className="nav-item" type="button">
-            <FileText size={18} />
-            Protocolos
-          </button>
-          <button className="nav-item" type="button">
-            <Globe2 size={18} />
-            Evidencias
-          </button>
-          <button className="nav-item" type="button">
-            <Bot size={18} />
-            Agentes
-          </button>
-          <button className="nav-item" type="button">
-            <Settings size={18} />
-            Ajustes
-          </button>
-          <button className="nav-item" type="button">
-            <HardDriveDownload size={18} />
-            Setup
-          </button>
+          {navItems.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button
+                className={activeSection === item.section ? 'nav-item active' : 'nav-item'}
+                type="button"
+                key={item.section}
+                aria-current={activeSection === item.section ? 'page' : undefined}
+                onClick={() => chooseSection(item.section)}
+              >
+                <Icon size={18} />
+                {item.label}
+              </button>
+            );
+          })}
         </nav>
 
         <div className="storage-strip">
@@ -464,7 +879,7 @@ export function App() {
       <main className="workspace">
         <header className="topbar">
           <div>
-            <p className="eyebrow">Sessao editorial</p>
+            <p className="eyebrow">{activeNavItem.label}</p>
             <input
               className="session-title"
               value={sessionName}
@@ -489,568 +904,695 @@ export function App() {
               <RefreshCw size={18} />
             </button>
             <button
-              className="primary-button"
+              className={isRunPreparing ? 'primary-button busy' : 'primary-button'}
               type="button"
               onClick={startEditorialSession}
+              aria-busy={isRunPreparing}
+              disabled={isRunPreparing}
             >
               <Play size={18} />
-              Iniciar sessao
+              {isRunPreparing ? 'Preparando' : runActionLabel}
             </button>
           </div>
         </header>
 
-        <section className="status-grid" aria-label="Resumo">
-          <div className="metric-panel">
-            <ShieldCheck size={20} />
-            <div>
-              <span>Estado formal</span>
-              <strong>auditoria_bibliografica</strong>
-            </div>
-          </div>
-          <div className="metric-panel">
-            <Bot size={20} />
-            <div>
-              <span>Consenso</span>
-              <strong>{readyCount}/{agents.length} READY</strong>
-            </div>
-          </div>
-          <div className="metric-panel">
-            <Link2 size={20} />
-            <div>
-              <span>Links</span>
-              <strong>2 pendentes</strong>
-            </div>
-          </div>
-          <div className="metric-panel">
-            <FileText size={20} />
-            <div>
-              <span>Protocolo</span>
-              <strong>{protocol.lines} linhas</strong>
-            </div>
-          </div>
-        </section>
-
-        <section className="prompt-grid" aria-label="Prompt editorial">
-          <div className="panel prompt-panel">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">Geracao</p>
-                <h2>Prompt da sessao</h2>
-              </div>
-              <button className="primary-button" type="button" onClick={startEditorialSession}>
-                <Play size={18} />
-                Submeter
-              </button>
-            </div>
-            <textarea
-              className="prompt-input"
-              value={editorialPrompt}
-              onChange={(event) => setEditorialPrompt(event.target.value)}
-              aria-label="Prompt de geracao editorial"
-            />
-            <div className="prompt-footer">
-              <span>{editorialPrompt.length.toLocaleString('pt-BR')} caracteres</span>
-              <span>bloqueio: unanimidade trilateral</span>
-              <span>MaestroPeer precisa aprovar</span>
-              <span>divergencia mantem sessao aberta</span>
-              <span>{protocol.lines} linhas de protocolo</span>
-            </div>
-          </div>
-
-          <div className="panel reading-panel">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">Hard gate</p>
-                <h2>Leitura integral</h2>
-              </div>
-              <ShieldCheck size={20} />
-            </div>
-            <div className="reading-list">
-              {protocolReadingGates.map((gate) => (
-                <div className="reading-row" key={gate.agent}>
-                  <div>
-                    <strong>{gate.agent}</strong>
-                    <span>{gate.status}</span>
-                  </div>
-                  <div className="mini-progress" aria-label={`${gate.progress}%`}>
-                    <div style={{ width: `${gate.progress}%` }} />
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
-
-        <section className="panel operation-panel" aria-label="Operacao em background">
-          <div className="operation-head">
-            <div>
-              <p className="eyebrow">Orquestracao</p>
-              <h2>{backgroundOperation.title}</h2>
-            </div>
-            <div className="verbosity-control" aria-label="Verbosidade da interface">
-              {verbosityOptions.map((option) => {
-                const Icon = option.icon;
-                return (
-                  <button
-                    className={verbosity === option.mode ? 'active' : ''}
-                    type="button"
-                    key={option.mode}
-                    aria-pressed={verbosity === option.mode}
-                    onClick={() => chooseVerbosity(option.mode)}
-                  >
-                    <Icon size={16} />
-                    {option.label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="operation-body">
-            <div className="operation-summary">
-              <div className="pulse-icon">
-                <Activity size={22} />
-              </div>
-              <div>
-                <strong>{backgroundOperation.current}</strong>
-                <span>{backgroundOperation.eta}</span>
-              </div>
-            </div>
-            <div className="progress-stack" aria-label={`${backgroundOperation.progress}% concluido`}>
-              <div className="progress-track">
-                <div className="progress-fill" style={{ width: `${backgroundOperation.progress}%` }} />
-              </div>
-              <span>{backgroundOperation.progress}%</span>
-            </div>
-          </div>
-
-          <div className="phase-list" aria-label="Fases da rodada">
-            {phases.map((phase) => (
-              <div className={`phase-item ${phase.state}`} key={phase.label}>
-                <div className="phase-marker" />
-                <strong>{phase.label}</strong>
-                <span>{phase.detail}</span>
-              </div>
-            ))}
-          </div>
-
-          <div className="activity-feed" aria-label="Atividade">
-            {visibleActivity.map((item) => (
-              <div className={`activity-row ${item.level}`} key={`${item.time}-${item.title}`}>
-                <span>{item.time}</span>
+        {activeSection === 'session' && (
+          <>
+            <section className="status-grid" aria-label="Resumo">
+              <div className="metric-panel">
+                <ShieldCheck size={20} />
                 <div>
-                  <strong>{item.title}</strong>
-                  <p>{item.detail}</p>
+                  <span>Estado formal</span>
+                  <strong>{formalState}</strong>
                 </div>
               </div>
-            ))}
-          </div>
-        </section>
+              <div className="metric-panel">
+                <Bot size={20} />
+                <div>
+                  <span>Consenso</span>
+                  <strong>{readyCount}/{agentCards.length} READY</strong>
+                </div>
+              </div>
+              <div className="metric-panel">
+                <Link2 size={20} />
+                <div>
+                  <span>Links</span>
+                  <strong>{linkEvidenceState}</strong>
+                </div>
+              </div>
+              <div className="metric-panel">
+                <FileText size={20} />
+                <div>
+                  <span>Protocolo</span>
+                  <strong>{protocol.lines} linhas</strong>
+                </div>
+              </div>
+            </section>
 
-        <section className="panel session-ledger-panel" aria-label="Discussao trilateral">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Ata viva</p>
-              <h2>Discussao e entrega</h2>
-            </div>
-            <button className="secondary-button" type="button">
-              <FileText size={18} />
-              Ver ata
-            </button>
-          </div>
-          <div className="ledger-grid">
-            <div className="round-list">
-              {discussionRounds.map((item) => (
-                <div className="round-row" key={item.round}>
-                  <span>{item.round}</span>
+            <section className="prompt-grid" aria-label="Prompt editorial">
+              <div className="panel prompt-panel">
+                <div className="panel-heading">
                   <div>
-                    <strong>{item.status}</strong>
-                    <p>{item.note}</p>
+                    <p className="eyebrow">Geracao</p>
+                    <h2>Prompt da sessao</h2>
+                  </div>
+                  <button
+                    className={isRunPreparing ? 'primary-button busy' : 'primary-button'}
+                    type="button"
+                    onClick={startEditorialSession}
+                    aria-busy={isRunPreparing}
+                    disabled={isRunPreparing}
+                  >
+                    <Play size={18} />
+                    {isRunPreparing ? 'Preparando' : 'Submeter'}
+                  </button>
+                </div>
+                <textarea
+                  className="prompt-input"
+                  value={editorialPrompt}
+                  onChange={(event) => setEditorialPrompt(event.target.value)}
+                  aria-label="Prompt de geracao editorial"
+                />
+                <div className="prompt-footer">
+                  <span>{editorialPrompt.length.toLocaleString('pt-BR')} caracteres</span>
+                  <span>bloqueio: unanimidade trilateral</span>
+                  <span>run: {sessionRunId ?? 'sem sessao'}</span>
+                  <span>{protocol.lines} linhas de protocolo</span>
+                </div>
+              </div>
+
+              <div className="panel reading-panel">
+                <div className="panel-heading">
+                  <div>
+                    <p className="eyebrow">Hard gate</p>
+                    <h2>Leitura integral</h2>
+                  </div>
+                  <ShieldCheck size={20} />
+                </div>
+                <div className="reading-list">
+                  {protocolGateItems.map((gate) => (
+                    <div className="reading-row" key={gate.agent}>
+                      <div>
+                        <strong>{gate.agent}</strong>
+                        <span>{gate.status}</span>
+                      </div>
+                      <div className="mini-progress" aria-label={`${gate.progress}%`}>
+                        <div style={{ width: `${gate.progress}%` }} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </section>
+
+            <section className="panel operation-panel" aria-label="Operacao em background">
+              <div className="operation-head">
+                <div>
+                  <p className="eyebrow">Orquestracao</p>
+                  <h2>{operation.title}</h2>
+                  <span className={`run-state-badge ${operation.status}`}>{operation.status}</span>
+                </div>
+                <div className="verbosity-control" aria-label="Verbosidade da interface">
+                  {verbosityOptions.map((option) => {
+                    const Icon = option.icon;
+                    return (
+                      <button
+                        className={verbosity === option.mode ? 'active' : ''}
+                        type="button"
+                        key={option.mode}
+                        aria-pressed={verbosity === option.mode}
+                        onClick={() => chooseVerbosity(option.mode)}
+                      >
+                        <Icon size={16} />
+                        {option.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="operation-body">
+                <div className="operation-summary">
+                  <div className={`pulse-icon ${operation.status}`}>
+                    <Activity size={22} />
+                  </div>
+                  <div>
+                    <strong>{operation.current}</strong>
+                    <span>{operation.eta}</span>
                   </div>
                 </div>
-              ))}
-            </div>
-            <div className="artifact-list">
-              {finalArtifacts.map((artifact) => (
-                <div className="artifact-card" key={artifact.name}>
-                  <FileText size={18} />
-                  <div>
-                    <strong>{artifact.name}</strong>
-                    <span>{artifact.detail}</span>
+                <div className="progress-stack" aria-label={`${operation.progress}% concluido`}>
+                  <div className="progress-track">
+                    <div className={`progress-fill ${operation.status}`} style={{ width: `${operation.progress}%` }} />
                   </div>
+                  <span>{operation.progress}%</span>
                 </div>
-              ))}
-            </div>
-          </div>
-        </section>
+              </div>
 
-        <section className="panel posteditor-parity-panel" aria-label="Editor integrado">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Editor integrado</p>
-              <h2>PostEditor parity</h2>
-            </div>
-            <span className="parity-badge">HTML MainSite</span>
-          </div>
-          <PostEditor
-            editingPostId={null}
-            initialTitle={sessionName}
-            initialAuthor="Leonardo Cardozo Vargas"
-            initialContent={mainSiteHtml}
-            initialIsPublished={false}
-            initialIsAboutSite={false}
-            savingPost={false}
-            showNotification={(message, type) =>
-              void logEvent({
-                level: type === 'error' ? 'error' : 'info',
-                category: 'editor.posteditor.notification',
-                message,
-                context: { type },
-              })
-            }
-            onSave={savePostEditorDraft}
-            onClose={() =>
-              void logEvent({
-                level: 'info',
-                category: 'editor.posteditor.close',
-                message: 'operator closed PostEditor-compatible editor panel',
-              })
-            }
-          />
-        </section>
+              <div className="phase-list" aria-label="Fases da rodada">
+                {phaseItems.map((phase) => (
+                  <div className={`phase-item ${phase.state}`} key={phase.label}>
+                    <div className="phase-marker" />
+                    <strong>{phase.label}</strong>
+                    <span>{phase.detail}</span>
+                  </div>
+                ))}
+              </div>
 
-        <section className="main-grid">
-          <div className="panel protocol-panel">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">Biblioteca</p>
-                <h2>Protocolo ativo</h2>
-              </div>
-              <button className="secondary-button" type="button" onClick={() => inputRef.current?.click()}>
-                <Upload size={18} />
-                Importar
-              </button>
-              <input ref={inputRef} className="hidden-input" type="file" accept=".md,text/markdown,text/plain" onChange={importProtocol} />
-            </div>
-
-            <div className="protocol-record">
-              <div className="file-badge">
-                <FileText size={26} />
-              </div>
-              <div>
-                <strong>{protocol.name}</strong>
-                <span>{protocol.size ? `${protocol.size.toLocaleString('pt-BR')} bytes` : 'artefato fonte local'}</span>
-              </div>
-            </div>
-
-            <dl className="detail-list">
-              <div>
-                <dt>Hash</dt>
-                <dd>{protocol.hash}</dd>
-              </div>
-              <div>
-                <dt>Pin de sessao</dt>
-                <dd>versao + timestamp + sha256</dd>
-              </div>
-              <div>
-                <dt>Publicacao</dt>
-                <dd>bloqueada ate unanimidade</dd>
-              </div>
-            </dl>
-          </div>
-
-          <div className="panel">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">Rodada 001</p>
-                <h2>Agentes</h2>
-              </div>
-              <button className="icon-button" type="button" title="Procurar">
-                <Search size={18} />
-              </button>
-            </div>
-
-            <div className="agent-list">
-              {agents.map((agent) => (
-                <div className={`agent-row ${agent.state}`} key={agent.name}>
-                  <div className="agent-main">
-                    <div className="agent-icon">{stateIcon(agent.state)}</div>
+              <div className="activity-feed" aria-label="Atividade">
+                {visibleActivity.map((item) => (
+                  <div className={`activity-row ${item.level}`} key={`${item.time}-${item.title}`}>
+                    <span>{item.time}</span>
                     <div>
-                      <strong>{agent.name}</strong>
-                      <span>{agent.cli}</span>
+                      <strong>{item.title}</strong>
+                      <p>{item.detail}</p>
                     </div>
                   </div>
-                  <div className="agent-status">
-                    <strong>{stateLabel(agent.state)}</strong>
-                    <span>{agent.note}</span>
+                ))}
+              </div>
+            </section>
+
+            <section className="panel session-ledger-panel" aria-label="Discussao trilateral">
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">Ata viva</p>
+                  <h2>Discussao e entrega</h2>
+                </div>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() =>
+                    void logEvent({
+                      level: 'info',
+                      category: 'session.ledger.open_requested',
+                      message: 'operator requested session ledger view',
+                      context: { run_id: sessionRunId, rounds: discussionItems.length },
+                    })
+                  }
+                >
+                  <FileText size={18} />
+                  Ver ata
+                </button>
+              </div>
+              <div className="ledger-grid">
+                <div className="round-list">
+                  {discussionItems.map((item) => (
+                    <div className="round-row" key={`${item.round}-${item.status}`}>
+                      <span>{item.round}</span>
+                      <div>
+                        <strong>{item.status}</strong>
+                        <p>{item.note}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="artifact-list">
+                  {finalArtifacts.map((artifact) => (
+                    <div className="artifact-card" key={artifact.name}>
+                      <FileText size={18} />
+                      <div>
+                        <strong>{artifact.name}</strong>
+                        <span>{artifact.detail}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </section>
+
+            <section className="panel posteditor-parity-panel" aria-label="Editor integrado">
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">Editor integrado</p>
+                  <h2>PostEditor parity</h2>
+                </div>
+                <span className="parity-badge">HTML MainSite</span>
+              </div>
+              <PostEditor
+                editingPostId={null}
+                initialTitle={sessionName}
+                initialAuthor="Leonardo Cardozo Vargas"
+                initialContent={mainSiteHtml}
+                initialIsPublished={false}
+                initialIsAboutSite={false}
+                savingPost={false}
+                showNotification={(message, type) =>
+                  void logEvent({
+                    level: type === 'error' ? 'error' : 'info',
+                    category: 'editor.posteditor.notification',
+                    message,
+                    context: { type },
+                  })
+                }
+                onSave={savePostEditorDraft}
+                onClose={() =>
+                  void logEvent({
+                    level: 'info',
+                    category: 'editor.posteditor.close',
+                    message: 'operator closed PostEditor-compatible editor panel',
+                  })
+                }
+              />
+            </section>
+          </>
+        )}
+
+        {activeSection === 'protocols' && (
+          <section className="main-grid" aria-label="Protocolos">
+            <div className="panel protocol-panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">Biblioteca</p>
+                  <h2>Protocolo ativo</h2>
+                </div>
+                <button className="secondary-button" type="button" onClick={() => inputRef.current?.click()}>
+                  <Upload size={18} />
+                  Importar
+                </button>
+                <input ref={inputRef} className="hidden-input" type="file" accept=".md,text/markdown,text/plain" onChange={importProtocol} />
+              </div>
+
+              <div className="protocol-record">
+                <div className="file-badge">
+                  <FileText size={26} />
+                </div>
+                <div>
+                  <strong>{protocol.name}</strong>
+                  <span>{protocol.size ? `${protocol.size.toLocaleString('pt-BR')} bytes` : 'artefato fonte local'}</span>
+                </div>
+              </div>
+
+              <dl className="detail-list">
+                <div>
+                  <dt>Hash</dt>
+                  <dd>{protocol.hash}</dd>
+                </div>
+                <div>
+                  <dt>Linhas</dt>
+                  <dd>{protocol.lines.toLocaleString('pt-BR')}</dd>
+                </div>
+                <div>
+                  <dt>Publicacao</dt>
+                  <dd>bloqueada ate unanimidade</dd>
+                </div>
+              </dl>
+            </div>
+
+            <div className="panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">Chats compartilhados</p>
+                  <h2>Entrada externa</h2>
+                </div>
+                <Link2 size={20} />
+              </div>
+              <div className="connector-list">
+                {importChannels.map((channel) => (
+                  <div className="connector-row" key={channel.provider}>
+                    <strong>{channel.provider}</strong>
+                    <span>{channel.pattern}</span>
+                    <em>{channel.status}</em>
                   </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="panel evidence-panel">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">Motor mecanico</p>
-                <h2>Evidencias</h2>
+                ))}
               </div>
-              <button className="secondary-button" type="button">
-                <Link2 size={18} />
-                Auditar
-              </button>
             </div>
 
-            <div className="evidence-grid">
-              {evidenceRows.map((item) => (
-                <div className={`evidence-tile ${item.tone}`} key={item.label}>
-                  <span>{item.label}</span>
-                  <strong>{item.value}</strong>
+            <div className="panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">Arquivos</p>
+                  <h2>Importar e exportar</h2>
                 </div>
-              ))}
-            </div>
-          </div>
-        </section>
-
-        <section className="settings-grid" aria-label="Configuracoes operacionais">
-          <div className="panel settings-panel">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">Ajustes</p>
-                <h2>Cloudflare</h2>
+                <FileText size={20} />
               </div>
-              <Database size={20} />
+              <div className="pipeline-list">
+                {contentPipelines.map((pipeline) => (
+                  <div className="pipeline-row" key={pipeline.label}>
+                    <span>{pipeline.label}</span>
+                    <strong>{pipeline.value}</strong>
+                  </div>
+                ))}
+              </div>
             </div>
+          </section>
+        )}
 
-            <div className="storage-mode-list" aria-label="Armazenamento de credenciais">
-              {credentialStorageModes.map((item) => (
+        {activeSection === 'evidence' && (
+          <section className="main-grid" aria-label="Evidencias">
+            <div className="panel evidence-panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">Motor mecanico</p>
+                  <h2>Evidencias</h2>
+                </div>
                 <button
-                  key={item.mode}
-                  className={credentialStorageMode === item.mode ? 'active' : ''}
+                  className="secondary-button"
                   type="button"
-                  aria-pressed={credentialStorageMode === item.mode}
-                  onClick={() => chooseCredentialStorage(item.mode)}
+                  onClick={() =>
+                    void logEvent({
+                      level: 'info',
+                      category: 'evidence.audit.requested',
+                      message: 'operator requested evidence audit',
+                      context: { run_id: sessionRunId, evidence_state: evidenceRows },
+                    })
+                  }
                 >
-                  <strong>{item.label}</strong>
-                  <span>{item.detail}</span>
+                  <Link2 size={18} />
+                  Auditar
                 </button>
-              ))}
+              </div>
+
+              <div className="evidence-grid">
+                {evidenceRows.map((item) => (
+                  <div className={`evidence-tile ${item.tone}`} key={item.label}>
+                    <span>{item.label}</span>
+                    <strong>{item.value}</strong>
+                  </div>
+                ))}
+              </div>
             </div>
 
-            <div className="credential-form">
-              <div className="storage-note">
-                <strong>{storageModeSummaries[credentialStorageMode].title}</strong>
-                <span>{storageModeSummaries[credentialStorageMode].detail}</span>
-              </div>
-              <div className="field-group">
-                <label htmlFor="cloudflare-account-id">Account ID</label>
-                <input
-                  id="cloudflare-account-id"
-                  autoComplete="off"
-                  spellCheck={false}
-                  value={cloudflareAccountId}
-                  onChange={(event) => setCloudflareAccountId(event.target.value)}
-                  placeholder="informar no app local"
-                />
-              </div>
-              <div className="field-group">
-                <label htmlFor="cloudflare-api-token">API token</label>
-                <input
-                  id="cloudflare-api-token"
-                  type="password"
-                  autoComplete="off"
-                  spellCheck={false}
-                  value={cloudflareApiToken}
-                  onChange={(event) => setCloudflareApiToken(event.target.value)}
-                  placeholder="nunca gravar em logs ou artefatos"
-                />
-              </div>
-              <div className="target-grid">
+            <div className="panel">
+              <div className="panel-heading">
                 <div>
-                  <span>Persistencia</span>
-                  <strong>maestro_db</strong>
+                  <p className="eyebrow">Web evidence</p>
+                  <h2>Coleta assistida</h2>
                 </div>
-                <div>
-                  <span>Secrets</span>
-                  <strong>Cloudflare Secrets Store</strong>
-                </div>
-                <div>
-                  <span>Publicacao</span>
-                  <strong>bigdata_db</strong>
-                </div>
-                <div>
-                  <span>Tabela</span>
-                  <strong>mainsite_posts</strong>
-                </div>
+                <Globe2 size={20} />
               </div>
-              <button className="primary-button" type="button" onClick={verifyCloudflareCredentials}>
-                <ShieldCheck size={18} />
-                Verificar token
-              </button>
+              <div className="pipeline-list">
+                {webEvidenceTools.map((tool) => (
+                  <div className="pipeline-row" key={tool.label}>
+                    <span>{tool.label}</span>
+                    <strong>{tool.value}</strong>
+                  </div>
+                ))}
+              </div>
             </div>
 
-            <div className="status-checklist" aria-label="Permissoes Cloudflare">
-              {cloudflarePermissionChecks.map((item) => (
-                <div className="check-row" key={item.label}>
-                  <CheckCircle2 size={15} />
-                  <span>{item.label}</span>
-                  <strong>{item.value}</strong>
+            <div className="panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">Cloudflare D1</p>
+                  <h2>mainsite_posts</h2>
                 </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="panel settings-panel">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">Ajustes</p>
-                <h2>Agentes via API</h2>
+                <Database size={20} />
               </div>
-              <KeyRound size={20} />
+              <dl className="detail-list compact">
+                <div>
+                  <dt>Banco</dt>
+                  <dd>bigdata_db</dd>
+                </div>
+                <div>
+                  <dt>Campos</dt>
+                  <dd>id, title, content, author, is_published</dd>
+                </div>
+                <div>
+                  <dt>Regra</dt>
+                  <dd>API principal; wrangler@latest fallback</dd>
+                </div>
+              </dl>
             </div>
+          </section>
+        )}
 
-            <div className="provider-mode" aria-label="Modo dos provedores">
-              {(['hybrid', 'cli', 'api'] as const).map((mode) => (
+        {activeSection === 'agents' && (
+          <section className="main-grid" aria-label="Agentes">
+            <div className="panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">{sessionRunId ?? 'sem run'}</p>
+                  <h2>Agentes</h2>
+                </div>
                 <button
-                  key={mode}
-                  className={providerMode === mode ? 'active' : ''}
+                  className="icon-button"
                   type="button"
-                  aria-pressed={providerMode === mode}
-                  onClick={() => chooseProviderMode(mode)}
+                  title="Registrar busca de agente"
+                  onClick={() =>
+                    void logEvent({
+                      level: 'info',
+                      category: 'agents.search.requested',
+                      message: 'operator requested agent search',
+                      context: { run_id: sessionRunId },
+                    })
+                  }
                 >
-                  {mode === 'hybrid' ? 'Hibrido' : mode.toUpperCase()}
+                  <Search size={18} />
                 </button>
-              ))}
+              </div>
+
+              <div className="agent-list">
+                {agentCards.map((agent) => (
+                  <div className={`agent-row ${agent.state}`} key={agent.name}>
+                    <div className="agent-main">
+                      <div className="agent-icon">{stateIcon(agent.state)}</div>
+                      <div>
+                        <strong>{agent.name}</strong>
+                        <span>{agent.cli}</span>
+                      </div>
+                    </div>
+                    <div className="agent-status">
+                      <strong>{stateLabel(agent.state)}</strong>
+                      <span>{agent.note}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
 
-            <div className="ai-credential-list">
-              {aiProviderRows.map((provider) => (
-                <div className="credential-row" key={provider.key}>
+            <div className="panel reading-panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">Hard gate</p>
+                  <h2>Leitura integral</h2>
+                </div>
+                <ShieldCheck size={20} />
+              </div>
+              <div className="reading-list">
+                {protocolGateItems.map((gate) => (
+                  <div className="reading-row" key={gate.agent}>
+                    <div>
+                      <strong>{gate.agent}</strong>
+                      <span>{gate.status}</span>
+                    </div>
+                    <div className="mini-progress" aria-label={`${gate.progress}%`}>
+                      <div style={{ width: `${gate.progress}%` }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+        )}
+
+        {activeSection === 'settings' && (
+          <section className="settings-grid" aria-label="Configuracoes operacionais">
+            <div className="panel settings-panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">Ajustes</p>
+                  <h2>Cloudflare</h2>
+                </div>
+                <Database size={20} />
+              </div>
+
+              <div className="storage-mode-list" aria-label="Armazenamento de credenciais">
+                {credentialStorageModes.map((item) => (
+                  <button
+                    key={item.mode}
+                    className={credentialStorageMode === item.mode ? 'active' : ''}
+                    type="button"
+                    aria-pressed={credentialStorageMode === item.mode}
+                    onClick={() => chooseCredentialStorage(item.mode)}
+                  >
+                    <strong>{item.label}</strong>
+                    <span>{item.detail}</span>
+                  </button>
+                ))}
+              </div>
+
+              <div className="credential-form">
+                <div className="storage-note">
+                  <strong>{storageModeSummaries[credentialStorageMode].title}</strong>
+                  <span>{storageModeSummaries[credentialStorageMode].detail}</span>
+                </div>
+                <div className="storage-note">
+                  <strong>Bootstrap local sem segredos</strong>
+                  <span>{bootstrapConfigStatus}</span>
+                </div>
+                <div className="storage-note">
+                  <strong>Token Cloudflare inicial</strong>
+                  <span>
+                    {cloudflareTokenAvailable
+                      ? `detectado via ${cloudflareEnvSnapshot?.api_token_env_var ?? cloudflareTokenEnvVar}`
+                      : 'nao salvo no bootstrap; informe no campo, env var ou futura cripta local'}
+                  </span>
+                </div>
+                <div className="field-group">
+                  <label htmlFor="cloudflare-account-id">Account ID</label>
+                  <input
+                    id="cloudflare-account-id"
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={cloudflareAccountId}
+                    onChange={(event) => setCloudflareAccountId(event.target.value)}
+                    placeholder="informar no app local"
+                  />
+                </div>
+                <div className="field-group">
+                  <label htmlFor="cloudflare-api-token">API token</label>
+                  <input
+                    id="cloudflare-api-token"
+                    type="password"
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={cloudflareApiToken}
+                    onChange={(event) => setCloudflareApiToken(event.target.value)}
+                    placeholder="nunca gravar em logs ou artefatos"
+                  />
+                </div>
+                <div className="target-grid">
                   <div>
-                    <strong>{provider.name}</strong>
-                    <span>CLI: {provider.cli}</span>
+                    <span>Persistencia</span>
+                    <strong>maestro_db</strong>
                   </div>
-                  <label>
-                    {provider.secretLabel}
-                    <input
-                      type="password"
-                      autoComplete="off"
-                      spellCheck={false}
-                      value={aiCredentials[provider.key]}
-                      onChange={(event) => updateAiCredential(provider.key, event.target.value)}
-                      placeholder="informar no app local"
-                    />
-                  </label>
-                  <em>{provider.meta}</em>
+                  <div>
+                    <span>Secrets</span>
+                    <strong>Cloudflare Secrets Store</strong>
+                  </div>
+                  <div>
+                    <span>Publicacao</span>
+                    <strong>bigdata_db</strong>
+                  </div>
+                  <div>
+                    <span>Tabela</span>
+                    <strong>mainsite_posts</strong>
+                  </div>
                 </div>
-              ))}
-            </div>
-
-            <button className="secondary-button" type="button" onClick={verifyAiProviderCredentials}>
-              <ListChecks size={18} />
-              Verificar APIs
-            </button>
-          </div>
-        </section>
-
-        <section className="integration-grid" aria-label="Importacao e publicacao">
-          <div className="panel">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">Primeira execucao</p>
-                <h2>Bootstrap</h2>
+                <button className="primary-button" type="button" onClick={verifyCloudflareCredentials}>
+                  <ShieldCheck size={18} />
+                  Verificar token
+                </button>
               </div>
-              <HardDriveDownload size={20} />
+
+              <div className="status-checklist" aria-label="Permissoes Cloudflare">
+                {cloudflarePermissionRows.map((item) => (
+                  <div className={`check-row ${item.tone}`} key={item.label}>
+                    {item.tone === 'ok' ? <CheckCircle2 size={15} /> : item.tone === 'blocked' ? <AlertTriangle size={15} /> : <Clock3 size={15} />}
+                    <span>{item.label}</span>
+                    <strong>{item.value}</strong>
+                  </div>
+                ))}
+              </div>
             </div>
-            <div className="pipeline-list">
-              {bootstrapChecks.map((item) => (
-                <div className="pipeline-row" key={item.label}>
-                  <span>{item.label}</span>
-                  <strong>{item.value}</strong>
+
+            <div className="panel settings-panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">Ajustes</p>
+                  <h2>Agentes via API</h2>
                 </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="panel">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">Chats compartilhados</p>
-                <h2>Entrada externa</h2>
+                <KeyRound size={20} />
               </div>
-              <Link2 size={20} />
+
+              <div className="provider-mode" aria-label="Modo dos provedores">
+                {(['hybrid', 'cli', 'api'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    className={providerMode === mode ? 'active' : ''}
+                    type="button"
+                    aria-pressed={providerMode === mode}
+                    onClick={() => chooseProviderMode(mode)}
+                  >
+                    {mode === 'hybrid' ? 'Hibrido' : mode.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+
+              <div className="ai-credential-list">
+                {aiProviderRows.map((provider) => (
+                  <div className="credential-row" key={provider.key}>
+                    <div>
+                      <strong>{provider.name}</strong>
+                      <span>CLI: {provider.cli}</span>
+                    </div>
+                    <label>
+                      {provider.secretLabel}
+                      <input
+                        type="password"
+                        autoComplete="off"
+                        spellCheck={false}
+                        value={aiCredentials[provider.key]}
+                        onChange={(event) => updateAiCredential(provider.key, event.target.value)}
+                        placeholder="informar no app local"
+                      />
+                    </label>
+                    <em>{provider.meta}</em>
+                  </div>
+                ))}
+              </div>
+
+              <button className="secondary-button" type="button" onClick={verifyAiProviderCredentials}>
+                <ListChecks size={18} />
+                Verificar APIs
+              </button>
             </div>
-            <div className="connector-list">
-              {importChannels.map((channel) => (
-                <div className="connector-row" key={channel.provider}>
-                  <strong>{channel.provider}</strong>
-                  <span>{channel.pattern}</span>
-                  <em>{channel.status}</em>
+          </section>
+        )}
+
+        {activeSection === 'setup' && (
+          <section className="integration-grid" aria-label="Setup">
+            <div className="panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">Primeira execucao</p>
+                  <h2>Bootstrap</h2>
                 </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="panel">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">Arquivos</p>
-                <h2>Importar e exportar</h2>
+                <HardDriveDownload size={20} />
               </div>
-              <FileText size={20} />
+              <div className="pipeline-list">
+                {bootstrapRows.map((item) => (
+                  <div className={`pipeline-row ${item.tone}`} key={item.label}>
+                    <span>{item.label}</span>
+                    <strong>{item.value}</strong>
+                  </div>
+                ))}
+              </div>
             </div>
-            <div className="pipeline-list">
-              {contentPipelines.map((pipeline) => (
-                <div className="pipeline-row" key={pipeline.label}>
-                  <span>{pipeline.label}</span>
-                  <strong>{pipeline.value}</strong>
+
+            <div className="panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">Runtime</p>
+                  <h2>Diagnostico</h2>
                 </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="panel">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">Web evidence</p>
-                <h2>Coleta assistida</h2>
+                <Activity size={20} />
               </div>
-              <Globe2 size={20} />
-            </div>
-            <div className="pipeline-list">
-              {webEvidenceTools.map((tool) => (
-                <div className="pipeline-row" key={tool.label}>
-                  <span>{tool.label}</span>
-                  <strong>{tool.value}</strong>
+              <dl className="detail-list compact">
+                <div>
+                  <dt>Run atual</dt>
+                  <dd>{sessionRunId ?? 'sem sessao editorial'}</dd>
                 </div>
-              ))}
+                <div>
+                  <dt>Estado</dt>
+                  <dd>{operation.status}</dd>
+                </div>
+                <div>
+                  <dt>Logs</dt>
+                  <dd>um arquivo NDJSON por execucao do app</dd>
+                </div>
+                <div>
+                  <dt>Config inicial</dt>
+                  <dd>data/config/bootstrap.json sem segredos</dd>
+                </div>
+                <div>
+                  <dt>Cloudflare env</dt>
+                  <dd>{cloudflareEnvSnapshot?.api_token_present ? `token em ${cloudflareEnvSnapshot.api_token_env_var}` : 'token nao detectado'}</dd>
+                </div>
+              </dl>
             </div>
-          </div>
-
-          <div className="panel">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">Cloudflare D1</p>
-                <h2>mainsite_posts</h2>
-              </div>
-              <Database size={20} />
-            </div>
-            <dl className="detail-list compact">
-              <div>
-                <dt>Banco</dt>
-                <dd>bigdata_db</dd>
-              </div>
-              <div>
-                <dt>Campos</dt>
-                <dd>id, title, content, author, is_published</dd>
-              </div>
-              <div>
-                <dt>Regra</dt>
-                <dd>API principal; wrangler@latest fallback</dd>
-              </div>
-            </dl>
-          </div>
-        </section>
+          </section>
+        )}
       </main>
     </div>
   );

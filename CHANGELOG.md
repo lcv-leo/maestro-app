@@ -4,6 +4,12 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.2] - 2026-04-26
+
+- Transferred the public repository from `lcv-leo/maestro-app` to `lcv-ideas-software/maestro-app`.
+- Updated README workflow badges, GitHub Pages funding link, site organization links, and release engineering docs for the organization namespace.
+- Bumped app/package metadata so the post-migration release verifies GitHub Releases and GHCR publication under the organization owner.
+
 ## [v0.3.1] - 2026-04-26
 
 - Fixed Windows child-process spawning so CLI probes, registry env-var reads, `.cmd` shims, PowerShell wrappers, and editorial agents run with `CREATE_NO_WINDOW` and no visible terminal windows.

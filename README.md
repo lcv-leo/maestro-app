@@ -2,9 +2,9 @@
 
 Portable Windows editorial workbench for protocol-driven AI drafting, source verification, and multi-agent editorial convergence.
 
-[![CI](https://github.com/lcv-leo/maestro-app/actions/workflows/ci.yml/badge.svg)](https://github.com/lcv-leo/maestro-app/actions/workflows/ci.yml)
-[![Pages](https://github.com/lcv-leo/maestro-app/actions/workflows/pages.yml/badge.svg)](https://github.com/lcv-leo/maestro-app/actions/workflows/pages.yml)
-[![Release](https://github.com/lcv-leo/maestro-app/actions/workflows/release.yml/badge.svg)](https://github.com/lcv-leo/maestro-app/actions/workflows/release.yml)
+[![CI](https://github.com/lcv-ideas-software/maestro-app/actions/workflows/ci.yml/badge.svg)](https://github.com/lcv-ideas-software/maestro-app/actions/workflows/ci.yml)
+[![Pages](https://github.com/lcv-ideas-software/maestro-app/actions/workflows/pages.yml/badge.svg)](https://github.com/lcv-ideas-software/maestro-app/actions/workflows/pages.yml)
+[![Release](https://github.com/lcv-ideas-software/maestro-app/actions/workflows/release.yml/badge.svg)](https://github.com/lcv-ideas-software/maestro-app/actions/workflows/release.yml)
 ![CodeQL](https://img.shields.io/badge/CodeQL-default%20setup-enabled-brightgreen)
 ![status](https://img.shields.io/badge/status-functional%20alpha-blue)
 ![target](https://img.shields.io/badge/target-Windows%2011%2B-blue)
@@ -15,7 +15,7 @@ Portable Windows editorial workbench for protocol-driven AI drafting, source ver
 
 Status: functional alpha with live bootstrap, diagnostics, navigation, Cloudflare credential probing, PostEditor parity, and a real background Claude/Codex/Gemini editorial session path.
 
-Current project version: `v0.3.1`.
+Current project version: `v0.3.2`.
 
 Maestro is independent from `cross-review-mcp`; it incorporates the same strict convergence discipline in its own application logic. It is designed to run from a folder, keep runtime data out of Git, and store operator protocols, drafts, evidence, and sessions locally under ignored runtime paths.
 

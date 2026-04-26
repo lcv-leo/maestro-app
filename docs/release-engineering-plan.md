@@ -51,7 +51,7 @@ Package policy:
 
 - No NuGet package is used for Maestro's Windows app distribution.
 - The package is an OCI mirror of the same Windows portable ZIP published to GitHub Releases.
-- The package name is `ghcr.io/lcv-leo/maestro-app-windows-portable`.
+- The package name is `ghcr.io/lcv-ideas-software/maestro-app-windows-portable`.
 - Human users should use GitHub Releases; GitHub Packages is for automation, provenance, and machine retrieval.
 - GHCR publishes the exact tag and `latest` for the version emitted by the release workflow.
 
@@ -59,7 +59,7 @@ Future package surfaces, such as npm packages for shared schemas, require a sepa
 
 ## GitHub Sponsors
 
-Sponsors support is active through `.github/FUNDING.yml`, mirroring `cross-review-mcp` with `github: lcv-leo` and the Maestro GitHub Pages URL as the custom funding link.
+Sponsors support is active through `.github/FUNDING.yml`, with `github: lcv-leo` as the current sponsor recipient and the Maestro organization GitHub Pages URL as the custom funding link.
 
 ## GitHub Pages
 

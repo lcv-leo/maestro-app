@@ -7,14 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing vX.X.X tag to publish"
+        description: "Existing vX.X.X or vX.X.X-betaN tag to publish"
         required: true
         type: string
-      prerelease:
-        description: "Mark the GitHub Release as a prerelease"
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: write
@@ -64,8 +59,8 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $tag = $env:RELEASE_TAG
-          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
-            throw "Release tag must use vX.X.X, got '$tag'."
+          if ($tag -notmatch '^v\d+\.\d+\.\d+(-beta\d+)?$') {
+            throw "Release tag must use vX.X.X or vX.X.X-betaN, got '$tag'."
           }
 
           $binary = "src-tauri\target\release\maestro-editorial-ai.exe"
@@ -129,25 +124,24 @@ jobs:
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
-          PRERELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
         shell: bash
         run: |
           set -euo pipefail
           tag="${RELEASE_TAG}"
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Release tag must use vX.X.X, got '$tag'." >&2
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta[0-9]+)?$ ]]; then
+            echo "Release tag must use vX.X.X or vX.X.X-betaN, got '$tag'." >&2
             exit 1
           fi
 
-          cat > RELEASE_NOTES.md <<NOTES
-          # Maestro Editorial AI ${tag}
+          cat > RELEASE_NOTES.md <<'NOTES'
+          # Maestro Editorial AI __TAG__
 
           Portable Windows 11+ editorial workbench for protocol-driven AI drafting, source verification, and multi-agent convergence.
 
           ## Download
 
-          - Portable app: `maestro-editorial-ai-${tag}-windows-x64-portable.zip`
-          - Checksum file: `SHA256SUMS.txt`
+          - Portable app: [`maestro-editorial-ai-__TAG__-windows-x64-portable.zip`](https://github.com/__REPOSITORY__/releases/download/__TAG__/maestro-editorial-ai-__TAG__-windows-x64-portable.zip)
+          - Checksum file: [`SHA256SUMS.txt`](https://github.com/__REPOSITORY__/releases/download/__TAG__/SHA256SUMS.txt)
 
           ## How to Test
 
@@ -157,7 +151,7 @@ jobs:
           4. Extract the ZIP into a local folder.
           5. Run `Maestro Editorial AI.exe`.
 
-          ## What This Pre-Release Contains
+          ## What This Release Contains
 
           - Tauri 2 / WebView2 Windows shell.
           - React workbench UI for the planned editorial session flow.
@@ -170,7 +164,7 @@ jobs:
 
           ## Current Limits
 
-          - This is a pre-release scaffold for practical smoke testing, not the final editorial engine.
+          - This is an early scaffold for practical smoke testing, not the final editorial engine.
           - CLI agent orchestration, Cloudflare persistence provisioning, link validation, ABNT formatting, and MainSite D1 publishing are planned but not production-complete in this build.
           - No NuGet package is published. GitHub Releases is the human-facing distribution channel; GitHub Packages/GHCR is only an automation mirror.
 
@@ -181,11 +175,7 @@ jobs:
           - ZIP receives GitHub artifact attestation.
           - CI, CodeQL Default Setup, and Dependabot checks are expected to be green on the release commit.
           NOTES
-
-          is_prerelease="false"
-          if [[ "$PRERELEASE" == "true" || "$tag" =~ ^v0\. ]]; then
-            is_prerelease="true"
-          fi
+          sed -i "s|__TAG__|${tag}|g; s|__REPOSITORY__|${GITHUB_REPOSITORY}|g" RELEASE_NOTES.md
 
           assets=(release/*.zip release/SHA256SUMS.txt)
           for asset in "${assets[@]}"; do
@@ -196,14 +186,13 @@ jobs:
           done
 
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            edit_args=(release edit "$tag" --repo "$GITHUB_REPOSITORY" --title "Maestro Editorial AI $tag" --notes-file RELEASE_NOTES.md)
+            edit_args+=(--latest)
+            gh "${edit_args[@]}"
             gh release upload "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
           else
             args=(release create "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --title "Maestro Editorial AI $tag" --notes-file RELEASE_NOTES.md)
-            if [[ "$is_prerelease" == "true" ]]; then
-              args+=(--prerelease --latest=false)
-            else
-              args+=(--latest)
-            fi
+            args+=(--latest)
             gh "${args[@]}"
           fi
 
@@ -222,13 +211,12 @@ jobs:
       - name: Publish GHCR OCI mirror
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          PRERELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
         shell: bash
         run: |
           set -euo pipefail
           tag="${RELEASE_TAG}"
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Release tag must use vX.X.X, got '$tag'." >&2
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta[0-9]+)?$ ]]; then
+            echo "Release tag must use vX.X.X or vX.X.X-betaN, got '$tag'." >&2
             exit 1
           fi
 
@@ -267,12 +255,7 @@ jobs:
           DOCKERFILE
 
           echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          image_args=(-t "${image}:${tag}")
-          if [[ "$PRERELEASE" != "true" && ! "$tag" =~ ^v0\. ]]; then
-            image_args+=(-t "${image}:latest")
-          fi
+          image_args=(-t "${image}:${tag}" -t "${image}:latest")
           docker build "${image_args[@]}" oci-package
           docker push "${image}:${tag}"
-          if [[ "$PRERELEASE" != "true" && ! "$tag" =~ ^v0\. ]]; then
-            docker push "${image}:latest"
-          fi
+          docker push "${image}:latest"

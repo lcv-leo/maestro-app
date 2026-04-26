@@ -5,6 +5,8 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 ## [Unreleased]
 
 - Fixed the repository hygiene secret-shape scanner to avoid false positives on normal identifiers such as `cloudflare_persistence_database` while preserving common token/key detection.
+- Fixed GitHub Release note generation so Markdown code spans are not treated as shell command substitutions and existing releases receive refreshed notes when the release workflow is rerun.
+- Removed GitHub prerelease publishing entirely: beta builds must use explicit `vX.X.X-betaN` tags while still being published as normal GitHub Releases.
 
 ## [v0.2.0] - 2026-04-26
 

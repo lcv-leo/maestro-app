@@ -1,6 +1,6 @@
 # Editorial Session Workflow
 
-Status: implementation contract with functional background and resume pass in `v0.3.4`.
+Status: implementation contract with functional background and hardened resume pass in `v0.3.5`.
 
 Maestro's core workflow starts from an operator prompt and an active editorial protocol. The app must not deliver a final text until Claude, Codex, and Gemini all return `READY` in the same trilateral round and Maestro's deterministic fourth-peer check also returns `READY`.
 
@@ -52,7 +52,7 @@ If any peer remains `NOT_READY` or `NEEDS_EVIDENCE`, the session continues, paus
 - Maestro writes `texto-final.md` only when all three review peers return `READY` and the draft command succeeded.
 - Maestro always writes `ata-da-sessao.md` plus per-agent artifacts under ignored `data/sessions/<run>/`.
 
-`v0.3.4` adds resumable interrupted sessions:
+`v0.3.4` added resumable interrupted sessions, with filesystem scan hardening in `v0.3.5`:
 
 - Maestro scans `data/sessions/` for sessions that have `prompt.md` and `protocolo.md` but no `texto-final.md`.
 - If one interrupted session exists, the UI resumes it directly; if several exist, the operator chooses which one to continue.

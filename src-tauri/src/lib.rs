@@ -845,10 +845,16 @@ fn list_resumable_sessions_blocking(
         fs::read_dir(&root).map_err(|error| format!("failed to read sessions dir: {error}"))?
     {
         let entry = entry.map_err(|error| format!("failed to read session entry: {error}"))?;
-        let path = entry.path();
-        if !path.is_dir() {
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("failed to read session entry type: {error}"))?;
+        if !file_type.is_dir() {
             continue;
         }
+        let Some(run_id) = safe_run_id_from_entry(&entry) else {
+            continue;
+        };
+        let path = root.join(run_id);
         if let Some(info) = inspect_resumable_session_dir(&path)? {
             sessions.push(info);
         }
@@ -935,54 +941,45 @@ fn checked_data_child_path(path: &Path) -> Result<PathBuf, String> {
     let data_root = data_dir();
     fs::create_dir_all(&data_root)
         .map_err(|error| format!("failed to create Maestro data root: {error}"))?;
-    let canonical_data_root = data_root
-        .canonicalize()
-        .map_err(|error| format!("failed to canonicalize Maestro data root: {error}"))?;
     let relative = path
         .strip_prefix(&data_root)
-        .or_else(|_| path.strip_prefix(&canonical_data_root))
         .map_err(|_| "internal data path escaped Maestro data directory".to_string())?;
 
-    if relative
-        .components()
-        .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
-    {
+    if !is_safe_relative_data_path(relative) {
         return Err("internal data path contains unsafe segments".to_string());
     }
 
-    if path.exists() {
-        let canonical_path = path
-            .canonicalize()
-            .map_err(|error| format!("failed to canonicalize Maestro data path: {error}"))?;
-        if !canonical_path.starts_with(&canonical_data_root) {
-            return Err("internal data path escaped canonical Maestro data directory".to_string());
-        }
-        return Ok(canonical_path);
-    }
+    Ok(data_root.join(relative))
+}
 
-    let existing_ancestor = path
-        .ancestors()
-        .skip(1)
-        .find(|ancestor| ancestor.exists())
-        .ok_or_else(|| "internal data path has no existing ancestor".to_string())?;
-    let canonical_ancestor = existing_ancestor
-        .canonicalize()
-        .map_err(|error| format!("failed to canonicalize Maestro data ancestor: {error}"))?;
-    if !canonical_ancestor.starts_with(&canonical_data_root) {
-        return Err("internal data path escaped canonical Maestro data directory".to_string());
-    }
+fn is_safe_relative_data_path(path: &Path) -> bool {
+    path.components().all(|component| match component {
+        Component::Normal(value) => value.to_str().map(is_safe_data_file_name).unwrap_or(false),
+        _ => false,
+    })
+}
 
-    let suffix = path
-        .strip_prefix(existing_ancestor)
-        .map_err(|_| "internal data path could not be rebased".to_string())?;
-    if suffix
-        .components()
-        .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
-    {
-        return Err("internal data path contains unsafe rebased segments".to_string());
-    }
+fn is_safe_data_file_name(value: &str) -> bool {
+    // General data filenames may contain dots for extensions; run IDs stay stricter
+    // through sanitize_path_segment because they become directory names.
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value.len() <= 255
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
+}
 
-    Ok(canonical_ancestor.join(suffix))
+fn safe_run_id_from_entry(entry: &fs::DirEntry) -> Option<String> {
+    let name = entry.file_name();
+    let name = name.to_str()?;
+    let sanitized = sanitize_path_segment(name, 120);
+    if sanitized == name {
+        Some(sanitized)
+    } else {
+        None
+    }
 }
 
 fn sanitize_path_segment(value: &str, max_len: usize) -> String {
@@ -1500,13 +1497,16 @@ fn inspect_resumable_session_dir(path: &Path) -> Result<Option<ResumableSessionI
     let prompt_text = read_text_file(&prompt_path)?;
     let protocol_text = read_text_file(&protocol_path)?;
     let agent_dir = checked_data_child_path(&session_dir.join("agent-runs"))?;
-    let latest_draft = find_latest_draft_artifact(&agent_dir)?;
+    let artifacts = read_agent_artifacts(&agent_dir)?;
+    let latest_draft = find_latest_draft_artifact_from_artifacts(&artifacts)?;
     let next_round = latest_draft
         .as_ref()
         .map(|artifact| artifact.round.max(1))
         .unwrap_or(1);
-    let artifact_count = count_markdown_artifacts(&session_dir)?;
-    let last_activity_unix = latest_activity_unix(&session_dir)?.unwrap_or(0);
+    let artifact_count = count_known_session_markdown_artifacts(&session_dir, &artifacts)?;
+    let last_activity_unix =
+        known_session_activity_unix(&session_dir, &prompt_path, &protocol_path, &artifacts)
+            .unwrap_or(0);
     let status = if latest_draft.is_some() {
         "pronta para continuar".to_string()
     } else {
@@ -1570,9 +1570,17 @@ struct SessionArtifact {
 }
 
 fn find_latest_draft_artifact(agent_dir: &Path) -> Result<Option<SessionArtifact>, String> {
-    let mut artifacts = read_agent_artifacts(agent_dir)?
-        .into_iter()
+    let artifacts = read_agent_artifacts(agent_dir)?;
+    find_latest_draft_artifact_from_artifacts(&artifacts)
+}
+
+fn find_latest_draft_artifact_from_artifacts(
+    artifacts: &[SessionArtifact],
+) -> Result<Option<SessionArtifact>, String> {
+    let mut artifacts = artifacts
+        .iter()
         .filter(|artifact| artifact.role == "revision" || artifact.role == "draft")
+        .cloned()
         .collect::<Vec<_>>();
     artifacts.sort_by(|left, right| {
         artifact_resume_rank(right)
@@ -1626,32 +1634,45 @@ fn read_agent_artifacts(agent_dir: &Path) -> Result<Vec<SessionArtifact>, String
     {
         let entry =
             entry.map_err(|error| format!("failed to read agent artifact entry: {error}"))?;
-        let path = entry.path();
-        if !path.is_file() {
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("failed to read agent artifact type: {error}"))?;
+        if !file_type.is_file() {
             continue;
         }
-        if let Some(artifact) = parse_agent_artifact_path(&path) {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if let Some(artifact) = parse_agent_artifact_name(&agent_dir, name) {
             artifacts.push(artifact);
         }
     }
     Ok(artifacts)
 }
 
-fn parse_agent_artifact_path(path: &Path) -> Option<SessionArtifact> {
-    let name = path.file_name()?.to_str()?;
+fn parse_agent_artifact_name(agent_dir: &Path, name: &str) -> Option<SessionArtifact> {
     let rest = name.strip_prefix("round-")?;
     let (round_text, rest) = rest.split_once('-')?;
     let round = round_text.parse::<usize>().ok()?;
     let stem = rest.strip_suffix(".md")?;
     let (agent, role) = stem.rsplit_once('-')?;
+    let agent = match agent {
+        "claude" | "codex" | "gemini" => agent,
+        _ => return None,
+    };
     if !matches!(role, "draft" | "review" | "revision") {
+        return None;
+    }
+    let canonical_name = format!("round-{round:03}-{agent}-{role}.md");
+    if canonical_name != name {
         return None;
     }
     Some(SessionArtifact {
         round,
         agent: agent.to_string(),
         role: role.to_string(),
-        path: path.to_path_buf(),
+        path: agent_dir.join(canonical_name),
     })
 }
 
@@ -1754,53 +1775,108 @@ fn stable_text_fingerprint(text: &str) -> String {
     format!("fnv64-{hash:016x}")
 }
 
-fn count_markdown_artifacts(path: &Path) -> Result<usize, String> {
-    let path = checked_data_child_path(path)?;
-    if !path.is_dir() {
-        return Ok(0);
-    }
-    let mut count = 0;
-    for entry in
-        fs::read_dir(&path).map_err(|error| format!("failed to count artifacts: {error}"))?
-    {
-        let entry = entry.map_err(|error| format!("failed to read artifact entry: {error}"))?;
-        let entry_path = entry.path();
-        if entry_path.is_dir() {
-            count += count_markdown_artifacts(&entry_path)?;
-        } else if entry_path
-            .extension()
-            .and_then(|value| value.to_str())
-            .map(|value| value.eq_ignore_ascii_case("md"))
-            .unwrap_or(false)
-        {
-            count += 1;
-        }
-    }
-    Ok(count)
+fn count_known_session_markdown_artifacts(
+    session_dir: &Path,
+    artifacts: &[SessionArtifact],
+) -> Result<usize, String> {
+    let session_dir = checked_data_child_path(session_dir)?;
+    let backup_stats = protocol_backup_stats(&session_dir)?;
+    let known_session_files = [
+        "prompt.md",
+        "protocolo.md",
+        "ata-da-sessao.md",
+        "texto-final.md",
+    ];
+    let session_file_count = known_session_files
+        .iter()
+        .filter(|file_name| session_dir.join(file_name).is_file())
+        .count();
+    Ok(session_file_count + backup_stats.count + artifacts.len())
 }
 
-fn latest_activity_unix(path: &Path) -> Result<Option<u64>, String> {
-    let path = checked_data_child_path(path)?;
-    if !path.exists() {
-        return Ok(None);
+fn known_session_activity_unix(
+    session_dir: &Path,
+    prompt_path: &Path,
+    protocol_path: &Path,
+    artifacts: &[SessionArtifact],
+) -> Option<u64> {
+    let backup_latest = protocol_backup_stats(session_dir)
+        .ok()
+        .and_then(|stats| stats.latest_activity_unix);
+    [
+        checked_data_child_path(session_dir).ok(),
+        checked_data_child_path(prompt_path).ok(),
+        checked_data_child_path(protocol_path).ok(),
+        checked_data_child_path(&session_dir.join("ata-da-sessao.md")).ok(),
+        checked_data_child_path(&session_dir.join("texto-final.md")).ok(),
+    ]
+    .into_iter()
+    .flatten()
+    .chain(artifacts.iter().map(|artifact| artifact.path.clone()))
+    .filter_map(|path| {
+        path.metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(system_time_to_unix)
+    })
+    .chain(backup_latest)
+    .max()
+}
+
+struct ProtocolBackupStats {
+    count: usize,
+    latest_activity_unix: Option<u64>,
+}
+
+fn protocol_backup_stats(session_dir: &Path) -> Result<ProtocolBackupStats, String> {
+    let session_dir = checked_data_child_path(session_dir)?;
+    if !session_dir.is_dir() {
+        return Ok(ProtocolBackupStats {
+            count: 0,
+            latest_activity_unix: None,
+        });
     }
 
-    let mut latest = path
-        .metadata()
-        .ok()
-        .and_then(|metadata| metadata.modified().ok())
-        .and_then(system_time_to_unix);
-    if path.is_dir() {
-        for entry in
-            fs::read_dir(&path).map_err(|error| format!("failed to read activity dir: {error}"))?
-        {
-            let entry = entry.map_err(|error| format!("failed to read activity entry: {error}"))?;
-            if let Some(value) = latest_activity_unix(&entry.path())? {
-                latest = Some(latest.map(|current| current.max(value)).unwrap_or(value));
+    let mut count = 0;
+    let mut latest_activity_unix = None;
+    for entry in fs::read_dir(&session_dir)
+        .map_err(|error| format!("failed to read session backup dir: {error}"))?
+    {
+        let entry =
+            entry.map_err(|error| format!("failed to read session backup entry: {error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("failed to read session backup entry type: {error}"))?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !is_protocol_backup_file_name(name) {
+            continue;
+        }
+        count += 1;
+        if let Ok(metadata) = entry.metadata() {
+            if let Some(modified) = metadata.modified().ok().and_then(system_time_to_unix) {
+                latest_activity_unix = Some(
+                    latest_activity_unix
+                        .map(|current: u64| current.max(modified))
+                        .unwrap_or(modified),
+                );
             }
         }
     }
-    Ok(latest)
+
+    Ok(ProtocolBackupStats {
+        count,
+        latest_activity_unix,
+    })
+}
+
+fn is_protocol_backup_file_name(name: &str) -> bool {
+    is_safe_data_file_name(name) && name.starts_with("protocolo-anterior-") && name.ends_with(".md")
 }
 
 fn system_time_to_unix(value: SystemTime) -> Option<u64> {
@@ -3112,6 +3188,69 @@ mod tests {
         assert!(checked_data_child_path(&traversal).is_err());
         let inside = sessions_dir().join("safe").join("artifact.md");
         assert!(checked_data_child_path(&inside).is_ok());
+    }
+
+    #[test]
+    fn rejects_noncanonical_agent_artifact_names() {
+        let agent_dir = sessions_dir()
+            .join("run-artifact-name-test")
+            .join("agent-runs");
+        let valid = parse_agent_artifact_name(&agent_dir, "round-001-claude-draft.md")
+            .expect("canonical artifact name must parse");
+        assert_eq!(valid.round, 1);
+        assert_eq!(valid.agent, "claude");
+        assert_eq!(valid.role, "draft");
+        assert!(valid.path.ends_with("round-001-claude-draft.md"));
+
+        assert!(parse_agent_artifact_name(&agent_dir, "round-1-claude-draft.md").is_none());
+        assert!(parse_agent_artifact_name(&agent_dir, "round-001-rogue-review.md").is_none());
+        assert!(parse_agent_artifact_name(&agent_dir, "round-001-claude-other.md").is_none());
+        assert!(parse_agent_artifact_name(&agent_dir, "round-001-claude-review.txt").is_none());
+    }
+
+    #[test]
+    fn ignores_dotted_session_folder_names() {
+        let root = sessions_dir();
+        let bad_session_dir = root.join("run.bad");
+        let _ = fs::remove_dir_all(&bad_session_dir);
+        fs::create_dir_all(&bad_session_dir).unwrap();
+        let entry = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_name().to_str() == Some("run.bad"))
+            .expect("dotted test folder should be visible");
+
+        assert!(safe_run_id_from_entry(&entry).is_none());
+        let _ = fs::remove_dir_all(&bad_session_dir);
+    }
+
+    #[test]
+    fn counts_protocol_backup_artifacts_without_recursive_scan() {
+        let session_dir = sessions_dir().join("run-protocol-backup-count-test");
+        let _ = fs::remove_dir_all(&session_dir);
+        fs::create_dir_all(&session_dir).unwrap();
+        write_text_file(&session_dir.join("prompt.md"), "prompt").unwrap();
+        write_text_file(&session_dir.join("protocolo.md"), "protocol").unwrap();
+        write_text_file(
+            &session_dir.join("protocolo-anterior-20260426T000000Z.md"),
+            "old protocol",
+        )
+        .unwrap();
+        write_text_file(
+            &session_dir.join("protocolo-anterior-unsafe.txt"),
+            "ignored",
+        )
+        .unwrap();
+
+        let stats = protocol_backup_stats(&session_dir).unwrap();
+        assert_eq!(stats.count, 1);
+        assert!(stats.latest_activity_unix.is_some());
+        assert_eq!(
+            count_known_session_markdown_artifacts(&session_dir, &[]).unwrap(),
+            3
+        );
+
+        let _ = fs::remove_dir_all(&session_dir);
     }
 
     #[test]

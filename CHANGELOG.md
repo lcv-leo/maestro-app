@@ -4,6 +4,12 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.5] - 2026-04-26
+
+- Hardened resumable session filesystem scans so session folders and agent artifacts are reconstructed only from validated safe names.
+- Replaced recursive markdown/activity discovery with known session artifact accounting to remove CodeQL `rust/path-injection` findings without weakening the resume feature.
+- Counted timestamped `protocolo-anterior-*.md` backups through a safe single-level scan and added regression tests for canonical artifact names, dotted session folders, and protocol-backup accounting.
+
 ## [v0.3.4] - 2026-04-26
 
 - Reworked the running session status card to use an indeterminate activity meter instead of an artificial completion percentage.

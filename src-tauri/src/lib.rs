@@ -16,7 +16,7 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tauri::{path::BaseDirectory, Manager};
+use tauri::Manager;
 
 static NATIVE_LOG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static APP_ROOT: OnceLock<PathBuf> = OnceLock::new();
@@ -902,15 +902,105 @@ fn app_root() -> PathBuf {
 }
 
 fn initialize_app_root(app: &tauri::App) -> Result<(), String> {
-    let root = app
-        .path()
-        .resolve("", BaseDirectory::Executable)
-        .map_err(|error| format!("failed to resolve portable executable dir: {error}"))?;
-    let root = root
-        .canonicalize()
-        .map_err(|error| format!("failed to canonicalize portable executable dir: {error}"))?;
+    let _ = app;
+    let root = resolve_portable_app_root()?;
     let _ = APP_ROOT.set(root);
     Ok(())
+}
+
+fn resolve_portable_app_root() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe()
+        .map_err(|error| format!("failed to resolve current executable path: {error}"))?;
+    portable_root_from_exe_path(&exe)
+}
+
+fn portable_root_from_exe_path(exe: &Path) -> Result<PathBuf, String> {
+    let parent = exe
+        .parent()
+        .ok_or_else(|| "current executable path has no parent directory".to_string())?;
+    parent
+        .canonicalize()
+        .map_err(|error| format!("failed to canonicalize portable executable dir: {error}"))
+}
+
+fn early_logs_dir() -> PathBuf {
+    resolve_portable_app_root()
+        .unwrap_or_else(|_| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join("maestro-editorial-ai")
+        })
+        .join("data")
+        .join("logs")
+}
+
+fn active_or_early_logs_dir() -> PathBuf {
+    APP_ROOT
+        .get()
+        .map(|root| root.join("data").join("logs"))
+        .unwrap_or_else(early_logs_dir)
+}
+
+fn install_process_panic_hook() {
+    std::panic::set_hook(Box::new(|panic_info| {
+        let payload = panic_info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| {
+                panic_info
+                    .payload()
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+            })
+            .unwrap_or("unknown panic payload");
+        let location = panic_info.location().map(|location| {
+            format!(
+                "{}:{}:{}",
+                location.file(),
+                location.line(),
+                location.column()
+            )
+        });
+        let _ = write_early_crash_record(payload, location.as_deref());
+    }));
+}
+
+fn write_early_crash_record(payload: &str, location: Option<&str>) -> Result<(), String> {
+    let dir = active_or_early_logs_dir();
+    fs::create_dir_all(&dir)
+        .map_err(|error| format!("failed to create early crash log dir: {error}"))?;
+    let timestamp = Utc::now().format("%Y-%m-%dT%H-%M-%SZ");
+    let path = dir.join(format!(
+        "maestro-crash-{timestamp}-pid{}.json",
+        process::id()
+    ));
+    let record = json!({
+        "schema_version": 1,
+        "timestamp": Utc::now().to_rfc3339(),
+        "level": "fatal",
+        "category": "native.panic",
+        "message": "native panic captured before normal diagnostic logger completed startup",
+        "panic": {
+            "payload": sanitize_text(payload, 1000),
+            "location": location.map(|value| sanitize_text(value, 500))
+        },
+        "app": {
+            "name": "Maestro Editorial AI",
+            "version": env!("CARGO_PKG_VERSION"),
+            "target": std::env::consts::OS,
+            "arch": std::env::consts::ARCH
+        },
+        "process": {
+            "pid": process::id(),
+            "cwd": std::env::current_dir().ok().map(|path| path.to_string_lossy().to_string()),
+            "current_exe": std::env::current_exe().ok().map(|path| path.to_string_lossy().to_string()),
+            "app_root": APP_ROOT.get().map(|path| path.to_string_lossy().to_string())
+        }
+    });
+    let bytes = serde_json::to_vec_pretty(&record)
+        .map_err(|error| format!("failed to serialize early crash log: {error}"))?;
+    fs::write(&path, bytes).map_err(|error| format!("failed to write early crash log: {error}"))
 }
 
 fn data_dir() -> PathBuf {
@@ -3291,6 +3381,46 @@ mod tests {
     }
 
     #[test]
+    fn resolves_portable_root_from_current_exe_parent() {
+        let root = std::env::temp_dir().join(format!(
+            "maestro-portable-root-test-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let exe_path = root.join("maestro-editorial-ai.exe");
+
+        let resolved = portable_root_from_exe_path(&exe_path).unwrap();
+
+        assert_eq!(resolved, root.canonicalize().unwrap());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn writes_early_crash_record_before_normal_logger() {
+        let marker = format!(
+            "startup panic marker {}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        write_early_crash_record(&marker, Some("startup.rs:10:20")).unwrap();
+
+        let log_dir = active_or_early_logs_dir();
+        let found = fs::read_dir(&log_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .map(|name| name.starts_with("maestro-crash-") && name.ends_with(".json"))
+                    .unwrap_or(false)
+            })
+            .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+            .any(|text| text.contains(&marker) && text.contains("startup.rs:10:20"));
+
+        assert!(found);
+    }
+
+    #[test]
     fn extracts_saved_prompt_for_session_resume() {
         let prompt_file =
             "# Prompt da Sessao\n\nSessao: Teste Editorial\nRun: `run-resume`\n\nEscreva o artigo.";
@@ -3360,6 +3490,7 @@ mod tests {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    install_process_panic_hook();
     tauri::Builder::default()
         .setup(|app| {
             initialize_app_root(app)?;

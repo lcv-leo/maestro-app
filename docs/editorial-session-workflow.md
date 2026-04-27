@@ -1,6 +1,6 @@
 # Editorial Session Workflow
 
-Status: implementation contract with functional background and hardened resume pass in `v0.3.5`.
+Status: implementation contract with functional background, hardened resume pass in `v0.3.5`, and startup crash recovery hardening in `v0.3.6`.
 
 Maestro's core workflow starts from an operator prompt and an active editorial protocol. The app must not deliver a final text until Claude, Codex, and Gemini all return `READY` in the same trilateral round and Maestro's deterministic fourth-peer check also returns `READY`.
 

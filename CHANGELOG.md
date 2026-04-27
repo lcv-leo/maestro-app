@@ -4,6 +4,12 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.6] - 2026-04-26
+
+- Fixed a startup crash in the Windows portable build by resolving Maestro's app folder from the running executable instead of the Tauri `BaseDirectory::Executable` resolver, which returned `unknown path` on this environment.
+- Added an early native panic/crash logger that writes `data/logs/maestro-crash-*.json` even when the normal NDJSON logger has not completed startup yet.
+- Added regression tests for portable app-root resolution and early crash-log writing, then verified the rebuilt release executable stays alive and creates a per-execution NDJSON log.
+
 ## [v0.3.5] - 2026-04-26
 
 - Hardened resumable session filesystem scans so session folders and agent artifacts are reconstructed only from validated safe names.

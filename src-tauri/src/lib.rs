@@ -11,10 +11,10 @@ use std::{
     process::{self, Command, Output, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
-        OnceLock,
+        Arc, Mutex, OnceLock,
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{path::BaseDirectory, Manager};
 
@@ -25,6 +25,7 @@ static APP_ROOT: OnceLock<PathBuf> = OnceLock::new();
 struct LogSession {
     id: String,
     path: PathBuf,
+    write_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -109,6 +110,14 @@ struct EditorialSessionRequest {
     protocol_hash: String,
 }
 
+#[derive(Clone, Deserialize)]
+struct ResumeSessionRequest {
+    run_id: String,
+    protocol_name: Option<String>,
+    protocol_text: Option<String>,
+    protocol_hash: Option<String>,
+}
+
 #[derive(Serialize)]
 struct EditorialSessionResult {
     run_id: String,
@@ -133,6 +142,29 @@ struct EditorialAgentResult {
     duration_ms: u128,
     exit_code: Option<i32>,
     output_path: String,
+}
+
+#[derive(Serialize)]
+struct ResumableSessionInfo {
+    run_id: String,
+    session_name: String,
+    session_dir: String,
+    prompt_path: String,
+    protocol_path: String,
+    draft_path: Option<String>,
+    final_markdown_path: Option<String>,
+    next_round: usize,
+    last_activity_unix: u64,
+    artifact_count: usize,
+    protocol_lines: usize,
+    status: String,
+}
+
+struct ResumeSessionState {
+    current_draft: String,
+    current_draft_path: Option<PathBuf>,
+    next_review_round: usize,
+    existing_agents: Vec<EditorialAgentResult>,
 }
 
 #[derive(Clone)]
@@ -214,6 +246,10 @@ fn write_log_record(
     log_session: &LogSession,
     event: LogEventInput,
 ) -> Result<LogWriteResult, String> {
+    let _guard = log_session
+        .write_lock
+        .lock()
+        .map_err(|_| "failed to lock log writer".to_string())?;
     let dir = checked_data_child_path(&logs_dir())?;
     fs::create_dir_all(&dir).map_err(|error| format!("failed to create log dir: {error}"))?;
     let sequence = NATIVE_LOG_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
@@ -535,6 +571,29 @@ fn run_cli_adapter_smoke(
 }
 
 #[tauri::command]
+async fn list_resumable_sessions(
+    log_session: tauri::State<'_, LogSession>,
+) -> Result<Vec<ResumableSessionInfo>, String> {
+    let log_session = log_session.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || list_resumable_sessions_blocking(&log_session))
+        .await
+        .map_err(|error| format!("resume session listing worker join failed: {error}"))?
+}
+
+#[tauri::command]
+async fn resume_editorial_session(
+    log_session: tauri::State<'_, LogSession>,
+    request: ResumeSessionRequest,
+) -> Result<EditorialSessionResult, String> {
+    let log_session = log_session.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        resume_editorial_session_blocking(log_session, request)
+    })
+    .await
+    .map_err(|error| format!("resume editorial worker join failed: {error}"))?
+}
+
+#[tauri::command]
 async fn run_editorial_session(
     log_session: tauri::State<'_, LogSession>,
     request: EditorialSessionRequest,
@@ -625,6 +684,199 @@ fn run_editorial_session_blocking(
     Ok(result)
 }
 
+fn resume_editorial_session_blocking(
+    log_session: LogSession,
+    request: ResumeSessionRequest,
+) -> Result<EditorialSessionResult, String> {
+    let run_id = sanitize_path_segment(&request.run_id, 120);
+    if run_id.is_empty() {
+        return Err("run_id vazio".to_string());
+    }
+
+    let session_dir = checked_data_child_path(&sessions_dir().join(&run_id))?;
+    if !session_dir.is_dir() {
+        return Err("sessao nao encontrada em data/sessions".to_string());
+    }
+
+    let prompt_path = session_dir.join("prompt.md");
+    let protocol_path = session_dir.join("protocolo.md");
+    let saved_prompt = read_text_file(&prompt_path)?;
+    let saved_protocol = read_text_file(&protocol_path)?;
+    let prompt = extract_saved_prompt(&saved_prompt)
+        .unwrap_or_else(|| saved_prompt.trim().to_string())
+        .trim()
+        .to_string();
+    if prompt.is_empty() {
+        return Err("prompt salvo da sessao esta vazio".to_string());
+    }
+
+    let session_name =
+        extract_saved_session_name(&saved_prompt).unwrap_or_else(|| format!("Sessao {run_id}"));
+    let override_protocol = request
+        .protocol_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| value.len() >= 100)
+        .map(str::to_string);
+    let using_protocol_override = override_protocol.is_some();
+    let protocol_text = override_protocol.unwrap_or_else(|| saved_protocol.trim().to_string());
+    let protocol_name = if using_protocol_override {
+        request
+            .protocol_name
+            .as_deref()
+            .map(|value| sanitize_text(value, 200))
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "protocolo-atualizado.md".to_string())
+    } else {
+        "protocolo.md".to_string()
+    };
+    let protocol_hash = request
+        .protocol_hash
+        .as_deref()
+        .map(|value| sanitize_short(value, 80))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| stable_text_fingerprint(&protocol_text));
+
+    let protocol_backup_path =
+        if using_protocol_override && saved_protocol.trim() != protocol_text.trim() {
+            let backup_path = session_dir.join(format!(
+                "protocolo-anterior-{}.md",
+                Utc::now().format("%Y%m%dT%H%M%SZ")
+            ));
+            write_text_file(&backup_path, &saved_protocol)?;
+            Some(backup_path)
+        } else {
+            None
+        };
+
+    let agent_dir = checked_data_child_path(&session_dir.join("agent-runs"))?;
+    fs::create_dir_all(&agent_dir)
+        .map_err(|error| format!("failed to create agent run dir: {error}"))?;
+    let resume_state = load_resume_session_state(&agent_dir)?;
+
+    let _ = write_log_record(
+        &log_session,
+        LogEventInput {
+            level: "info".to_string(),
+            category: "session.resume.started".to_string(),
+            message: "operator requested editorial session resume".to_string(),
+            context: Some(json!({
+                "run_id": &run_id,
+                "session_name": sanitize_text(&session_name, 200),
+                "using_protocol_override": using_protocol_override,
+                "protocol_name": sanitize_text(&protocol_name, 200),
+                "protocol_chars": protocol_text.chars().count(),
+                "protocol_lines": protocol_text.lines().count(),
+                "protocol_hash_prefix": sanitize_short(&protocol_hash, 16),
+                "resume_draft_path": resume_state
+                    .current_draft_path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().to_string()),
+                "protocol_backup_path": protocol_backup_path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().to_string()),
+                "next_review_round": resume_state.next_review_round,
+                "existing_agent_artifacts": resume_state.existing_agents.len()
+            })),
+        },
+    );
+
+    let request = EditorialSessionRequest {
+        run_id,
+        session_name,
+        prompt,
+        protocol_name,
+        protocol_text,
+        protocol_hash,
+    };
+
+    let result = match run_editorial_session_core(&request, &log_session, Some(resume_state)) {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = write_log_record(
+                &log_session,
+                LogEventInput {
+                    level: "error".to_string(),
+                    category: "session.resume.failed".to_string(),
+                    message: "editorial session resume failed before structured result".to_string(),
+                    context: Some(json!({
+                        "run_id": sanitize_short(&request.run_id, 120),
+                        "error": sanitize_text(&error, 500)
+                    })),
+                },
+            );
+            return Err(error);
+        }
+    };
+
+    let _ = write_log_record(
+        &log_session,
+        LogEventInput {
+            level: if result.consensus_ready {
+                "info"
+            } else {
+                "warn"
+            }
+            .to_string(),
+            category: "session.resume.completed".to_string(),
+            message: "editorial session resume completed".to_string(),
+            context: Some(json!({
+                "run_id": result.run_id,
+                "status": result.status,
+                "consensus_ready": result.consensus_ready,
+                "session_dir": result.session_dir,
+                "final_markdown_path": result.final_markdown_path,
+                "session_minutes_path": result.session_minutes_path
+            })),
+        },
+    );
+
+    Ok(result)
+}
+
+fn list_resumable_sessions_blocking(
+    log_session: &LogSession,
+) -> Result<Vec<ResumableSessionInfo>, String> {
+    let root = checked_data_child_path(&sessions_dir())?;
+    fs::create_dir_all(&root).map_err(|error| format!("failed to create sessions dir: {error}"))?;
+
+    let mut sessions = Vec::new();
+    for entry in
+        fs::read_dir(&root).map_err(|error| format!("failed to read sessions dir: {error}"))?
+    {
+        let entry = entry.map_err(|error| format!("failed to read session entry: {error}"))?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if let Some(info) = inspect_resumable_session_dir(&path)? {
+            sessions.push(info);
+        }
+    }
+
+    sessions.sort_by(|left, right| {
+        right
+            .last_activity_unix
+            .cmp(&left.last_activity_unix)
+            .then_with(|| left.run_id.cmp(&right.run_id))
+    });
+
+    let _ = write_log_record(
+        log_session,
+        LogEventInput {
+            level: "info".to_string(),
+            category: "session.resume.listed".to_string(),
+            message: "resumable sessions listed from data/sessions".to_string(),
+            context: Some(json!({
+                "count": sessions.len(),
+                "run_ids": sessions.iter().take(30).map(|session| session.run_id.clone()).collect::<Vec<_>>()
+            })),
+        },
+    );
+
+    Ok(sessions)
+}
+
 fn app_root() -> PathBuf {
     if let Some(path) = APP_ROOT.get() {
         return path.clone();
@@ -681,8 +933,14 @@ fn checked_data_child_path(path: &Path) -> Result<PathBuf, String> {
     }
 
     let data_root = data_dir();
+    fs::create_dir_all(&data_root)
+        .map_err(|error| format!("failed to create Maestro data root: {error}"))?;
+    let canonical_data_root = data_root
+        .canonicalize()
+        .map_err(|error| format!("failed to canonicalize Maestro data root: {error}"))?;
     let relative = path
         .strip_prefix(&data_root)
+        .or_else(|_| path.strip_prefix(&canonical_data_root))
         .map_err(|_| "internal data path escaped Maestro data directory".to_string())?;
 
     if relative
@@ -691,12 +949,6 @@ fn checked_data_child_path(path: &Path) -> Result<PathBuf, String> {
     {
         return Err("internal data path contains unsafe segments".to_string());
     }
-
-    fs::create_dir_all(&data_root)
-        .map_err(|error| format!("failed to create Maestro data root: {error}"))?;
-    let canonical_data_root = data_root
-        .canonicalize()
-        .map_err(|error| format!("failed to canonicalize Maestro data root: {error}"))?;
 
     if path.exists() {
         let canonical_path = path
@@ -749,6 +1001,7 @@ fn create_log_session() -> LogSession {
     LogSession {
         id: id.clone(),
         path: logs_dir().join(format!("maestro-{id}.ndjson")),
+        write_lock: Arc::new(Mutex::new(())),
     }
 }
 
@@ -865,6 +1118,14 @@ fn run_editorial_session_inner(
     request: &EditorialSessionRequest,
     log_session: &LogSession,
 ) -> Result<EditorialSessionResult, String> {
+    run_editorial_session_core(request, log_session, None)
+}
+
+fn run_editorial_session_core(
+    request: &EditorialSessionRequest,
+    log_session: &LogSession,
+    resume_state: Option<ResumeSessionState>,
+) -> Result<EditorialSessionResult, String> {
     let run_id = sanitize_path_segment(&request.run_id, 120);
     if run_id.is_empty() {
         return Err("run_id vazio".to_string());
@@ -899,52 +1160,81 @@ fn run_editorial_session_inner(
     let mut agents = Vec::new();
     let mut current_draft = String::new();
     let mut current_draft_path: Option<PathBuf> = None;
-    let draft_specs = vec![
-        ("Claude", "claude", claude_args()),
-        ("Codex", "codex", codex_args()),
-        ("Gemini", "gemini", gemini_args()),
-    ];
+    let mut round = 1usize;
 
-    for (name, command, args) in draft_specs {
-        let output_path =
-            agent_dir.join(format!("round-001-{}-draft.md", name.to_ascii_lowercase()));
-        let draft_run = run_editorial_agent(
-            log_session,
-            &run_id,
-            name,
-            "draft",
-            command,
-            args,
-            build_draft_prompt(request, &run_id),
-            &output_path,
-            None,
-        );
-        agents.push(draft_run.clone());
-        let draft_artifact = read_text_file(&output_path).unwrap_or_default();
-        let draft_text = extract_stdout_block(&draft_artifact).unwrap_or(draft_artifact.as_str());
-        if draft_run.tone != "error" && draft_run.tone != "blocked" && !draft_text.trim().is_empty()
-        {
-            current_draft = draft_text.trim().to_string();
-            current_draft_path = Some(output_path);
-            break;
-        }
-
+    if let Some(state) = resume_state {
+        agents = state.existing_agents;
+        current_draft = state.current_draft;
+        current_draft_path = state.current_draft_path;
+        round = state.next_review_round.max(1);
         let _ = write_log_record(
             log_session,
             LogEventInput {
-                level: "warn".to_string(),
-                category: "session.draft.retry".to_string(),
-                message: "draft agent did not produce usable text; trying next available agent"
-                    .to_string(),
+                level: "info".to_string(),
+                category: "session.resume.loaded".to_string(),
+                message: "saved editorial session state loaded for continuation".to_string(),
                 context: Some(json!({
                     "run_id": &run_id,
-                    "agent": name,
-                    "status": draft_run.status,
-                    "tone": draft_run.tone,
-                    "next_policy": "continue_with_next_agent_without_final_delivery"
+                    "next_review_round": round,
+                    "current_draft_chars": current_draft.chars().count(),
+                    "current_draft_path": current_draft_path.as_ref().map(|path| path.to_string_lossy().to_string()),
+                    "existing_agent_artifacts": agents.len()
                 })),
             },
         );
+    }
+
+    if current_draft.trim().is_empty() {
+        let draft_specs = vec![
+            ("Claude", "claude", claude_args()),
+            ("Codex", "codex", codex_args()),
+            ("Gemini", "gemini", gemini_args()),
+        ];
+
+        for (name, command, args) in draft_specs {
+            let output_path =
+                agent_dir.join(format!("round-001-{}-draft.md", name.to_ascii_lowercase()));
+            let draft_run = run_editorial_agent(
+                log_session,
+                &run_id,
+                name,
+                "draft",
+                command,
+                args,
+                build_draft_prompt(request, &run_id),
+                &output_path,
+                None,
+            );
+            agents.push(draft_run.clone());
+            let draft_artifact = read_text_file(&output_path).unwrap_or_default();
+            let draft_text =
+                extract_stdout_block(&draft_artifact).unwrap_or(draft_artifact.as_str());
+            if draft_run.tone != "error"
+                && draft_run.tone != "blocked"
+                && !draft_text.trim().is_empty()
+            {
+                current_draft = draft_text.trim().to_string();
+                current_draft_path = Some(output_path);
+                break;
+            }
+
+            let _ = write_log_record(
+                log_session,
+                LogEventInput {
+                    level: "warn".to_string(),
+                    category: "session.draft.retry".to_string(),
+                    message: "draft agent did not produce usable text; trying next available agent"
+                        .to_string(),
+                    context: Some(json!({
+                        "run_id": &run_id,
+                        "agent": name,
+                        "status": draft_run.status,
+                        "tone": draft_run.tone,
+                        "next_policy": "continue_with_next_agent_without_final_delivery"
+                    })),
+                },
+            );
+        }
     }
 
     if current_draft.trim().is_empty() {
@@ -969,7 +1259,6 @@ fn run_editorial_session_inner(
     }
 
     let mut final_path: Option<PathBuf> = None;
-    let mut round = 1usize;
     loop {
         let review_specs = vec![
             (
@@ -1184,6 +1473,341 @@ fn write_text_file(path: &Path, text: &str) -> Result<(), String> {
 fn read_text_file(path: &Path) -> Result<String, String> {
     let path = checked_data_child_path(path)?;
     fs::read_to_string(&path).map_err(|error| format!("failed to read artifact: {error}"))
+}
+
+fn inspect_resumable_session_dir(path: &Path) -> Result<Option<ResumableSessionInfo>, String> {
+    let session_dir = checked_data_child_path(path)?;
+    let run_id = session_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| sanitize_path_segment(value, 120))
+        .unwrap_or_default();
+    if run_id.is_empty() {
+        return Ok(None);
+    }
+
+    let prompt_path = session_dir.join("prompt.md");
+    let protocol_path = session_dir.join("protocolo.md");
+    if !prompt_path.is_file() || !protocol_path.is_file() {
+        return Ok(None);
+    }
+
+    let final_path = session_dir.join("texto-final.md");
+    if final_path.is_file() {
+        return Ok(None);
+    }
+
+    let prompt_text = read_text_file(&prompt_path)?;
+    let protocol_text = read_text_file(&protocol_path)?;
+    let agent_dir = checked_data_child_path(&session_dir.join("agent-runs"))?;
+    let latest_draft = find_latest_draft_artifact(&agent_dir)?;
+    let next_round = latest_draft
+        .as_ref()
+        .map(|artifact| artifact.round.max(1))
+        .unwrap_or(1);
+    let artifact_count = count_markdown_artifacts(&session_dir)?;
+    let last_activity_unix = latest_activity_unix(&session_dir)?.unwrap_or(0);
+    let status = if latest_draft.is_some() {
+        "pronta para continuar".to_string()
+    } else {
+        "aguardando primeiro rascunho".to_string()
+    };
+
+    Ok(Some(ResumableSessionInfo {
+        run_id,
+        session_name: extract_saved_session_name(&prompt_text)
+            .unwrap_or_else(|| "Sessao editorial".to_string()),
+        session_dir: session_dir.to_string_lossy().to_string(),
+        prompt_path: prompt_path.to_string_lossy().to_string(),
+        protocol_path: protocol_path.to_string_lossy().to_string(),
+        draft_path: latest_draft
+            .as_ref()
+            .map(|artifact| artifact.path.to_string_lossy().to_string()),
+        final_markdown_path: None,
+        next_round,
+        last_activity_unix,
+        artifact_count,
+        protocol_lines: protocol_text.lines().count(),
+        status,
+    }))
+}
+
+fn load_resume_session_state(agent_dir: &Path) -> Result<ResumeSessionState, String> {
+    let agent_dir = checked_data_child_path(agent_dir)?;
+    let latest_draft = find_latest_draft_artifact(&agent_dir)?;
+    let existing_agents = load_agent_results_from_dir(&agent_dir)?;
+
+    if let Some(artifact) = latest_draft {
+        let text = read_text_file(&artifact.path)?;
+        let draft = extract_stdout_block(&text)
+            .unwrap_or(text.as_str())
+            .trim()
+            .to_string();
+        if !draft.is_empty() {
+            return Ok(ResumeSessionState {
+                current_draft: draft,
+                current_draft_path: Some(artifact.path),
+                next_review_round: artifact.round.max(1),
+                existing_agents,
+            });
+        }
+    }
+
+    Ok(ResumeSessionState {
+        current_draft: String::new(),
+        current_draft_path: None,
+        next_review_round: 1,
+        existing_agents,
+    })
+}
+
+#[derive(Clone)]
+struct SessionArtifact {
+    round: usize,
+    agent: String,
+    role: String,
+    path: PathBuf,
+}
+
+fn find_latest_draft_artifact(agent_dir: &Path) -> Result<Option<SessionArtifact>, String> {
+    let mut artifacts = read_agent_artifacts(agent_dir)?
+        .into_iter()
+        .filter(|artifact| artifact.role == "revision" || artifact.role == "draft")
+        .collect::<Vec<_>>();
+    artifacts.sort_by(|left, right| {
+        artifact_resume_rank(right)
+            .cmp(&artifact_resume_rank(left))
+            .then_with(|| right.agent.cmp(&left.agent))
+    });
+
+    for artifact in artifacts {
+        let text = read_text_file(&artifact.path).unwrap_or_default();
+        let draft = extract_stdout_block(&text).unwrap_or(text.as_str());
+        if !draft.trim().is_empty() {
+            return Ok(Some(artifact));
+        }
+    }
+
+    Ok(None)
+}
+
+fn artifact_resume_rank(artifact: &SessionArtifact) -> (usize, usize) {
+    let role_rank = if artifact.role == "revision" { 1 } else { 0 };
+    (artifact.round, role_rank)
+}
+
+fn load_agent_results_from_dir(agent_dir: &Path) -> Result<Vec<EditorialAgentResult>, String> {
+    let mut artifacts = read_agent_artifacts(agent_dir)?;
+    artifacts.sort_by(|left, right| {
+        left.round
+            .cmp(&right.round)
+            .then_with(|| left.role.cmp(&right.role))
+            .then_with(|| left.agent.cmp(&right.agent))
+    });
+
+    let mut agents = Vec::new();
+    for artifact in artifacts {
+        if let Some(result) = parse_agent_artifact_result(&artifact) {
+            agents.push(result);
+        }
+    }
+    Ok(agents)
+}
+
+fn read_agent_artifacts(agent_dir: &Path) -> Result<Vec<SessionArtifact>, String> {
+    let agent_dir = checked_data_child_path(agent_dir)?;
+    if !agent_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut artifacts = Vec::new();
+    for entry in
+        fs::read_dir(&agent_dir).map_err(|error| format!("failed to read agent dir: {error}"))?
+    {
+        let entry =
+            entry.map_err(|error| format!("failed to read agent artifact entry: {error}"))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if let Some(artifact) = parse_agent_artifact_path(&path) {
+            artifacts.push(artifact);
+        }
+    }
+    Ok(artifacts)
+}
+
+fn parse_agent_artifact_path(path: &Path) -> Option<SessionArtifact> {
+    let name = path.file_name()?.to_str()?;
+    let rest = name.strip_prefix("round-")?;
+    let (round_text, rest) = rest.split_once('-')?;
+    let round = round_text.parse::<usize>().ok()?;
+    let stem = rest.strip_suffix(".md")?;
+    let (agent, role) = stem.rsplit_once('-')?;
+    if !matches!(role, "draft" | "review" | "revision") {
+        return None;
+    }
+    Some(SessionArtifact {
+        round,
+        agent: agent.to_string(),
+        role: role.to_string(),
+        path: path.to_path_buf(),
+    })
+}
+
+fn parse_agent_artifact_result(artifact: &SessionArtifact) -> Option<EditorialAgentResult> {
+    let text = read_text_file(&artifact.path).ok()?;
+    let cli = extract_bullet_code_value(&text, "CLI").unwrap_or_else(|| artifact.agent.clone());
+    let status = extract_bullet_code_value(&text, "Status").unwrap_or_else(|| {
+        if artifact.role == "draft" || artifact.role == "revision" {
+            "DRAFT_CREATED".to_string()
+        } else {
+            "NOT_READY".to_string()
+        }
+    });
+    let duration_ms = extract_bullet_code_value(&text, "Duration ms")
+        .and_then(|value| value.parse::<u128>().ok())
+        .unwrap_or(0);
+    let exit_code =
+        extract_bullet_code_value(&text, "Exit code").and_then(|value| value.parse::<i32>().ok());
+    let tone = if status == "READY" || status == "DRAFT_CREATED" {
+        "ok"
+    } else if status == "CLI_NOT_FOUND" {
+        "blocked"
+    } else if status.starts_with("EXEC_ERROR") {
+        "error"
+    } else {
+        "warn"
+    };
+
+    Some(EditorialAgentResult {
+        name: humanize_agent_name(&artifact.agent),
+        role: artifact.role.clone(),
+        cli,
+        tone: tone.to_string(),
+        status,
+        duration_ms,
+        exit_code,
+        output_path: artifact.path.to_string_lossy().to_string(),
+    })
+}
+
+fn extract_bullet_code_value(text: &str, label: &str) -> Option<String> {
+    let prefix = format!("- {label}: `");
+    text.lines().find_map(|line| {
+        let value = line.trim().strip_prefix(&prefix)?;
+        let end = value.find('`')?;
+        Some(value[..end].trim().to_string())
+    })
+}
+
+fn humanize_agent_name(value: &str) -> String {
+    match value.to_ascii_lowercase().as_str() {
+        "claude" => "Claude".to_string(),
+        "codex" => "Codex".to_string(),
+        "gemini" => "Gemini".to_string(),
+        other => other
+            .replace('_', " ")
+            .split_whitespace()
+            .map(|part| {
+                let mut chars = part.chars();
+                match chars.next() {
+                    Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+fn extract_saved_session_name(prompt_file: &str) -> Option<String> {
+    prompt_file.lines().find_map(|line| {
+        let value = line.strip_prefix("Sessao: ")?;
+        let value = value.trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    })
+}
+
+fn extract_saved_prompt(prompt_file: &str) -> Option<String> {
+    let marker = "\n\n";
+    let (_, prompt) = prompt_file.split_once(marker)?;
+    let (_, prompt) = prompt.split_once(marker)?;
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        None
+    } else {
+        Some(prompt.to_string())
+    }
+}
+
+fn stable_text_fingerprint(text: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("fnv64-{hash:016x}")
+}
+
+fn count_markdown_artifacts(path: &Path) -> Result<usize, String> {
+    let path = checked_data_child_path(path)?;
+    if !path.is_dir() {
+        return Ok(0);
+    }
+    let mut count = 0;
+    for entry in
+        fs::read_dir(&path).map_err(|error| format!("failed to count artifacts: {error}"))?
+    {
+        let entry = entry.map_err(|error| format!("failed to read artifact entry: {error}"))?;
+        let entry_path = entry.path();
+        if entry_path.is_dir() {
+            count += count_markdown_artifacts(&entry_path)?;
+        } else if entry_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.eq_ignore_ascii_case("md"))
+            .unwrap_or(false)
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn latest_activity_unix(path: &Path) -> Result<Option<u64>, String> {
+    let path = checked_data_child_path(path)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let mut latest = path
+        .metadata()
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(system_time_to_unix);
+    if path.is_dir() {
+        for entry in
+            fs::read_dir(&path).map_err(|error| format!("failed to read activity dir: {error}"))?
+        {
+            let entry = entry.map_err(|error| format!("failed to read activity entry: {error}"))?;
+            if let Some(value) = latest_activity_unix(&entry.path())? {
+                latest = Some(latest.map(|current| current.max(value)).unwrap_or(value));
+            }
+        }
+    }
+    Ok(latest)
+}
+
+fn system_time_to_unix(value: SystemTime) -> Option<u64> {
+    value
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
 }
 
 fn claude_args() -> Vec<String> {
@@ -2491,6 +3115,103 @@ mod tests {
     }
 
     #[test]
+    fn keeps_concurrent_log_writes_as_valid_ndjson() {
+        let session = create_log_session();
+        let log_path = checked_data_child_path(&session.path).unwrap();
+        let _ = fs::remove_file(&log_path);
+        let handles = (0..18)
+            .map(|index| {
+                let session = session.clone();
+                thread::spawn(move || {
+                    write_log_record(
+                        &session,
+                        LogEventInput {
+                            level: "info".to_string(),
+                            category: "test.concurrent_log".to_string(),
+                            message: format!("concurrent log event {index}"),
+                            context: Some(json!({ "index": index })),
+                        },
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("log writer thread must not panic")
+                .unwrap();
+        }
+
+        let text = fs::read_to_string(log_path).unwrap();
+        let lines = text.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 18);
+        for line in lines {
+            serde_json::from_str::<Value>(line).expect("each log line must be valid JSON");
+        }
+    }
+
+    #[test]
+    fn extracts_saved_prompt_for_session_resume() {
+        let prompt_file =
+            "# Prompt da Sessao\n\nSessao: Teste Editorial\nRun: `run-resume`\n\nEscreva o artigo.";
+        assert_eq!(
+            extract_saved_session_name(prompt_file).as_deref(),
+            Some("Teste Editorial")
+        );
+        assert_eq!(
+            extract_saved_prompt(prompt_file).as_deref(),
+            Some("Escreva o artigo.")
+        );
+    }
+
+    #[test]
+    fn detects_latest_revision_for_session_resume() {
+        let session_dir = sessions_dir().join("run-resume-detection-test");
+        let _ = fs::remove_dir_all(&session_dir);
+        let agent_dir = session_dir.join("agent-runs");
+        fs::create_dir_all(&agent_dir).unwrap();
+        write_text_file(
+            &session_dir.join("prompt.md"),
+            "# Prompt da Sessao\n\nSessao: Retomada\nRun: `run-resume-detection-test`\n\nPrompt salvo.",
+        )
+        .unwrap();
+        write_text_file(
+            &session_dir.join("protocolo.md"),
+            &"protocolo\n".repeat(120),
+        )
+        .unwrap();
+        write_text_file(
+            &agent_dir.join("round-001-claude-draft.md"),
+            "# Claude - draft\n\n- CLI: `claude`\n- Status: `DRAFT_CREATED`\n- Exit code: `0`\n- Duration ms: `10`\n\n## Stdout\n\n```text\nrascunho antigo\n```\n\n## Stderr\n\n```text\n\n```\n",
+        )
+        .unwrap();
+        write_text_file(
+            &agent_dir.join("round-007-gemini-revision.md"),
+            "# Gemini - revision\n\n- CLI: `gemini`\n- Status: `DRAFT_CREATED`\n- Exit code: `0`\n- Duration ms: `20`\n\n## Stdout\n\n```text\nrascunho revisado\n```\n\n## Stderr\n\n```text\n\n```\n",
+        )
+        .unwrap();
+
+        let info = inspect_resumable_session_dir(&session_dir)
+            .unwrap()
+            .expect("session should be resumable");
+        assert_eq!(info.run_id, "run-resume-detection-test");
+        assert_eq!(info.next_round, 7);
+        assert!(info
+            .draft_path
+            .as_deref()
+            .unwrap()
+            .ends_with("round-007-gemini-revision.md"));
+
+        let state = load_resume_session_state(&agent_dir).unwrap();
+        assert_eq!(state.current_draft, "rascunho revisado");
+        assert_eq!(state.next_review_round, 7);
+        assert_eq!(state.existing_agents.len(), 2);
+
+        let _ = fs::remove_dir_all(&session_dir);
+    }
+
+    #[test]
     fn redacts_raw_secret_like_keys() {
         assert!(should_redact_key("api_token"));
         assert!(should_redact_key("authorization"));
@@ -2572,6 +3293,8 @@ pub fn run() {
             dependency_preflight,
             verify_cloudflare_credentials,
             run_cli_adapter_smoke,
+            list_resumable_sessions,
+            resume_editorial_session,
             run_editorial_session
         ])
         .run(tauri::generate_context!())

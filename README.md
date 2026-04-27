@@ -15,7 +15,7 @@ Portable Windows editorial workbench for protocol-driven AI drafting, source ver
 
 Status: functional alpha with live bootstrap, diagnostics, navigation, Cloudflare credential probing, PostEditor parity, and a real background Claude/Codex/Gemini editorial session path.
 
-Current project version: `v0.3.3`.
+Current project version: `v0.3.4`.
 
 Maestro is independent from `cross-review-mcp`; it incorporates the same strict convergence discipline in its own application logic. It is designed to run from a folder, keep runtime data out of Git, and store operator protocols, drafts, evidence, and sessions locally under ignored runtime paths.
 
@@ -25,7 +25,7 @@ Planned modern stack: Tauri 2 + WebView2, React 19, Vite 8, TypeScript 6, Vitest
 
 Diagnostic logs are structured NDJSON files under `data/logs/`, one file per app execution, with native/frontend context and per-agent process events so failures can be attached for precise analysis. See `docs/logging.md`.
 
-CLI agents run in background by design, without visible terminal windows in Windows release builds. Real editorial calls do not have an artificial timeout. The operator sees friendly progress, elapsed-time heartbeat status, phase status, and a selectable UI verbosity level, while raw prompts, stdout, stderr, and transcripts stay out of the normal interface and remain protected as ignored local runtime artifacts under `data/sessions/`.
+CLI agents run in background by design, without visible terminal windows in Windows release builds. Real editorial calls do not have an artificial timeout. The operator sees friendly progress, elapsed-time heartbeat status, phase status, resume controls, and a selectable UI verbosity level, while raw prompts, stdout, stderr, and transcripts stay out of the normal interface and remain protected as ignored local runtime artifacts under `data/sessions/`.
 
 MainSite-bound editing uses a PostEditor parity module, not a generic editor. See `docs/text-editor-decision.md` and `docs/mainsite-compatibility-contract.md`.
 
@@ -41,7 +41,7 @@ Configuration persistence supports three modes: local JSON for everything, Windo
 
 The portable ZIP includes `LEIAME.md` with first-run instructions for end users, including `data/config/bootstrap.json`, Cloudflare environment variables, and per-execution NDJSON logs.
 
-Prompt-to-consensus sessions export separate final text and session minutes. See `docs/editorial-session-workflow.md`.
+Prompt-to-consensus sessions export separate final text and session minutes. Interrupted sessions can be resumed from `data/sessions/`; if a new protocol is loaded before resume, Maestro passes it to the agents and preserves the previous protocol as a local session artifact. See `docs/editorial-session-workflow.md`.
 
 Shared chat import, Markdown/PDF support, and Cloudflare D1 integration are planned under `docs/import-export-cloudflare.md`.
 

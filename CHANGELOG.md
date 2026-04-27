@@ -4,6 +4,14 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.4] - 2026-04-26
+
+- Reworked the running session status card to use an indeterminate activity meter instead of an artificial completion percentage.
+- Changed long-running session time display to `hh:mm:ss` and Brazilian date/time formatting with the Brasilia timezone.
+- Humanized visible session, agent, phase, and review labels so the UI no longer exposes internal status codes or development-only wording.
+- Added native log-write locking so concurrent agent events cannot interleave and corrupt NDJSON lines.
+- Added session resume support: Maestro reads interrupted work under `data/sessions/`, auto-resumes when only one session is available, asks the operator when several sessions exist, and can resume with a newly loaded protocol or the protocol saved in the session.
+
 ## [v0.3.3] - 2026-04-26
 
 - Hardened native filesystem access so logs, bootstrap configuration, and editorial session artifacts are validated against a canonical Tauri-resolved app root and confirmed as children of Maestro's local `data/` directory before reads or writes.

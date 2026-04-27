@@ -150,6 +150,21 @@ type EditorialSessionResult = {
   status: string;
 };
 
+type ResumableSessionInfo = {
+  run_id: string;
+  session_name: string;
+  session_dir: string;
+  prompt_path: string;
+  protocol_path: string;
+  draft_path: string | null;
+  final_markdown_path: string | null;
+  next_round: number;
+  last_activity_unix: number;
+  artifact_count: number;
+  protocol_lines: number;
+  status: string;
+};
+
 type ProtocolReadingGate = {
   agent: string;
   progress: number;
@@ -160,7 +175,7 @@ const initialAgents: AgentCard[] = [
   { name: 'Claude', cli: 'claude', state: 'blocked', note: 'aguardando sessao editorial' },
   { name: 'Codex', cli: 'codex', state: 'blocked', note: 'aguardando sessao editorial' },
   { name: 'Gemini', cli: 'gemini', state: 'blocked', note: 'aguardando sessao editorial' },
-  { name: 'MaestroPeer', cli: 'deterministico', state: 'blocked', note: 'aguardando preflight local' },
+  { name: 'Maestro', cli: 'motor local', state: 'blocked', note: 'aguardando verificacoes iniciais' },
 ];
 
 const initialEvidenceRows: EvidenceRow[] = [
@@ -171,9 +186,9 @@ const initialEvidenceRows: EvidenceRow[] = [
 ];
 
 const initialProtocolReadingGates: ProtocolReadingGate[] = [
-  { agent: 'Claude', progress: 0, status: 'aguardando motor de orquestracao' },
-  { agent: 'Codex', progress: 0, status: 'aguardando motor de orquestracao' },
-  { agent: 'Gemini', progress: 0, status: 'aguardando motor de orquestracao' },
+  { agent: 'Claude', progress: 0, status: 'Aguardando' },
+  { agent: 'Codex', progress: 0, status: 'Aguardando' },
+  { agent: 'Gemini', progress: 0, status: 'Aguardando' },
 ];
 
 const initialDiscussionRounds: DiscussionRound[] = [
@@ -207,11 +222,11 @@ const webEvidenceTools = [
 ];
 
 const initialBootstrapChecks: BootstrapCheckRow[] = [
-  { label: 'WebView2', value: 'probe pendente', tone: 'pending' },
-  { label: 'Claude CLI', value: 'probe pendente', tone: 'pending' },
-  { label: 'Codex CLI', value: 'probe pendente', tone: 'pending' },
-  { label: 'Gemini CLI', value: 'probe pendente', tone: 'pending' },
-  { label: 'Cloudflare env', value: 'probe pendente', tone: 'pending' },
+  { label: 'WebView2', value: 'verificacao pendente', tone: 'pending' },
+  { label: 'Claude CLI', value: 'verificacao pendente', tone: 'pending' },
+  { label: 'Codex CLI', value: 'verificacao pendente', tone: 'pending' },
+  { label: 'Gemini CLI', value: 'verificacao pendente', tone: 'pending' },
+  { label: 'Cloudflare env', value: 'verificacao pendente', tone: 'pending' },
   { label: 'Wrangler', value: 'aguardando autorizacao', tone: 'pending' },
 ];
 
@@ -298,8 +313,8 @@ const idleOperation: OperationSnapshot = {
 
 const idlePhases: PhaseItem[] = [
   { label: 'Protocolo', detail: 'aguardando prompt', state: 'waiting' },
-  { label: 'Preflight', detail: 'nao iniciado', state: 'waiting' },
-  { label: 'Orquestracao', detail: 'nao iniciada', state: 'waiting' },
+  { label: 'Verificacoes', detail: 'nao iniciadas', state: 'waiting' },
+  { label: 'Agentes', detail: 'nao iniciados', state: 'waiting' },
   { label: 'Entrega', detail: 'bloqueada ate unanimidade', state: 'waiting' },
 ];
 
@@ -312,17 +327,17 @@ const idleActivityFeed: ActivityItem[] = [
   },
   {
     level: 'diagnostic',
-    time: 'log',
-    title: 'Pasta de diagnostico',
-    detail: 'Anexe o data/logs/maestro-<timestamp>-pid<id>.ndjson mais recente quando pedir analise de falhas.',
+    time: '--:--:--',
+    title: 'Diagnostico',
+    detail: 'Ao relatar falhas, anexe o arquivo mais recente da pasta data/logs.',
   },
 ];
 
 function stateLabel(state: AgentState) {
-  if (state === 'ready') return 'READY';
-  if (state === 'running') return 'RUNNING';
-  if (state === 'evidence') return 'NEEDS_EVIDENCE';
-  return 'NOT_READY';
+  if (state === 'ready') return 'Aprovado';
+  if (state === 'running') return 'Em andamento';
+  if (state === 'evidence') return 'Precisa de revisao';
+  return 'Aguardando';
 }
 
 function stateIcon(state: AgentState) {
@@ -336,6 +351,67 @@ async function sha256(text: string) {
   const bytes = new TextEncoder().encode(text);
   const buffer = await crypto.subtle.digest('SHA-256', bytes);
   return [...new Uint8Array(buffer)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function formatElapsedTime(totalSeconds: number) {
+  const safeSeconds = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  const seconds = safeSeconds % 60;
+  return [hours, minutes, seconds].map((value) => value.toString().padStart(2, '0')).join(':');
+}
+
+function formatBrazilDateTime(value: Date | number) {
+  return new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).format(value);
+}
+
+function humanizeRunStatus(status: RunStatus) {
+  if (status === 'idle') return 'Aguardando';
+  if (status === 'preparing') return 'Preparando';
+  if (status === 'running') return 'Em andamento';
+  if (status === 'paused') return 'Aguardando ajustes';
+  if (status === 'completed') return 'Concluido';
+  return 'Bloqueado';
+}
+
+function operationMeterLabel(status: RunStatus) {
+  if (status === 'running') return 'Em andamento';
+  if (status === 'completed') return 'Concluido';
+  if (status === 'paused') return 'Aguardando ajustes';
+  if (status === 'blocked') return 'Bloqueado';
+  if (status === 'preparing') return 'Preparando';
+  return 'Aguardando';
+}
+
+function humanizeAgentStatus(status: string) {
+  const normalized = status.trim().toUpperCase();
+  if (normalized === 'READY') return 'Aprovado';
+  if (normalized === 'NOT_READY') return 'Precisa de ajustes';
+  if (normalized === 'NEEDS_EVIDENCE') return 'Precisa de verificacao';
+  if (normalized === 'DRAFT_CREATED') return 'Rascunho gerado';
+  if (normalized === 'CLI_NOT_FOUND') return 'CLI nao encontrada';
+  if (normalized === 'READY_UNANIMOUS') return 'Texto liberado';
+  if (normalized === 'PAUSED_DRAFT_UNAVAILABLE') return 'Rascunho indisponivel';
+  if (normalized === 'PAUSED_WITH_REAL_AGENT_OUTPUTS') return 'Aguardando ajustes';
+  return status
+    .replace(/_/g, ' ')
+    .toLowerCase()
+    .replace(/(^|\s)\S/g, (value) => value.toUpperCase());
+}
+
+function humanizeRole(role: string) {
+  if (role === 'draft') return 'Rascunho';
+  if (role === 'revision') return 'Ajuste';
+  if (role === 'review') return 'Revisao';
+  return 'Atividade';
 }
 
 export function App() {
@@ -382,6 +458,10 @@ export function App() {
   const [bootstrapRows, setBootstrapRows] = useState<BootstrapCheckRow[]>(initialBootstrapChecks);
   const [bootstrapConfigStatus, setBootstrapConfigStatus] = useState('bootstrap.json ainda nao carregado');
   const [isVerifyingCloudflare, setIsVerifyingCloudflare] = useState(false);
+  const [resumeCandidates, setResumeCandidates] = useState<ResumableSessionInfo[]>([]);
+  const [showResumePicker, setShowResumePicker] = useState(false);
+  const [isResumeLoading, setIsResumeLoading] = useState(false);
+  const [useLoadedProtocolForResume, setUseLoadedProtocolForResume] = useState(false);
 
   const readyCount = useMemo(() => agentCards.filter((agent) => agent.state === 'ready').length, [agentCards]);
   const visibleActivity = useMemo(() => {
@@ -394,21 +474,13 @@ export function App() {
     operation.status === 'paused' || operation.status === 'blocked' || operation.status === 'completed'
       ? 'Nova sessao'
       : 'Iniciar sessao';
-  const formalState =
-    operation.status === 'idle'
-      ? 'aguardando_prompt'
-      : operation.status === 'preparing'
-        ? 'preflight_em_execucao'
-        : operation.status === 'running'
-          ? 'agentes_em_execucao'
-          : operation.status === 'paused'
-            ? 'aguardando_retomada'
-            : operation.status === 'completed'
-              ? 'final_disponivel'
-              : 'bloqueado';
+  const formalState = humanizeRunStatus(operation.status);
   const linkEvidenceState = evidenceRows.find((item) => item.label === 'Links')?.value ?? 'nao iniciado';
   const activeNavItem = navItems.find((item) => item.section === activeSection) ?? navItems[0];
   const cloudflareTokenAvailable = cloudflareApiToken.length > 0 || Boolean(cloudflareEnvSnapshot?.api_token_present);
+  const operationIndeterminate = operation.status === 'running';
+  const operationProgressLabel = operationMeterLabel(operation.status);
+  const hasLoadedProtocolForResume = protocolText.trim().length >= 100 && protocol.hash !== 'aguardando importacao';
 
   useEffect(() => {
     void logEvent({
@@ -429,6 +501,7 @@ export function App() {
 
   function activityTimestamp() {
     return new Date().toLocaleTimeString('pt-BR', {
+      timeZone: 'America/Sao_Paulo',
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
@@ -467,7 +540,7 @@ export function App() {
       setBootstrapRows(
         initialBootstrapChecks.map((row) => ({
           ...row,
-          value: row.label === 'WebView2' ? 'ativo pelo runtime Tauri' : 'checagem em background',
+          value: row.label === 'WebView2' ? 'ativo pelo runtime Tauri' : 'verificando',
           tone: row.label === 'WebView2' ? 'ok' : row.tone,
         })),
       );
@@ -519,7 +592,7 @@ export function App() {
             current.map((row) =>
               row.label === 'WebView2'
                 ? row
-                : { ...row, value: 'falha na checagem em background; ver logs', tone: 'warn' },
+                : { ...row, value: 'falha na verificacao; consulte diagnostico', tone: 'warn' },
             ),
           );
           void logEvent({
@@ -615,6 +688,154 @@ export function App() {
     return 'blocked';
   }
 
+  function formatSessionActivity(session: ResumableSessionInfo) {
+    if (!session.last_activity_unix) return 'sem data registrada';
+    return formatBrazilDateTime(session.last_activity_unix * 1000);
+  }
+
+  function resumeProtocolOptions(useLoadedProtocol: boolean) {
+    if (!useLoadedProtocol || !hasLoadedProtocolForResume) {
+      return { nextRound: undefined };
+    }
+
+    return {
+      protocolName: protocol.name,
+      protocolText,
+      protocolHash: protocol.hash,
+      nextRound: undefined,
+    };
+  }
+
+  async function requestResumeSession() {
+    setIsResumeLoading(true);
+    setOperation({
+      title: 'Buscando sessoes',
+      progress: 16,
+      current: 'Verificando sessoes interrompidas na pasta de dados.',
+      eta: 'aguarde',
+      status: 'preparing',
+    });
+
+    try {
+      const sessions = await invoke<ResumableSessionInfo[]>('list_resumable_sessions');
+      setResumeCandidates(sessions);
+      setUseLoadedProtocolForResume(hasLoadedProtocolForResume);
+
+      void logEvent({
+        level: 'info',
+        category: 'session.resume.requested',
+        message: 'operator requested resumable session list',
+        context: {
+          count: sessions.length,
+          loaded_protocol_available: hasLoadedProtocolForResume,
+          protocol_name: hasLoadedProtocolForResume ? protocol.name : null,
+        },
+      });
+
+      if (sessions.length === 0) {
+        setOperation({
+          title: 'Nenhuma sessao para retomar',
+          progress: 0,
+          current: 'Nao encontrei sessoes interrompidas na pasta de dados.',
+          eta: 'inicie uma nova sessao quando quiser',
+          status: 'idle',
+        });
+        appendActivity({
+          level: 'summary',
+          title: 'Nada para retomar',
+          detail: 'A pasta de sessoes nao possui trabalhos interrompidos disponiveis.',
+        });
+        return;
+      }
+
+      if (sessions.length === 1) {
+        await startResumeSession(sessions[0], hasLoadedProtocolForResume);
+        return;
+      }
+
+      setShowResumePicker(true);
+      setOperation({
+        title: 'Escolha a sessao',
+        progress: 28,
+        current: `${sessions.length.toLocaleString('pt-BR')} sessoes interrompidas encontradas.`,
+        eta: 'selecione qual trabalho continuar',
+        status: 'paused',
+      });
+    } catch (error) {
+      setOperation({
+        title: 'Retomada indisponivel',
+        progress: 0,
+        current: 'Nao foi possivel ler as sessoes salvas.',
+        eta: 'consulte diagnostico',
+        status: 'blocked',
+      });
+      void logEvent({
+        level: 'error',
+        category: 'session.resume.list_failed',
+        message: 'failed to list resumable sessions',
+        context: { error },
+      });
+    } finally {
+      setIsResumeLoading(false);
+    }
+  }
+
+  async function startResumeSession(session: ResumableSessionInfo, useLoadedProtocol: boolean) {
+    setShowResumePicker(false);
+    setSessionRunId(session.run_id);
+    setSessionName(session.session_name);
+    const protocolOverride = resumeProtocolOptions(useLoadedProtocol);
+    setOperation({
+      title: 'Retomando sessao editorial',
+      progress: 32,
+      current: `Continuando a partir da rodada ${session.next_round.toLocaleString('pt-BR')}.`,
+      eta: `Ultima atividade: ${formatSessionActivity(session)}`,
+      status: 'preparing',
+    });
+    setPhaseItems([
+      { label: 'Protocolo', detail: useLoadedProtocol && hasLoadedProtocolForResume ? 'atualizado' : 'salvo', state: 'done' },
+      { label: 'Verificacoes', detail: 'concluidas', state: 'done' },
+      { label: 'Agentes', detail: 'preparando continuidade', state: 'active' },
+      { label: 'Entrega', detail: 'aguardando unanimidade', state: 'waiting' },
+    ]);
+    setDiscussionItems((current) => [
+      {
+        round: session.next_round.toString().padStart(3, '0'),
+        status: 'Retomada',
+        note:
+          useLoadedProtocol && hasLoadedProtocolForResume
+            ? `Sessao retomada com o protocolo carregado: ${protocol.name}.`
+            : 'Sessao retomada com o protocolo salvo na pasta da sessao.',
+      },
+      ...current,
+    ]);
+    appendActivity({
+      level: 'summary',
+      title: 'Retomada iniciada',
+      detail:
+        useLoadedProtocol && hasLoadedProtocolForResume
+          ? `Rodada ${session.next_round.toLocaleString('pt-BR')} com protocolo atualizado.`
+          : `Rodada ${session.next_round.toLocaleString('pt-BR')} com protocolo salvo.`,
+    });
+    void logEvent({
+      level: 'info',
+      category: 'session.resume.selected',
+      message: 'operator selected session to resume',
+      context: {
+        run_id: session.run_id,
+        session_name: session.session_name,
+        next_round: session.next_round,
+        use_loaded_protocol: useLoadedProtocol && hasLoadedProtocolForResume,
+        loaded_protocol_name: hasLoadedProtocolForResume ? protocol.name : null,
+      },
+    });
+
+    await runRealEditorialSession(session.run_id, '', {
+      ...protocolOverride,
+      nextRound: session.next_round,
+    });
+  }
+
   function startEditorialSession() {
     const promptText = editorialPrompt.trim();
     const runId = createRunId();
@@ -645,7 +866,7 @@ export function App() {
       setOperation({
         title: 'Protocolo integral ausente',
         progress: 0,
-        current: 'Importe o arquivo Markdown integral do protocolo antes de iniciar a sessao real.',
+        current: 'Importe o arquivo Markdown integral do protocolo antes de iniciar a sessao.',
         eta: 'aguardando protocolo',
         status: 'blocked',
       });
@@ -677,19 +898,19 @@ export function App() {
       status: 'preparing',
     });
     setPhaseItems([
-      { label: 'Protocolo', detail: 'fixando hash', state: 'active' },
-      { label: 'Preflight', detail: 'aguardando protocolo', state: 'waiting' },
-      { label: 'Orquestracao', detail: 'nao iniciada', state: 'waiting' },
+      { label: 'Protocolo', detail: 'registrando', state: 'active' },
+      { label: 'Verificacoes', detail: 'aguardando protocolo', state: 'waiting' },
+      { label: 'Agentes', detail: 'nao iniciados', state: 'waiting' },
       { label: 'Entrega', detail: 'bloqueada ate unanimidade', state: 'waiting' },
     ]);
-    setAgentCards(initialAgents.map((agent) => ({ ...agent, note: 'aguardando preflight desta sessao' })));
-    setEvidenceRows(initialEvidenceRows.map((item) => ({ ...item, value: 'aguardando preflight' })));
+    setAgentCards(initialAgents.map((agent) => ({ ...agent, note: 'aguardando verificacoes iniciais' })));
+    setEvidenceRows(initialEvidenceRows.map((item) => ({ ...item, value: 'aguardando verificacoes' })));
     setProtocolGateItems(initialProtocolReadingGates);
     setDiscussionItems([
       {
         round: '000',
-        status: 'SESSION_CREATED',
-        note: 'Prompt recebido. Nenhum peer foi chamado ainda; entrega final permanece bloqueada.',
+        status: 'Sessao criada',
+        note: 'Prompt recebido. Nenhum agente foi chamado ainda; entrega final permanece bloqueada.',
       },
     ]);
     setActivityItems([
@@ -697,7 +918,7 @@ export function App() {
         level: 'summary',
         time: activityTimestamp(),
         title: 'Prompt recebido',
-        detail: 'Sessao criada no monitor local. A partir daqui, cada etapa precisa aparecer na UI e no NDJSON.',
+        detail: 'Sessao criada. A partir daqui, cada etapa aparecera no acompanhamento e no diagnostico.',
       },
       ...idleActivityFeed,
     ]);
@@ -731,21 +952,21 @@ export function App() {
       status: 'preparing',
     });
     setPhaseItems([
-      { label: 'Protocolo', detail: 'registrado no log', state: 'done' },
-      { label: 'Preflight', detail: 'concluido', state: 'done' },
-      { label: 'Orquestracao', detail: 'acionando agentes', state: 'active' },
+      { label: 'Protocolo', detail: 'registrado', state: 'done' },
+      { label: 'Verificacoes', detail: 'concluidas', state: 'done' },
+      { label: 'Agentes', detail: 'iniciando', state: 'active' },
       { label: 'Entrega', detail: 'bloqueada ate unanimidade', state: 'waiting' },
     ]);
     setEvidenceRows([
-      { label: 'DOI', value: 'aguardando motor', tone: 'info' },
-      { label: 'Links', value: 'aguardando motor', tone: 'info' },
-      { label: 'ABNT', value: 'aguardando motor', tone: 'info' },
-      { label: 'Quarentena', value: 'aguardando motor', tone: 'info' },
+      { label: 'DOI', value: 'Aguardando', tone: 'info' },
+      { label: 'Links', value: 'Aguardando', tone: 'info' },
+      { label: 'ABNT', value: 'Aguardando', tone: 'info' },
+      { label: 'Quarentena', value: 'Aguardando', tone: 'info' },
     ]);
     appendActivity({
       level: 'detail',
       title: 'Protocolo registrado',
-      detail: `Arquivo ${protocol.name}; linhas=${protocol.lines}; hash=${protocol.hash.slice(0, 16)}.`,
+      detail: `Arquivo ${protocol.name}; ${protocol.lines.toLocaleString('pt-BR')} linhas registradas.`,
     });
     void logEvent({
       level: 'info',
@@ -762,30 +983,44 @@ export function App() {
     void runRealEditorialSession(runId, promptText);
   }
 
-  async function runRealEditorialSession(runId: string, promptText: string) {
+  async function runRealEditorialSession(
+    runId: string,
+    promptText: string,
+    resumeOptions?: {
+      protocolName?: string;
+      protocolText?: string;
+      protocolHash?: string;
+      nextRound?: number;
+    },
+  ) {
+    const isResume = Boolean(resumeOptions);
+    const startedAt = Date.now();
+    const startedAtLabel = formatBrazilDateTime(startedAt);
     setOperation({
-      title: 'Executando sessao editorial real',
+      title: isResume ? 'Retomando sessao editorial' : 'Sessao editorial em andamento',
       progress: 44,
-      current: 'Claude, Codex e Gemini serao executados em background com o protocolo integral.',
-      eta: runId,
+      current: isResume
+        ? `Continuando a partir da rodada ${resumeOptions?.nextRound?.toLocaleString('pt-BR') ?? 'salva'}.`
+        : 'Claude, Codex e Gemini estao trabalhando com o protocolo integral.',
+      eta: `Inicio: ${startedAtLabel}`,
       status: 'running',
     });
     setPhaseItems([
       { label: 'Protocolo', detail: 'registrado', state: 'done' },
-      { label: 'Preflight', detail: 'concluido', state: 'done' },
-      { label: 'Orquestracao', detail: 'executando agentes reais', state: 'active' },
-      { label: 'Entrega', detail: 'aguardando unanimidade real', state: 'waiting' },
+      { label: 'Verificacoes', detail: 'concluidas', state: 'done' },
+      { label: 'Agentes', detail: 'em execucao', state: 'active' },
+      { label: 'Entrega', detail: 'aguardando unanimidade', state: 'waiting' },
     ]);
     setAgentCards([
       { name: 'Claude', cli: 'claude', state: 'running', note: 'rascunho e revisao em andamento' },
       { name: 'Codex', cli: 'codex', state: 'running', note: 'revisao em andamento' },
       { name: 'Gemini', cli: 'gemini', state: 'running', note: 'revisao em andamento' },
-      { name: 'MaestroPeer', cli: 'deterministico', state: 'running', note: 'monitorando unanimidade' },
+      { name: 'Maestro', cli: 'motor local', state: 'running', note: 'acompanhando a unanimidade' },
     ]);
     appendActivity({
       level: 'diagnostic',
-      title: 'Agentes acionados',
-      detail: 'Maestro iniciou uma sessao real via Tauri; os artefatos serao salvos em data/sessions.',
+      title: 'Sessao iniciada',
+      detail: 'O Maestro esta acompanhando os agentes e registrando os arquivos da rodada.',
     });
     void logEvent({
       level: 'info',
@@ -795,6 +1030,9 @@ export function App() {
         run_id: runId,
         session_name: sessionName,
         prompt_chars: promptText.length,
+        resume_mode: isResume,
+        resume_next_round: resumeOptions?.nextRound ?? null,
+        resume_protocol_override: Boolean(resumeOptions?.protocolText),
         protocol_name: protocol.name,
         protocol_lines: protocol.lines,
         protocol_chars: protocolText.length,
@@ -804,58 +1042,69 @@ export function App() {
       },
     });
 
-    const startedAt = Date.now();
     let lastLoggedMinute = 0;
     const heartbeat = window.setInterval(() => {
       const elapsedSeconds = Math.max(1, Math.floor((Date.now() - startedAt) / 1000));
       const elapsedMinutes = Math.floor(elapsedSeconds / 60);
-      const progress = Math.min(94, 44 + Math.floor(elapsedSeconds / 30));
       setOperation({
-        title: 'Executando sessao editorial real',
-        progress,
-        current: `Agentes trabalhando ha ${elapsedSeconds.toLocaleString('pt-BR')}s. Sem timeout editorial; a UI permanece livre para navegacao.`,
-        eta: runId,
+        title: isResume ? 'Retomando sessao editorial' : 'Sessao editorial em andamento',
+        progress: 44,
+        current: `Agentes em execucao ha ${formatElapsedTime(elapsedSeconds)}.`,
+        eta: `Inicio: ${startedAtLabel}`,
         status: 'running',
       });
       if (elapsedMinutes > lastLoggedMinute) {
         lastLoggedMinute = elapsedMinutes;
-        appendActivity({
-          level: elapsedMinutes % 5 === 0 ? 'detail' : 'diagnostic',
-          title: 'Sessao ainda em execucao',
-          detail: `Agentes em background ha ${elapsedMinutes} min; nenhum timeout sera aplicado a geracao editorial.`,
-        });
+        if (elapsedMinutes % 5 === 0) {
+          appendActivity({
+            level: 'detail',
+            title: 'Sessao em andamento',
+            detail: `Tempo decorrido: ${formatElapsedTime(elapsedSeconds)}. Rodadas continuam ate a aprovacao final.`,
+          });
+        }
         void logEvent({
           level: 'info',
           category: 'session.editorial.heartbeat',
-          message: 'editorial session still running without timeout',
+          message: 'editorial session heartbeat',
           context: { run_id: runId, elapsed_seconds: elapsedSeconds },
         });
       }
     }, 5000);
 
     try {
-      const result = await invoke<EditorialSessionResult>('run_editorial_session', {
-        request: {
-          run_id: runId,
-          session_name: sessionName,
-          prompt: promptText,
-          protocol_name: protocol.name,
-          protocol_text: protocolText,
-          protocol_hash: protocol.hash,
-        },
-      });
+      const result = resumeOptions
+        ? await invoke<EditorialSessionResult>('resume_editorial_session', {
+            request: {
+              run_id: runId,
+              protocol_name: resumeOptions.protocolName ?? null,
+              protocol_text: resumeOptions.protocolText ?? null,
+              protocol_hash: resumeOptions.protocolHash ?? null,
+            },
+          })
+        : await invoke<EditorialSessionResult>('run_editorial_session', {
+            request: {
+              run_id: runId,
+              session_name: sessionName,
+              prompt: promptText,
+              protocol_name: protocol.name,
+              protocol_text: protocolText,
+              protocol_hash: protocol.hash,
+            },
+          });
       window.clearInterval(heartbeat);
       const nextAgentCards = result.agents.map((agent) => ({
         name: agent.name,
         cli: agent.cli,
         state: agentStateFromTone(agent.tone),
-        note: `${agent.role}: ${agent.status}; ${Math.round(agent.duration_ms / 1000)}s`,
+        note: `${humanizeRole(agent.role)}: ${humanizeAgentStatus(agent.status)}; ${formatElapsedTime(
+          Math.round(agent.duration_ms / 1000),
+        )}`,
       }));
       setAgentCards([
         ...nextAgentCards,
         {
-          name: 'MaestroPeer',
-          cli: 'deterministico',
+          name: 'Maestro',
+          cli: 'motor local',
           state: result.consensus_ready ? 'ready' : 'evidence',
           note: result.consensus_ready ? 'unanimidade registrada' : 'sessao pausada sem entrega final',
         },
@@ -864,13 +1113,13 @@ export function App() {
         result.agents.map((agent) => ({
           agent: agent.name,
           progress: agent.tone === 'ok' ? 100 : agent.tone === 'warn' ? 60 : 0,
-          status: agent.tone === 'ok' ? 'protocolo submetido ao agente nesta rodada' : agent.status,
+          status: agent.tone === 'ok' ? 'Protocolo lido nesta rodada' : humanizeAgentStatus(agent.status),
         })),
       );
       setEvidenceRows([
-        { label: 'DOI', value: 'revisado pelos peers', tone: result.consensus_ready ? 'ok' : 'warn' },
+        { label: 'DOI', value: 'revisado pelos agentes', tone: result.consensus_ready ? 'ok' : 'warn' },
         { label: 'Links', value: 'exige motor mecanico dedicado', tone: 'warn' },
-        { label: 'ABNT', value: 'revisado pelos peers', tone: result.consensus_ready ? 'ok' : 'warn' },
+        { label: 'ABNT', value: 'revisado pelos agentes', tone: result.consensus_ready ? 'ok' : 'warn' },
         {
           label: 'Quarentena',
           value: result.consensus_ready ? 'liberado por unanimidade' : 'texto bloqueado',
@@ -880,7 +1129,7 @@ export function App() {
       setDiscussionItems((current) => [
         {
           round: '001',
-          status: result.status,
+          status: humanizeAgentStatus(result.status),
           note: result.consensus_ready
             ? `Texto final liberado em ${result.final_markdown_path}; ata em ${result.session_minutes_path}.`
             : `Sem unanimidade. Ata em ${result.session_minutes_path}; artefatos dos agentes em ${result.session_dir}.`,
@@ -890,7 +1139,7 @@ export function App() {
       appendActivity({
         level: 'summary',
         title: result.consensus_ready ? 'Texto final liberado' : 'Sessao pausada',
-        detail: result.agents.map((agent) => `${agent.name}: ${agent.tone}`).join('; '),
+        detail: result.agents.map((agent) => `${agent.name}: ${humanizeAgentStatus(agent.status)}`).join('; '),
       });
 
       if (result.consensus_ready) {
@@ -903,8 +1152,8 @@ export function App() {
         });
         setPhaseItems([
           { label: 'Protocolo', detail: 'registrado', state: 'done' },
-          { label: 'Preflight', detail: 'concluido', state: 'done' },
-          { label: 'Orquestracao', detail: 'agentes concluiram', state: 'done' },
+          { label: 'Verificacoes', detail: 'concluidas', state: 'done' },
+          { label: 'Agentes', detail: 'concluidos', state: 'done' },
           { label: 'Entrega', detail: 'unanimidade registrada', state: 'done' },
         ]);
         void logEvent({
@@ -931,8 +1180,8 @@ export function App() {
         });
         setPhaseItems([
           { label: 'Protocolo', detail: 'registrado', state: 'done' },
-          { label: 'Preflight', detail: 'concluido', state: 'done' },
-          { label: 'Orquestracao', detail: 'rodadas registradas', state: 'done' },
+          { label: 'Verificacoes', detail: 'concluidas', state: 'done' },
+          { label: 'Agentes', detail: 'rodadas registradas', state: 'done' },
           { label: 'Entrega', detail: 'aguardando unanimidade', state: 'waiting' },
         ]);
         void logEvent({
@@ -961,15 +1210,15 @@ export function App() {
       setOperation({
         title: 'Sessao editorial falhou',
         progress: 42,
-        current: 'O comando nativo de sessao editorial falhou antes de retornar resultado estruturado.',
-        eta: 'ver logs',
+        current: 'O Maestro nao conseguiu concluir a sessao editorial.',
+        eta: 'consulte diagnostico',
         status: 'blocked',
       });
       setAgentCards([
         { name: 'Claude', cli: 'claude', state: 'blocked', note: 'falha antes de resultado estruturado' },
         { name: 'Codex', cli: 'codex', state: 'blocked', note: 'falha antes de resultado estruturado' },
         { name: 'Gemini', cli: 'gemini', state: 'blocked', note: 'falha antes de resultado estruturado' },
-        { name: 'MaestroPeer', cli: 'deterministico', state: 'blocked', note: 'ver NDJSON e data/sessions' },
+        { name: 'Maestro', cli: 'motor local', state: 'blocked', note: 'consulte diagnostico e arquivos da sessao' },
       ]);
       void logEvent({
         level: 'error',
@@ -1021,8 +1270,8 @@ export function App() {
         value: accountId ? 'aguardando resposta da API Cloudflare' : 'account id ausente',
         tone: accountId ? 'pending' : 'blocked',
       },
-      { label: 'D1 Read/Edit', value: 'aguardando endpoint D1', tone: 'pending' },
-      { label: 'Secrets Store', value: 'aguardando endpoint Secrets Store', tone: 'pending' },
+      { label: 'D1 Read/Edit', value: 'aguardando resposta D1', tone: 'pending' },
+      { label: 'Secrets Store', value: 'aguardando resposta do Secrets Store', tone: 'pending' },
     ]);
     void logEvent({
       level: 'info',
@@ -1068,7 +1317,7 @@ export function App() {
       });
     } catch (error) {
       setCloudflarePermissionRows([
-        { label: 'Token ativo', value: 'falha ao executar probe nativo', tone: 'error' },
+        { label: 'Token ativo', value: 'falha na verificacao local', tone: 'error' },
         { label: 'Conta acessivel', value: 'nao executado', tone: 'blocked' },
         { label: 'D1 Read/Edit', value: 'nao executado', tone: 'blocked' },
         { label: 'Secrets Store', value: 'nao executado', tone: 'blocked' },
@@ -1194,6 +1443,16 @@ export function App() {
               <RefreshCw size={18} />
             </button>
             <button
+              className={isResumeLoading ? 'secondary-button busy' : 'secondary-button'}
+              type="button"
+              onClick={() => void requestResumeSession()}
+              aria-busy={isResumeLoading}
+              disabled={isRunPreparing || isResumeLoading}
+            >
+              <Clock3 size={18} />
+              {isResumeLoading ? 'Buscando' : 'Retomar'}
+            </button>
+            <button
               className={isRunPreparing ? 'primary-button busy' : 'primary-button'}
               type="button"
               onClick={startEditorialSession}
@@ -1205,6 +1464,62 @@ export function App() {
             </button>
           </div>
         </header>
+
+        {showResumePicker && (
+          <div className="modal-backdrop" role="presentation">
+            <section className="resume-dialog" role="dialog" aria-modal="true" aria-label="Retomar sessao">
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">Retomar</p>
+                  <h2>Escolha uma sessao</h2>
+                </div>
+                <button className="icon-button" type="button" onClick={() => setShowResumePicker(false)} title="Fechar">
+                  <EyeOff size={18} />
+                </button>
+              </div>
+
+              <label className={hasLoadedProtocolForResume ? 'resume-protocol-option' : 'resume-protocol-option disabled'}>
+                <input
+                  type="checkbox"
+                  checked={useLoadedProtocolForResume && hasLoadedProtocolForResume}
+                  disabled={!hasLoadedProtocolForResume}
+                  onChange={(event) => setUseLoadedProtocolForResume(event.target.checked)}
+                />
+                <span>
+                  {hasLoadedProtocolForResume
+                    ? `Usar protocolo carregado agora: ${protocol.name}`
+                    : 'Usar o protocolo salvo dentro de cada sessao'}
+                </span>
+              </label>
+
+              <div className="resume-list">
+                {resumeCandidates.map((session) => (
+                  <button
+                    className="resume-session-row"
+                    type="button"
+                    key={session.run_id}
+                    onClick={() => void startResumeSession(session, useLoadedProtocolForResume)}
+                  >
+                    <div>
+                      <strong>{session.session_name}</strong>
+                      <span>{session.run_id}</span>
+                    </div>
+                    <div>
+                      <strong>Rodada {session.next_round.toLocaleString('pt-BR')}</strong>
+                      <span>{formatSessionActivity(session)}</span>
+                    </div>
+                    <div>
+                      <strong>{session.status}</strong>
+                      <span>
+                        {session.artifact_count.toLocaleString('pt-BR')} arquivos; {session.protocol_lines.toLocaleString('pt-BR')} linhas
+                      </span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </section>
+          </div>
+        )}
 
         {activeSection === 'session' && (
           <>
@@ -1220,7 +1535,9 @@ export function App() {
                 <Bot size={20} />
                 <div>
                   <span>Consenso</span>
-                  <strong>{readyCount}/{agentCards.length} READY</strong>
+                  <strong>
+                    {readyCount}/{agentCards.length} aprovados
+                  </strong>
                 </div>
               </div>
               <div className="metric-panel">
@@ -1246,16 +1563,28 @@ export function App() {
                     <p className="eyebrow">Geracao</p>
                     <h2>Prompt da sessao</h2>
                   </div>
-                  <button
-                    className={isRunPreparing ? 'primary-button busy' : 'primary-button'}
-                    type="button"
-                    onClick={startEditorialSession}
-                    aria-busy={isRunPreparing}
-                    disabled={isRunPreparing}
-                  >
-                    <Play size={18} />
-                    {isRunPreparing ? 'Preparando' : 'Submeter'}
-                  </button>
+                  <div className="panel-actions">
+                    <button
+                      className={isResumeLoading ? 'secondary-button busy' : 'secondary-button'}
+                      type="button"
+                      onClick={() => void requestResumeSession()}
+                      aria-busy={isResumeLoading}
+                      disabled={isRunPreparing || isResumeLoading}
+                    >
+                      <Clock3 size={18} />
+                      Retomar
+                    </button>
+                    <button
+                      className={isRunPreparing ? 'primary-button busy' : 'primary-button'}
+                      type="button"
+                      onClick={startEditorialSession}
+                      aria-busy={isRunPreparing}
+                      disabled={isRunPreparing}
+                    >
+                      <Play size={18} />
+                      {isRunPreparing ? 'Preparando' : 'Submeter'}
+                    </button>
+                  </div>
                 </div>
                 <textarea
                   className="prompt-input"
@@ -1265,7 +1594,7 @@ export function App() {
                 />
                 <div className="prompt-footer">
                   <span>{editorialPrompt.length.toLocaleString('pt-BR')} caracteres</span>
-                  <span>bloqueio: unanimidade trilateral</span>
+                  <span>entrega: unanimidade trilateral</span>
                   <span>run: {sessionRunId ?? 'sem sessao'}</span>
                   <span>{protocol.lines} linhas de protocolo</span>
                 </div>
@@ -1274,7 +1603,7 @@ export function App() {
               <div className="panel reading-panel">
                 <div className="panel-heading">
                   <div>
-                    <p className="eyebrow">Hard gate</p>
+                    <p className="eyebrow">Regra obrigatoria</p>
                     <h2>Leitura integral</h2>
                   </div>
                   <ShieldCheck size={20} />
@@ -1295,12 +1624,12 @@ export function App() {
               </div>
             </section>
 
-            <section className="panel operation-panel" aria-label="Operacao em background">
+            <section className="panel operation-panel" aria-label="Sessao editorial">
               <div className="operation-head">
                 <div>
-                  <p className="eyebrow">Orquestracao</p>
+                  <p className="eyebrow">Sessao</p>
                   <h2>{operation.title}</h2>
-                  <span className={`run-state-badge ${operation.status}`}>{operation.status}</span>
+                  <span className={`run-state-badge ${operation.status}`}>{humanizeRunStatus(operation.status)}</span>
                 </div>
                 <div className="verbosity-control" aria-label="Verbosidade da interface">
                   {verbosityOptions.map((option) => {
@@ -1331,11 +1660,14 @@ export function App() {
                     <span>{operation.eta}</span>
                   </div>
                 </div>
-                <div className="progress-stack" aria-label={`${operation.progress}% concluido`}>
-                  <div className="progress-track">
-                    <div className={`progress-fill ${operation.status}`} style={{ width: `${operation.progress}%` }} />
+                <div className="progress-stack" aria-label={operationProgressLabel}>
+                  <div className={`progress-track ${operationIndeterminate ? 'indeterminate' : ''}`}>
+                    <div
+                      className={`progress-fill ${operation.status} ${operationIndeterminate ? 'indeterminate' : ''}`}
+                      style={operationIndeterminate ? undefined : { width: `${operation.progress}%` }}
+                    />
                   </div>
-                  <span>{operation.progress}%</span>
+                  <span>{operationProgressLabel}</span>
                 </div>
               </div>
 
@@ -1653,7 +1985,7 @@ export function App() {
             <div className="panel reading-panel">
               <div className="panel-heading">
                 <div>
-                  <p className="eyebrow">Hard gate</p>
+                  <p className="eyebrow">Regra obrigatoria</p>
                   <h2>Leitura integral</h2>
                 </div>
                 <ShieldCheck size={20} />
@@ -1878,11 +2210,11 @@ export function App() {
                 </div>
                 <div>
                   <dt>Estado</dt>
-                  <dd>{operation.status}</dd>
+                  <dd>{humanizeRunStatus(operation.status)}</dd>
                 </div>
                 <div>
                   <dt>Logs</dt>
-                  <dd>um arquivo NDJSON por execucao do app</dd>
+                  <dd>um arquivo de diagnostico por execucao do app</dd>
                 </div>
                 <div>
                   <dt>Config inicial</dt>

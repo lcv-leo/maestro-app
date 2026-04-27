@@ -193,6 +193,7 @@ button:disabled {
 }
 
 .toolbar,
+.panel-actions,
 .panel-heading,
 .agent-main,
 .operation-head,
@@ -245,6 +246,10 @@ button:disabled {
 }
 
 .primary-button.busy svg {
+  animation: buttonSpin 900ms linear infinite;
+}
+
+.secondary-button.busy svg {
   animation: buttonSpin 900ms linear infinite;
 }
 
@@ -421,6 +426,11 @@ button:disabled {
 .panel-heading {
   justify-content: space-between;
   margin-bottom: 16px;
+}
+
+.panel-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .panel h2 {
@@ -607,11 +617,20 @@ button:disabled {
   background: #e2e8f0;
 }
 
+.progress-track.indeterminate {
+  position: relative;
+}
+
 .progress-fill {
   height: 100%;
   border-radius: inherit;
   background: #1a73e8;
   transition: width 260ms ease, background 160ms ease;
+}
+
+.progress-fill.indeterminate {
+  width: 42%;
+  animation: indeterminateSlide 1.35s ease-in-out infinite;
 }
 
 .progress-fill.blocked {
@@ -630,12 +649,112 @@ button:disabled {
   background: #7c3aed;
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(15 23 42 / 28%);
+}
+
+.resume-dialog {
+  width: min(880px, 100%);
+  max-height: min(720px, calc(100vh - 48px));
+  overflow: auto;
+  padding: 18px;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 24px 70px rgb(15 23 42 / 22%);
+}
+
+.resume-protocol-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.resume-protocol-option.disabled {
+  color: #64748b;
+}
+
+.resume-protocol-option input {
+  width: 18px;
+  height: 18px;
+}
+
+.resume-list {
+  display: grid;
+  gap: 10px;
+}
+
+.resume-session-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.2fr) minmax(160px, 0.8fr) minmax(180px, 0.8fr);
+  gap: 14px;
+  align-items: center;
+  width: 100%;
+  min-height: 74px;
+  padding: 12px;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #202124;
+  text-align: left;
+}
+
+.resume-session-row:hover {
+  border-color: #a8c7fa;
+  background: #f8fbff;
+}
+
+.resume-session-row strong,
+.resume-session-row span {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.resume-session-row strong {
+  font-size: 13px;
+}
+
+.resume-session-row span {
+  margin-top: 4px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .progress-stack span {
-  width: 42px;
+  width: 120px;
   color: #334155;
   font-size: 12px;
   font-weight: 800;
   text-align: right;
+}
+
+@keyframes indeterminateSlide {
+  0% {
+    transform: translateX(-120%);
+  }
+  50% {
+    transform: translateX(85%);
+  }
+  100% {
+    transform: translateX(260%);
+  }
 }
 
 .phase-list {

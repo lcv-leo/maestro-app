@@ -8,8 +8,9 @@ Este pacote e portatil para Windows 11+. Ele nao instala servicos, nao cria entr
 2. Execute `Maestro Editorial AI.exe`.
 3. Abra `Ajustes` e escolha o modo de persistencia.
 4. Importe o protocolo editorial Markdown integral antes de iniciar uma sessao.
-5. Abra `Setup` para conferir o estado de bootstrap e logs.
-6. Se algo falhar, envie o arquivo NDJSON mais recente de `data/logs/`.
+5. Use `Retomar` quando quiser continuar uma sessao interrompida salva em `data/sessions/`.
+6. Abra `Setup` para conferir o estado de bootstrap e diagnostico.
+7. Se algo falhar, envie o arquivo NDJSON mais recente de `data/logs/`.
 
 ## Arquivos locais criados pelo app
 
@@ -54,9 +55,11 @@ Na validacao real, o Maestro diferencia tokens de usuario (`cfut_`) e tokens de 
 
 ## Estado deste build
 
-Este build executa sessao editorial real em background: Claude, Codex e Gemini podem gerar/revisar o texto contra o protocolo integral importado. Se um peer nao retornar aprovacao, a sessao nao deve ser tratada como finalizada; ela permanece sem entrega final e novas rodadas de revisao devem continuar ate unanimidade. A ata fica disponivel em `data/sessions/<run>/ata-da-sessao.md`.
+Este build executa sessao editorial real em background: Claude, Codex e Gemini podem gerar/revisar o texto contra o protocolo integral importado. Se um agente nao retornar aprovacao, a sessao nao deve ser tratada como finalizada; ela permanece sem entrega final e novas rodadas de revisao devem continuar ate unanimidade. A ata fica disponivel em `data/sessions/<run>/ata-da-sessao.md`.
 
 As chamadas editoriais reais nao possuem timeout artificial, porque os modelos podem demorar bastante para cumprir o protocolo. A UI mostra andamento e tempo decorrido enquanto os agentes trabalham, e as CLIs devem rodar sem qualquer janela de terminal visivel.
+
+Para retomar uma sessao interrompida, clique em `Retomar`. O Maestro le `data/sessions/`; se houver uma sessao disponivel, continua automaticamente; se houver varias, pede para escolher. Se voce importar um novo protocolo antes de retomar, ele sera enviado aos agentes e o protocolo anterior sera preservado como artefato local da sessao. Se nao houver novo protocolo carregado, o app usa o `protocolo.md` salvo dentro da sessao.
 
 Os logs foram ampliados para diagnostico: eles registram contexto de UI, estado do runtime, caminhos resolvidos das CLIs, inicio/fim de cada agente, duracao, exit code, politica de timeout e caminho dos artefatos. O conteudo bruto dos agentes fica nos arquivos de sessao, nao embutido no NDJSON geral.
 

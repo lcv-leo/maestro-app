@@ -1,6 +1,6 @@
 # Editorial Session Workflow
 
-Status: implementation contract with functional background pass in `v0.3.1`.
+Status: implementation contract with functional background and resume pass in `v0.3.4`.
 
 Maestro's core workflow starts from an operator prompt and an active editorial protocol. The app must not deliver a final text until Claude, Codex, and Gemini all return `READY` in the same trilateral round and Maestro's deterministic fourth-peer check also returns `READY`.
 
@@ -37,7 +37,7 @@ If any peer remains `NOT_READY` or `NEEDS_EVIDENCE`, the session continues, paus
 
 ## Round Flow
 
-`v0.3.1` implements the current real executable pass:
+`v0.3.1` introduced the real executable pass:
 
 - The UI blocks execution unless the full Markdown protocol text was imported.
 - Claude, Codex, and Gemini are called without visible terminal windows in Windows release builds.
@@ -52,7 +52,15 @@ If any peer remains `NOT_READY` or `NEEDS_EVIDENCE`, the session continues, paus
 - Maestro writes `texto-final.md` only when all three review peers return `READY` and the draft command succeeded.
 - Maestro always writes `ata-da-sessao.md` plus per-agent artifacts under ignored `data/sessions/<run>/`.
 
-This pass is still conservative. The deterministic link checker, ABNT engine, resumable/cancellable sessions, and MainSite D1 publication gates remain required before the workflow can be considered mature.
+`v0.3.4` adds resumable interrupted sessions:
+
+- Maestro scans `data/sessions/` for sessions that have `prompt.md` and `protocolo.md` but no `texto-final.md`.
+- If one interrupted session exists, the UI resumes it directly; if several exist, the operator chooses which one to continue.
+- Maestro recovers the latest usable draft or revision artifact and continues review from that round instead of restarting from zero.
+- If the operator has imported a new protocol before resuming, that protocol is passed to Claude, Codex, and Gemini; the previous `protocolo.md` is preserved as a local `protocolo-anterior-*.md` artifact before the new protocol becomes active.
+- If no new protocol is loaded, Maestro uses the `protocolo.md` saved inside the session folder.
+
+This pass is still conservative. The deterministic link checker, ABNT engine, cancellable sessions, and MainSite D1 publication gates remain required before the workflow can be considered mature.
 
 1. Maestro builds an evidence pack and protocol pack.
 2. Each agent receives the same session prompt, protocol snapshot, evidence pack, and status schema.

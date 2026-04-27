@@ -24,8 +24,11 @@ import {
 import { invoke } from '@tauri-apps/api/core';
 import type { ChangeEvent, ComponentType } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import packageJson from '../package.json';
 import { logEvent } from './diagnostics';
 import PostEditor from './editor/posteditor/PostEditor';
+
+const APP_VERSION = `v${packageJson.version}`;
 
 type ProtocolSnapshot = {
   name: string;
@@ -124,6 +127,41 @@ type DependencyPreflight = {
 
 type CloudflareProbeResult = {
   rows: CloudflarePermissionRow[];
+};
+
+type AiProviderConfig = {
+  schema_version: number;
+  provider_mode: ProviderMode;
+  credential_storage_mode: CredentialStorageMode;
+  openai_api_key: string | null;
+  anthropic_api_key: string | null;
+  gemini_api_key: string | null;
+  updated_at: string;
+};
+
+type AiProviderProbeRow = {
+  label: string;
+  value: string;
+  tone: 'pending' | 'blocked' | 'ok' | 'warn' | 'error';
+};
+
+type AiProviderProbeResult = {
+  rows: AiProviderProbeRow[];
+  checked_at: string;
+};
+
+type LinkAuditRow = {
+  url: string;
+  status: string;
+  tone: 'ok' | 'warn' | 'blocked' | 'error';
+};
+
+type LinkAuditResult = {
+  urls_found: number;
+  checked: number;
+  ok: number;
+  failed: number;
+  rows: LinkAuditRow[];
 };
 
 type EditorialAgentResult = {
@@ -235,6 +273,12 @@ const initialCloudflarePermissionChecks: CloudflarePermissionRow[] = [
   { label: 'Conta acessivel', value: 'pendente de verificacao', tone: 'pending' },
   { label: 'D1 Read/Edit', value: 'pendente de verificacao', tone: 'pending' },
   { label: 'Secrets Store', value: 'pendente de verificacao', tone: 'pending' },
+];
+
+const initialAiProviderChecks: AiProviderProbeRow[] = [
+  { label: 'OpenAI / Codex', value: 'pendente de verificacao', tone: 'pending' },
+  { label: 'Anthropic / Claude', value: 'pendente de verificacao', tone: 'pending' },
+  { label: 'Google / Gemini', value: 'pendente de verificacao', tone: 'pending' },
 ];
 
 const credentialStorageModes = [
@@ -445,6 +489,7 @@ export function App() {
     gemini: '',
   });
   const [sessionRunId, setSessionRunId] = useState<string | null>(null);
+  const [lastSessionMinutesPath, setLastSessionMinutesPath] = useState<string | null>(null);
   const [operation, setOperation] = useState<OperationSnapshot>(idleOperation);
   const [phaseItems, setPhaseItems] = useState<PhaseItem[]>(idlePhases);
   const [activityItems, setActivityItems] = useState<ActivityItem[]>(idleActivityFeed);
@@ -455,9 +500,14 @@ export function App() {
   const [cloudflarePermissionRows, setCloudflarePermissionRows] = useState<CloudflarePermissionRow[]>(
     initialCloudflarePermissionChecks,
   );
+  const [aiProviderRowsState, setAiProviderRowsState] = useState<AiProviderProbeRow[]>(initialAiProviderChecks);
   const [bootstrapRows, setBootstrapRows] = useState<BootstrapCheckRow[]>(initialBootstrapChecks);
   const [bootstrapConfigStatus, setBootstrapConfigStatus] = useState('bootstrap.json ainda nao carregado');
+  const [aiConfigStatus, setAiConfigStatus] = useState('Chaves ainda nao carregadas');
   const [isVerifyingCloudflare, setIsVerifyingCloudflare] = useState(false);
+  const [isSavingAiConfig, setIsSavingAiConfig] = useState(false);
+  const [isVerifyingAiProviders, setIsVerifyingAiProviders] = useState(false);
+  const [isAuditingEvidence, setIsAuditingEvidence] = useState(false);
   const [resumeCandidates, setResumeCandidates] = useState<ResumableSessionInfo[]>([]);
   const [showResumePicker, setShowResumePicker] = useState(false);
   const [isResumeLoading, setIsResumeLoading] = useState(false);
@@ -497,6 +547,7 @@ export function App() {
 
   useEffect(() => {
     void loadBootstrapConfig();
+    void loadAiProviderConfig();
   }, []);
 
   function activityTimestamp() {
@@ -510,6 +561,166 @@ export function App() {
 
   function appendActivity(item: Omit<ActivityItem, 'time'>) {
     setActivityItems((current) => [{ ...item, time: activityTimestamp() }, ...current].slice(0, 8));
+  }
+
+  async function verifyAgentsNow() {
+    try {
+      const preflight = await invoke<DependencyPreflight>('dependency_preflight');
+      setBootstrapRows(preflight.checks);
+      const byLabel = new Map(preflight.checks.map((check) => [check.label, check]));
+      setAgentCards((current) =>
+        current.map((agent) => {
+          const check = byLabel.get(`${agent.name} CLI`);
+          if (!check) return agent;
+          return {
+            ...agent,
+            state: check.tone === 'ok' ? 'ready' : check.tone === 'warn' ? 'evidence' : 'blocked',
+            note: check.value,
+          };
+        }),
+      );
+      appendActivity({
+        level: 'detail',
+        title: 'Agentes verificados',
+        detail: preflight.checks
+          .filter((check) => check.label.endsWith('CLI'))
+          .map((check) => `${check.label}: ${check.tone}`)
+          .join('; '),
+      });
+      void logEvent({
+        level: 'info',
+        category: 'agents.preflight.completed',
+        message: 'operator verified local agent CLIs',
+        context: {
+          checks: preflight.checks.map((check) => ({ label: check.label, tone: check.tone })),
+        },
+      });
+    } catch (error) {
+      appendActivity({
+        level: 'diagnostic',
+        title: 'Falha ao verificar agentes',
+        detail: 'Consulte o log desta execucao para o erro completo.',
+      });
+      void logEvent({
+        level: 'error',
+        category: 'agents.preflight.failed',
+        message: 'failed to verify local agent CLIs',
+        context: { error },
+      });
+    }
+  }
+
+  async function revalidateRuntime() {
+    appendActivity({
+      level: 'detail',
+      title: 'Revalidacao iniciada',
+      detail: 'Conferindo dependencias, configuracoes locais e chaves carregadas.',
+    });
+    await Promise.all([loadBootstrapConfig(), loadAiProviderConfig(), verifyAgentsNow()]);
+  }
+
+  async function openSessionLedger() {
+    if (!lastSessionMinutesPath) {
+      appendActivity({
+        level: 'summary',
+        title: 'Ata indisponivel',
+        detail: 'Ainda nao ha ata criada nesta sessao do app.',
+      });
+      return;
+    }
+
+    try {
+      const openedPath = await invoke<string>('open_data_file', { path: lastSessionMinutesPath });
+      appendActivity({
+        level: 'detail',
+        title: 'Ata aberta',
+        detail: openedPath,
+      });
+      void logEvent({
+        level: 'info',
+        category: 'session.ledger.opened',
+        message: 'operator opened session ledger file',
+        context: { path: openedPath },
+      });
+    } catch (error) {
+      appendActivity({
+        level: 'diagnostic',
+        title: 'Falha ao abrir ata',
+        detail: 'O arquivo nao foi aberto; consulte o log desta execucao.',
+      });
+      void logEvent({
+        level: 'error',
+        category: 'session.ledger.open_failed',
+        message: 'failed to open session ledger file',
+        context: { path: lastSessionMinutesPath, error },
+      });
+    }
+  }
+
+  async function auditEvidenceNow() {
+    const sourceText = [editorialPrompt, protocolText, mainSiteHtml].join('\n\n');
+    setIsAuditingEvidence(true);
+    setEvidenceRows((current) =>
+      current.map((row) => (row.label === 'Links' ? { ...row, value: 'verificando links', tone: 'info' } : row)),
+    );
+
+    try {
+      const result = await invoke<LinkAuditResult>('audit_links', {
+        request: { text: sourceText },
+      });
+      setEvidenceRows((current) =>
+        current.map((row) => {
+          if (row.label !== 'Links') return row;
+          if (result.urls_found === 0) {
+            return { ...row, value: 'nenhum link encontrado', tone: 'idle' };
+          }
+          if (result.failed > 0) {
+            return {
+              ...row,
+              value: `${result.failed.toLocaleString('pt-BR')} falhas em ${result.checked.toLocaleString('pt-BR')} links`,
+              tone: 'warn',
+            };
+          }
+          return {
+            ...row,
+            value: `${result.ok.toLocaleString('pt-BR')} links acessiveis`,
+            tone: 'ok',
+          };
+        }),
+      );
+      appendActivity({
+        level: 'detail',
+        title: 'Links auditados',
+        detail:
+          result.urls_found === 0
+            ? 'Nenhum link foi encontrado no prompt, protocolo ou texto em edicao.'
+            : `${result.ok.toLocaleString('pt-BR')} acessiveis; ${result.failed.toLocaleString('pt-BR')} com falha.`,
+      });
+      void logEvent({
+        level: result.failed > 0 ? 'warn' : 'info',
+        category: 'evidence.audit.completed',
+        message: 'link evidence audit completed',
+        context: {
+          urls_found: result.urls_found,
+          checked: result.checked,
+          ok: result.ok,
+          failed: result.failed,
+          rows: result.rows.map((row) => ({ url: row.url, tone: row.tone, status: row.status })),
+        },
+      });
+    } catch (error) {
+      setEvidenceRows((current) =>
+        current.map((row) => (row.label === 'Links' ? { ...row, value: 'falha na auditoria', tone: 'danger' } : row)),
+      );
+      void logEvent({
+        level: 'error',
+        category: 'evidence.audit.failed',
+        message: 'link evidence audit failed',
+        context: { error },
+      });
+    } finally {
+      setIsAuditingEvidence(false);
+    }
   }
 
   function createRunId() {
@@ -638,6 +849,96 @@ export function App() {
         message: 'failed to save bootstrap configuration',
         context: { error },
       });
+    }
+  }
+
+  function buildAiProviderConfig(nextProviderMode = providerMode): AiProviderConfig {
+    return {
+      schema_version: 1,
+      provider_mode: nextProviderMode,
+      credential_storage_mode: credentialStorageMode,
+      openai_api_key: aiCredentials.openai.trim() || null,
+      anthropic_api_key: aiCredentials.anthropic.trim() || null,
+      gemini_api_key: aiCredentials.gemini.trim() || null,
+      updated_at: new Date().toISOString(),
+    };
+  }
+
+  async function loadAiProviderConfig() {
+    try {
+      const config = await invoke<AiProviderConfig>('read_ai_provider_config');
+      setProviderMode(config.provider_mode);
+      setAiCredentials({
+        openai: config.openai_api_key ?? '',
+        anthropic: config.anthropic_api_key ?? '',
+        gemini: config.gemini_api_key ?? '',
+      });
+      setAiConfigStatus(`Configuracao carregada de data/config/ai-providers.json`);
+      void logEvent({
+        level: 'info',
+        category: 'settings.ai_provider.config_loaded',
+        message: 'AI provider configuration loaded',
+        context: {
+          provider_mode: config.provider_mode,
+          credential_storage_mode: config.credential_storage_mode,
+          openai_key_present: Boolean(config.openai_api_key),
+          anthropic_key_present: Boolean(config.anthropic_api_key),
+          gemini_key_present: Boolean(config.gemini_api_key),
+        },
+      });
+    } catch (error) {
+      setAiConfigStatus('Falha ao carregar configuracao das APIs');
+      void logEvent({
+        level: 'error',
+        category: 'settings.ai_provider.config_load_failed',
+        message: 'failed to load AI provider configuration',
+        context: { error },
+      });
+    }
+  }
+
+  async function saveAiProviderConfig(nextProviderMode = providerMode) {
+    setIsSavingAiConfig(true);
+    try {
+      const saved = await invoke<AiProviderConfig>('write_ai_provider_config', {
+        config: buildAiProviderConfig(nextProviderMode),
+      });
+      setProviderMode(saved.provider_mode);
+      setAiCredentials({
+        openai: saved.openai_api_key ?? '',
+        anthropic: saved.anthropic_api_key ?? '',
+        gemini: saved.gemini_api_key ?? '',
+      });
+      setAiConfigStatus(`Salvo em data/config/ai-providers.json as ${formatBrazilDateTime(new Date(saved.updated_at))}`);
+      appendActivity({
+        level: 'detail',
+        title: 'Configuracao salva',
+        detail: 'As chaves de API foram salvas no arquivo local ignorado pelo Git.',
+      });
+      void logEvent({
+        level: 'info',
+        category: 'settings.ai_provider.config_saved',
+        message: 'AI provider configuration saved',
+        context: {
+          provider_mode: saved.provider_mode,
+          credential_storage_mode: saved.credential_storage_mode,
+          openai_key_present: Boolean(saved.openai_api_key),
+          anthropic_key_present: Boolean(saved.anthropic_api_key),
+          gemini_key_present: Boolean(saved.gemini_api_key),
+        },
+      });
+      return saved;
+    } catch (error) {
+      setAiConfigStatus('Falha ao salvar configuracao das APIs');
+      void logEvent({
+        level: 'error',
+        category: 'settings.ai_provider.config_save_failed',
+        message: 'failed to save AI provider configuration',
+        context: { error },
+      });
+      return null;
+    } finally {
+      setIsSavingAiConfig(false);
     }
   }
 
@@ -1092,6 +1393,7 @@ export function App() {
             },
           });
       window.clearInterval(heartbeat);
+      setLastSessionMinutesPath(result.session_minutes_path);
       const nextAgentCards = result.agents.map((agent) => ({
         name: agent.name,
         cli: agent.cli,
@@ -1235,6 +1537,7 @@ export function App() {
 
   function chooseProviderMode(nextMode: ProviderMode) {
     setProviderMode(nextMode);
+    void saveAiProviderConfig(nextMode);
     void logEvent({
       level: 'info',
       category: 'settings.provider_mode.changed',
@@ -1333,7 +1636,15 @@ export function App() {
     }
   }
 
-  function verifyAiProviderCredentials() {
+  async function verifyAiProviderCredentials() {
+    setIsVerifyingAiProviders(true);
+    setAiProviderRowsState(
+      aiProviderRows.map((provider) => ({
+        label: provider.name,
+        value: aiCredentials[provider.key].trim() ? 'verificando credencial' : 'API key nao informada',
+        tone: aiCredentials[provider.key].trim() ? 'pending' : 'warn',
+      })),
+    );
     void logEvent({
       level: 'info',
       category: 'settings.ai_provider.verify_requested',
@@ -1346,6 +1657,52 @@ export function App() {
         gemini_key_present: aiCredentials.gemini.length > 0,
       },
     });
+
+    const saved = await saveAiProviderConfig();
+    if (!saved) {
+      setAiProviderRowsState([
+        { label: 'OpenAI / Codex', value: 'verificacao nao executada: falha ao salvar', tone: 'error' },
+        { label: 'Anthropic / Claude', value: 'verificacao nao executada: falha ao salvar', tone: 'error' },
+        { label: 'Google / Gemini', value: 'verificacao nao executada: falha ao salvar', tone: 'error' },
+      ]);
+      setIsVerifyingAiProviders(false);
+      return;
+    }
+
+    try {
+      const result = await invoke<AiProviderProbeResult>('verify_ai_provider_credentials', {
+        config: saved,
+      });
+      setAiProviderRowsState(result.rows);
+      setAiConfigStatus(`Verificado em ${formatBrazilDateTime(new Date(result.checked_at))}`);
+      appendActivity({
+        level: 'diagnostic',
+        title: 'APIs verificadas',
+        detail: result.rows.map((row) => `${row.label}: ${row.tone}`).join('; '),
+      });
+      void logEvent({
+        level: result.rows.some((row) => row.tone === 'error' || row.tone === 'blocked') ? 'warn' : 'info',
+        category: 'settings.ai_provider.verify_completed',
+        message: 'AI provider credential validation completed',
+        context: {
+          rows: result.rows.map((row) => ({ label: row.label, tone: row.tone })),
+        },
+      });
+    } catch (error) {
+      setAiProviderRowsState([
+        { label: 'OpenAI / Codex', value: 'falha local na verificacao', tone: 'error' },
+        { label: 'Anthropic / Claude', value: 'falha local na verificacao', tone: 'error' },
+        { label: 'Google / Gemini', value: 'falha local na verificacao', tone: 'error' },
+      ]);
+      void logEvent({
+        level: 'error',
+        category: 'settings.ai_provider.verify_failed',
+        message: 'AI provider credential validation failed before receiving API result',
+        context: { error },
+      });
+    } finally {
+      setIsVerifyingAiProviders(false);
+    }
   }
 
   async function savePostEditorDraft(
@@ -1384,7 +1741,7 @@ export function App() {
           <div className="brand-mark">M</div>
           <div>
             <div className="brand-name">Maestro Editorial AI</div>
-            <div className="brand-meta">Windows 11+ portable</div>
+            <div className="brand-meta">{APP_VERSION}</div>
           </div>
         </div>
 
@@ -1431,14 +1788,7 @@ export function App() {
               className="icon-button"
               type="button"
               title="Revalidar"
-              onClick={() =>
-                void logEvent({
-                  level: 'info',
-                  category: 'ui.command',
-                  message: 'operator requested revalidation',
-                  context: { session_name: sessionName },
-                })
-              }
+              onClick={() => void revalidateRuntime()}
             >
               <RefreshCw size={18} />
             </button>
@@ -1703,14 +2053,7 @@ export function App() {
                 <button
                   className="secondary-button"
                   type="button"
-                  onClick={() =>
-                    void logEvent({
-                      level: 'info',
-                      category: 'session.ledger.open_requested',
-                      message: 'operator requested session ledger view',
-                      context: { run_id: sessionRunId, rounds: discussionItems.length },
-                    })
-                  }
+                  onClick={() => void openSessionLedger()}
                 >
                   <FileText size={18} />
                   Ver ata
@@ -1868,19 +2211,14 @@ export function App() {
                   <h2>Evidencias</h2>
                 </div>
                 <button
-                  className="secondary-button"
+                  className={isAuditingEvidence ? 'secondary-button busy' : 'secondary-button'}
                   type="button"
-                  onClick={() =>
-                    void logEvent({
-                      level: 'info',
-                      category: 'evidence.audit.requested',
-                      message: 'operator requested evidence audit',
-                      context: { run_id: sessionRunId, evidence_state: evidenceRows },
-                    })
-                  }
+                  onClick={() => void auditEvidenceNow()}
+                  disabled={isAuditingEvidence}
+                  aria-busy={isAuditingEvidence}
                 >
-                  <Link2 size={18} />
-                  Auditar
+                  {isAuditingEvidence ? <RefreshCw size={18} /> : <Link2 size={18} />}
+                  {isAuditingEvidence ? 'Auditando' : 'Auditar links'}
                 </button>
               </div>
 
@@ -1949,15 +2287,8 @@ export function App() {
                 <button
                   className="icon-button"
                   type="button"
-                  title="Registrar busca de agente"
-                  onClick={() =>
-                    void logEvent({
-                      level: 'info',
-                      category: 'agents.search.requested',
-                      message: 'operator requested agent search',
-                      context: { run_id: sessionRunId },
-                    })
-                  }
+                  title="Verificar agentes"
+                  onClick={() => void verifyAgentsNow()}
                 >
                   <Search size={18} />
                 </button>
@@ -2096,11 +2427,11 @@ export function App() {
                 <button
                   className={isVerifyingCloudflare ? 'primary-button busy' : 'primary-button'}
                   type="button"
-                  onClick={verifyCloudflareCredentials}
+                  onClick={() => void verifyCloudflareCredentials()}
                   disabled={isVerifyingCloudflare}
                 >
                   {isVerifyingCloudflare ? <RefreshCw size={18} /> : <ShieldCheck size={18} />}
-                  {isVerifyingCloudflare ? 'Verificando...' : 'Verificar token'}
+                  {isVerifyingCloudflare ? 'Verificando e preparando' : 'Verificar e preparar'}
                 </button>
               </div>
 
@@ -2167,10 +2498,48 @@ export function App() {
                 ))}
               </div>
 
-              <button className="secondary-button" type="button" onClick={verifyAiProviderCredentials}>
-                <ListChecks size={18} />
-                Verificar APIs
-              </button>
+              <div className="settings-status" role="status" aria-live="polite">
+                {aiConfigStatus}
+              </div>
+
+              <div className="button-row">
+                <button
+                  className={isSavingAiConfig ? 'secondary-button busy' : 'secondary-button'}
+                  type="button"
+                  onClick={() => void saveAiProviderConfig()}
+                  disabled={isSavingAiConfig || isVerifyingAiProviders}
+                  aria-busy={isSavingAiConfig}
+                >
+                  <KeyRound size={18} />
+                  {isSavingAiConfig ? 'Salvando' : 'Salvar APIs'}
+                </button>
+                <button
+                  className={isVerifyingAiProviders ? 'secondary-button busy' : 'secondary-button'}
+                  type="button"
+                  onClick={() => void verifyAiProviderCredentials()}
+                  disabled={isSavingAiConfig || isVerifyingAiProviders}
+                  aria-busy={isVerifyingAiProviders}
+                >
+                  <ListChecks size={18} />
+                  {isVerifyingAiProviders ? 'Verificando' : 'Verificar APIs'}
+                </button>
+              </div>
+
+              <div className="check-list compact-checks" aria-label="Resultado da verificacao das APIs">
+                {aiProviderRowsState.map((item) => (
+                  <div className={`check-row ${item.tone}`} key={item.label}>
+                    {item.tone === 'ok' ? (
+                      <CheckCircle2 size={15} />
+                    ) : item.tone === 'blocked' || item.tone === 'error' || item.tone === 'warn' ? (
+                      <AlertTriangle size={15} />
+                    ) : (
+                      <Clock3 size={15} />
+                    )}
+                    <span>{item.label}</span>
+                    <strong>{item.value}</strong>
+                  </div>
+                ))}
+              </div>
             </div>
           </section>
         )}

@@ -1,9 +1,23 @@
 # Web Evidence Engine
 
-Status: implementation contract.
+Status: implementation contract with v0.3.7 partial implementation.
 Date: 2026-04-26.
 
 Maestro must compensate for the weak browsing/fetching capabilities of AI agents by collecting, checking, and packaging evidence itself.
+
+Implemented in v0.3.7:
+
+- The `Auditar links` action extracts public `http`/`https` links from the prompt, active protocol, and editor text.
+- The native backend checks links with `HEAD` and `GET` fallback, follows a limited redirect chain, and blocks localhost/private-network targets before making requests.
+- Private-target blocking covers localhost names, `.local`/`.localhost`, RFC1918 IPv4, CGNAT, link-local/metadata IPv4, documentation/reserved/multicast IPv4, IPv6 loopback, IPv6 link-local, IPv6 ULA, IPv6 multicast/documentation, and IPv4-mapped or IPv4-compatible IPv6 private targets.
+- The UI updates the link evidence tile and records sanitized per-link status in NDJSON diagnostics.
+
+Still pending:
+
+- Persistent evidence cache.
+- Browser-rendered fetch.
+- Human-assisted browser capture.
+- Search-provider connectors and correction proposals.
 
 The engine is for verification, citation support, and provenance. It should behave like a careful human researcher using a browser, with automation for repetitive checks and clear handoff to the operator whenever human interaction is required.
 

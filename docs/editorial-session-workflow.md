@@ -1,6 +1,6 @@
 # Editorial Session Workflow
 
-Status: implementation contract with functional background, hardened resume pass in `v0.3.5`, and startup crash recovery hardening in `v0.3.6`.
+Status: implementation contract with functional background, hardened resume pass in `v0.3.5`, startup crash recovery hardening in `v0.3.6`, and long-running agent diagnostics in `v0.3.7`.
 
 Maestro's core workflow starts from an operator prompt and an active editorial protocol. The app must not deliver a final text until Claude, Codex, and Gemini all return `READY` in the same trilateral round and Maestro's deterministic fourth-peer check also returns `READY`.
 
@@ -59,6 +59,15 @@ If any peer remains `NOT_READY` or `NEEDS_EVIDENCE`, the session continues, paus
 - Maestro recovers the latest usable draft or revision artifact and continues review from that round instead of restarting from zero.
 - If the operator has imported a new protocol before resuming, that protocol is passed to Claude, Codex, and Gemini; the previous `protocolo.md` is preserved as a local `protocolo-anterior-*.md` artifact before the new protocol becomes active.
 - If no new protocol is loaded, Maestro uses the `protocolo.md` saved inside the session folder.
+
+`v0.3.7` adds an explicit trace for the "apparently stopped" state:
+
+- Before each CLI child process is launched, Maestro writes the target Markdown artifact with `Status: RUNNING` and empty stdout/stderr blocks.
+- After spawn, Maestro records the child PID, resolved executable path, role, round artifact path, and output counters.
+- While a child process remains active, Maestro logs `session.agent.running` every 30 seconds with elapsed seconds and stdout/stderr bytes captured so far.
+- If the app is closed or crashes mid-agent, the unfinished `RUNNING` artifact remains as evidence but is ignored as a usable draft during resume.
+- Spawn or execution errors are now written as parseable Markdown artifacts instead of bare one-line error text.
+- If stdin delivery fails after a child process has been spawned, Maestro kills and reaps that child before recording the parseable execution error artifact.
 
 This pass is still conservative. The deterministic link checker, ABNT engine, cancellable sessions, and MainSite D1 publication gates remain required before the workflow can be considered mature.
 

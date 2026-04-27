@@ -4,6 +4,20 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.7] - 2026-04-27
+
+- Closed the CodeQL `rust/path-injection` findings opened after v0.3.6 by changing the portable app-root regression test to use the current test executable path instead of creating and deleting a dynamic temporary directory.
+- Preserved the v0.3.6 runtime startup fix and early crash logger unchanged.
+- Replaced the sidebar brand subtitle `Windows 11+ portable` with the current app version label in `vX.X.X` format, sourced from `package.json`.
+- Made the API provider settings real: Maestro now loads and saves `data/config/ai-providers.json`, exposes a visible `Salvar APIs` action, and verifies OpenAI, Anthropic, and Gemini credentials against their model-list endpoints without logging raw keys.
+- Changed Cloudflare token validation into a provisioning action: `Verificar e preparar` now creates missing `maestro_db`, initializes Maestro tables, reuses an existing account Secrets Store when the plan allows only one, and creates `maestro` only when no store exists and the token has permission.
+- Replaced UI-only buttons with real actions for runtime revalidation, agent CLI checks, opening the session minutes file, and link auditing through the native backend.
+- Added in-flight editorial diagnostics: each CLI execution now writes a parseable `RUNNING` artifact before launch, logs the child PID after spawn, and records native `session.agent.running` heartbeats with elapsed time plus stdout/stderr byte counters while long agent calls are still active.
+- Hardened interrupted-session resume so an unfinished `RUNNING` revision does not become the latest usable draft.
+- Hardened CLI startup failure handling so a child process spawned for an editorial agent is killed and reaped if stdin delivery fails before the agent can begin work.
+- Sanitized provider API network errors so failed Gemini/OpenAI/Anthropic verification cannot echo request URLs containing API keys.
+- Hardened the link-audit public URL gate against private, reserved, documentation, multicast, CGNAT, metadata, IPv6 loopback/link-local/ULA, and IPv4-mapped or IPv4-compatible IPv6 targets while avoiding false positives on public hostnames that merely contain private-looking numbers.
+
 ## [v0.3.6] - 2026-04-26
 
 - Fixed a startup crash in the Windows portable build by resolving Maestro's app folder from the running executable instead of the Tauri `BaseDirectory::Executable` resolver, which returned `unknown path` on this environment.

@@ -1,12 +1,13 @@
 use chrono::Utc;
 use regex::Regex;
-use reqwest::blocking::Client;
+use reqwest::{blocking::Client, redirect::Policy, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
     fs::{self, OpenOptions},
     io::{Read, Write},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::{Component, Path, PathBuf},
     process::{self, Command, Output, Stdio},
     sync::{
@@ -39,6 +40,51 @@ struct BootstrapConfig {
     cloudflare_secret_store: String,
     windows_env_prefix: String,
     updated_at: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct AiProviderConfig {
+    schema_version: u8,
+    provider_mode: String,
+    credential_storage_mode: String,
+    openai_api_key: Option<String>,
+    anthropic_api_key: Option<String>,
+    gemini_api_key: Option<String>,
+    updated_at: String,
+}
+
+#[derive(Serialize)]
+struct AiProviderProbeRow {
+    label: String,
+    value: String,
+    tone: String,
+}
+
+#[derive(Serialize)]
+struct AiProviderProbeResult {
+    rows: Vec<AiProviderProbeRow>,
+    checked_at: String,
+}
+
+#[derive(Deserialize)]
+struct LinkAuditRequest {
+    text: String,
+}
+
+#[derive(Serialize)]
+struct LinkAuditRow {
+    url: String,
+    status: String,
+    tone: String,
+}
+
+#[derive(Serialize)]
+struct LinkAuditResult {
+    urls_found: usize,
+    checked: usize,
+    ok: usize,
+    failed: usize,
+    rows: Vec<LinkAuditRow>,
 }
 
 #[derive(Serialize)]
@@ -193,6 +239,20 @@ impl Default for BootstrapConfig {
             cloudflare_persistence_database: "maestro_db".to_string(),
             cloudflare_secret_store: "maestro".to_string(),
             windows_env_prefix: "MAESTRO_".to_string(),
+            updated_at: Utc::now().to_rfc3339(),
+        }
+    }
+}
+
+impl Default for AiProviderConfig {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            provider_mode: "hybrid".to_string(),
+            credential_storage_mode: "local_json".to_string(),
+            openai_api_key: None,
+            anthropic_api_key: None,
+            gemini_api_key: None,
             updated_at: Utc::now().to_rfc3339(),
         }
     }
@@ -376,6 +436,74 @@ fn write_bootstrap_config(config: BootstrapConfig) -> Result<BootstrapConfig, St
 
     persist_bootstrap_config(&path, &sanitized)?;
     Ok(sanitized)
+}
+
+#[tauri::command]
+fn read_ai_provider_config() -> Result<AiProviderConfig, String> {
+    let path = checked_data_child_path(&ai_provider_config_path())?;
+    if !path.exists() {
+        let config = AiProviderConfig::default();
+        persist_ai_provider_config(&path, &config)?;
+        return Ok(config);
+    }
+
+    let text = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read AI provider config: {error}"))?;
+    let config: AiProviderConfig = serde_json::from_str(&text)
+        .map_err(|error| format!("failed to parse AI provider config: {error}"))?;
+    Ok(sanitize_ai_provider_config(config))
+}
+
+#[tauri::command]
+fn write_ai_provider_config(config: AiProviderConfig) -> Result<AiProviderConfig, String> {
+    let path = ai_provider_config_path();
+    let sanitized = sanitize_ai_provider_config(config);
+    persist_ai_provider_config(&path, &sanitized)?;
+    Ok(sanitized)
+}
+
+#[tauri::command]
+fn verify_ai_provider_credentials(config: AiProviderConfig) -> AiProviderProbeResult {
+    run_ai_provider_probe(&sanitize_ai_provider_config(config))
+}
+
+#[tauri::command]
+fn audit_links(request: LinkAuditRequest) -> LinkAuditResult {
+    run_link_audit(&request.text)
+}
+
+#[tauri::command]
+fn open_data_file(path: String) -> Result<String, String> {
+    let requested = PathBuf::from(path.trim());
+    let absolute = if requested.is_absolute() {
+        requested
+    } else {
+        data_dir().join(requested)
+    };
+    let checked = checked_data_child_path(&absolute)?;
+    if !checked.exists() {
+        return Err("arquivo nao encontrado na pasta de dados do Maestro".to_string());
+    }
+
+    #[cfg(windows)]
+    {
+        let mut command = hidden_command("explorer.exe");
+        command.arg(&checked);
+        command
+            .spawn()
+            .map_err(|error| format!("falha ao abrir arquivo: {error}"))?;
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("xdg-open");
+        command.arg(&checked);
+        command
+            .spawn()
+            .map_err(|error| format!("failed to open file: {error}"))?;
+    }
+
+    Ok(checked.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -1019,6 +1147,10 @@ fn bootstrap_config_path() -> PathBuf {
     config_dir().join("bootstrap.json")
 }
 
+fn ai_provider_config_path() -> PathBuf {
+    config_dir().join("ai-providers.json")
+}
+
 fn sessions_dir() -> PathBuf {
     data_dir().join("sessions")
 }
@@ -1119,11 +1251,30 @@ fn persist_bootstrap_config(path: &PathBuf, config: &BootstrapConfig) -> Result<
     fs::write(&path, bytes).map_err(|error| format!("failed to write bootstrap config: {error}"))
 }
 
+fn persist_ai_provider_config(path: &PathBuf, config: &AiProviderConfig) -> Result<(), String> {
+    let path = checked_data_child_path(path)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create config dir: {error}"))?;
+    }
+    let bytes = serde_json::to_vec_pretty(config)
+        .map_err(|error| format!("failed to serialize AI provider config: {error}"))?;
+    fs::write(&path, bytes).map_err(|error| format!("failed to write AI provider config: {error}"))
+}
+
 fn normalize_storage_mode(value: &str) -> &'static str {
     match value {
         "windows_env" => "windows_env",
         "cloudflare" => "cloudflare",
         _ => "local_json",
+    }
+}
+
+fn normalize_provider_mode(value: &str) -> &'static str {
+    match value {
+        "cli" => "cli",
+        "api" => "api",
+        _ => "hybrid",
     }
 }
 
@@ -1133,6 +1284,25 @@ fn normalize_cloudflare_token_source(value: &str) -> &'static str {
         "local_encrypted" => "local_encrypted",
         _ => "prompt_each_launch",
     }
+}
+
+fn sanitize_ai_provider_config(config: AiProviderConfig) -> AiProviderConfig {
+    AiProviderConfig {
+        schema_version: 1,
+        provider_mode: normalize_provider_mode(&config.provider_mode).to_string(),
+        credential_storage_mode: normalize_storage_mode(&config.credential_storage_mode)
+            .to_string(),
+        openai_api_key: sanitize_optional_secret(config.openai_api_key),
+        anthropic_api_key: sanitize_optional_secret(config.anthropic_api_key),
+        gemini_api_key: sanitize_optional_secret(config.gemini_api_key),
+        updated_at: Utc::now().to_rfc3339(),
+    }
+}
+
+fn sanitize_optional_secret(value: Option<String>) -> Option<String> {
+    value
+        .map(|text| text.trim().chars().take(4096).collect::<String>())
+        .filter(|text| !text.is_empty())
 }
 
 fn first_env_value(candidates: &[&str]) -> Option<(String, String, String)> {
@@ -2189,11 +2359,26 @@ fn run_editorial_agent(
         return result;
     };
 
-    let command_result = if let Some(timeout) = timeout {
-        run_resolved_command_with_timeout(&path, &args, timeout, Some(&stdin_text))
-    } else {
-        run_resolved_command_unbounded(&path, &args, Some(&stdin_text))
+    let _ = write_editorial_agent_running_artifact(
+        output_path,
+        name,
+        role,
+        command,
+        &path,
+        &args,
+        stdin_text.chars().count(),
+    );
+
+    let progress = CommandProgressContext {
+        log_session,
+        run_id,
+        agent: name,
+        role,
+        cli: command,
+        output_path,
     };
+    let command_result =
+        run_resolved_command_observed(&path, &args, timeout, Some(&stdin_text), Some(progress));
 
     match command_result {
         Ok(result) => {
@@ -2258,7 +2443,17 @@ fn run_editorial_agent(
         }
         Err(error) => {
             let status = sanitize_text(&format!("EXEC_ERROR: {error}"), 240);
-            let _ = write_text_file(output_path, &status);
+            let _ = write_editorial_agent_error_artifact(
+                output_path,
+                name,
+                role,
+                command,
+                &path,
+                &args,
+                &status,
+                started.elapsed().as_millis(),
+                stdin_text.chars().count(),
+            );
             let agent_result = EditorialAgentResult {
                 name: name.to_string(),
                 role: role.to_string(),
@@ -2281,6 +2476,49 @@ fn run_editorial_agent(
             agent_result
         }
     }
+}
+
+fn write_editorial_agent_running_artifact(
+    output_path: &Path,
+    name: &str,
+    role: &str,
+    command: &str,
+    resolved_path: &Path,
+    args: &[String],
+    stdin_chars: usize,
+) -> Result<(), String> {
+    write_text_file(
+        output_path,
+        &format!(
+            "# {name} - {role}\n\n- CLI: `{command}`\n- Resolved path: `{}`\n- Args: `{}`\n- Status: `RUNNING`\n- Exit code: `unknown`\n- Duration ms: `0`\n- Timed out: `false`\n- Stdin chars: `{stdin_chars}`\n- Stdout chars: `0`\n- Stderr chars: `0`\n- Started at: `{}`\n\n## Stdout\n\n```text\n\n```\n\n## Stderr\n\n```text\n\n```\n",
+            resolved_path.to_string_lossy(),
+            sanitize_text(&args.join(" "), 1000),
+            Utc::now().to_rfc3339(),
+        ),
+    )
+}
+
+fn write_editorial_agent_error_artifact(
+    output_path: &Path,
+    name: &str,
+    role: &str,
+    command: &str,
+    resolved_path: &Path,
+    args: &[String],
+    status: &str,
+    duration_ms: u128,
+    stdin_chars: usize,
+) -> Result<(), String> {
+    write_text_file(
+        output_path,
+        &format!(
+            "# {name} - {role}\n\n- CLI: `{command}`\n- Resolved path: `{}`\n- Args: `{}`\n- Status: `{}`\n- Exit code: `unknown`\n- Duration ms: `{duration_ms}`\n- Timed out: `false`\n- Stdin chars: `{stdin_chars}`\n- Stdout chars: `0`\n- Stderr chars: `0`\n\n## Stdout\n\n```text\n\n```\n\n## Stderr\n\n```text\n{}\n```\n",
+            resolved_path.to_string_lossy(),
+            sanitize_text(&args.join(" "), 1000),
+            sanitize_text(status, 240),
+            sanitize_text(status, 2000),
+        ),
+    )
 }
 
 fn log_editorial_agent_finished(
@@ -2318,6 +2556,54 @@ fn log_editorial_agent_finished(
                 "stdout_chars": stdout_chars,
                 "stderr_chars": stderr_chars,
                 "output_path": result.output_path
+            })),
+        },
+    );
+}
+
+fn log_editorial_agent_spawned(progress: &CommandProgressContext<'_>, child_id: u32, path: &Path) {
+    let _ = write_log_record(
+        progress.log_session,
+        LogEventInput {
+            level: "info".to_string(),
+            category: "session.agent.spawned".to_string(),
+            message: "editorial agent child process spawned".to_string(),
+            context: Some(json!({
+                "run_id": sanitize_short(progress.run_id, 120),
+                "agent": progress.agent,
+                "role": progress.role,
+                "cli": progress.cli,
+                "child_pid": child_id,
+                "resolved_path": path.to_string_lossy().to_string(),
+                "output_path": progress.output_path.to_string_lossy().to_string()
+            })),
+        },
+    );
+}
+
+fn log_editorial_agent_running(
+    progress: &CommandProgressContext<'_>,
+    child_id: u32,
+    elapsed: Duration,
+    stdout_bytes: u64,
+    stderr_bytes: u64,
+) {
+    let _ = write_log_record(
+        progress.log_session,
+        LogEventInput {
+            level: "info".to_string(),
+            category: "session.agent.running".to_string(),
+            message: "editorial agent still running".to_string(),
+            context: Some(json!({
+                "run_id": sanitize_short(progress.run_id, 120),
+                "agent": progress.agent,
+                "role": progress.role,
+                "cli": progress.cli,
+                "child_pid": child_id,
+                "elapsed_seconds": elapsed.as_secs(),
+                "stdout_bytes_so_far": stdout_bytes,
+                "stderr_bytes_so_far": stderr_bytes,
+                "output_path": progress.output_path.to_string_lossy().to_string()
             })),
         },
     );
@@ -2493,6 +2779,357 @@ fn run_cli_adapter_probe(spec: CliAdapterSpec) -> CliAdapterProbeResult {
     }
 }
 
+fn run_ai_provider_probe(config: &AiProviderConfig) -> AiProviderProbeResult {
+    let client = match Client::builder()
+        .timeout(Duration::from_secs(20))
+        .user_agent(format!(
+            "Maestro Editorial AI/{}",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return AiProviderProbeResult {
+                rows: vec![ai_probe_row(
+                    "APIs",
+                    format!("cliente HTTP falhou: {error}"),
+                    "error",
+                )],
+                checked_at: Utc::now().to_rfc3339(),
+            };
+        }
+    };
+
+    AiProviderProbeResult {
+        rows: vec![
+            probe_openai_api(&client, config.openai_api_key.as_deref()),
+            probe_anthropic_api(&client, config.anthropic_api_key.as_deref()),
+            probe_gemini_api(&client, config.gemini_api_key.as_deref()),
+        ],
+        checked_at: Utc::now().to_rfc3339(),
+    }
+}
+
+fn probe_openai_api(client: &Client, key: Option<&str>) -> AiProviderProbeRow {
+    let Some(key) = key.filter(|value| !value.trim().is_empty()) else {
+        return ai_probe_row("OpenAI / Codex", "API key nao informada", "warn");
+    };
+
+    let response = client
+        .get("https://api.openai.com/v1/models")
+        .bearer_auth(key)
+        .send();
+    summarize_ai_probe_response("OpenAI / Codex", response)
+}
+
+fn probe_anthropic_api(client: &Client, key: Option<&str>) -> AiProviderProbeRow {
+    let Some(key) = key.filter(|value| !value.trim().is_empty()) else {
+        return ai_probe_row("Anthropic / Claude", "API key nao informada", "warn");
+    };
+
+    let response = client
+        .get("https://api.anthropic.com/v1/models")
+        .header("x-api-key", key)
+        .header("anthropic-version", "2023-06-01")
+        .send();
+    summarize_ai_probe_response("Anthropic / Claude", response)
+}
+
+fn probe_gemini_api(client: &Client, key: Option<&str>) -> AiProviderProbeRow {
+    let Some(key) = key.filter(|value| !value.trim().is_empty()) else {
+        return ai_probe_row("Google / Gemini", "API key nao informada", "warn");
+    };
+
+    let response = client
+        .get("https://generativelanguage.googleapis.com/v1beta/models")
+        .query(&[("key", key)])
+        .send();
+    summarize_ai_probe_response("Google / Gemini", response)
+}
+
+fn summarize_ai_probe_response(
+    label: &str,
+    response: Result<reqwest::blocking::Response, reqwest::Error>,
+) -> AiProviderProbeRow {
+    match response {
+        Ok(response) => {
+            let status = response.status();
+            let body = response.text().unwrap_or_default();
+            if status.is_success() {
+                ai_probe_row(label, "API respondeu; credencial aceita", "ok")
+            } else if status.as_u16() == 401 || status.as_u16() == 403 {
+                ai_probe_row(
+                    label,
+                    format!(
+                        "credencial recusada (HTTP {}): {}",
+                        status.as_u16(),
+                        api_error_message(&body)
+                    ),
+                    "error",
+                )
+            } else if status.as_u16() == 429 {
+                ai_probe_row(
+                    label,
+                    format!(
+                        "credencial aceita, mas limite ativo (HTTP {}): {}",
+                        status.as_u16(),
+                        api_error_message(&body)
+                    ),
+                    "warn",
+                )
+            } else {
+                ai_probe_row(
+                    label,
+                    format!(
+                        "resposta inesperada (HTTP {}): {}",
+                        status.as_u16(),
+                        api_error_message(&body)
+                    ),
+                    "warn",
+                )
+            }
+        }
+        Err(error) => {
+            let safe_error = error.without_url();
+            ai_probe_row(label, format!("falha de rede: {safe_error}"), "error")
+        }
+    }
+}
+
+fn api_error_message(body: &str) -> String {
+    if body.trim().is_empty() {
+        return "sem detalhe na resposta".to_string();
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(body) {
+        if let Some(message) = value
+            .pointer("/error/message")
+            .or_else(|| value.pointer("/error/status"))
+            .or_else(|| value.pointer("/error/code"))
+            .and_then(Value::as_str)
+        {
+            return sanitize_text(message, 180);
+        }
+
+        if let Some(message) = value
+            .get("error")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("message").and_then(Value::as_str))
+        {
+            return sanitize_text(message, 180);
+        }
+    }
+
+    sanitize_text(body, 180)
+}
+
+fn ai_probe_row(
+    label: impl Into<String>,
+    value: impl Into<String>,
+    tone: impl Into<String>,
+) -> AiProviderProbeRow {
+    AiProviderProbeRow {
+        label: sanitize_text(&label.into(), 80),
+        value: sanitize_text(&value.into(), 240),
+        tone: sanitize_short(&tone.into(), 16),
+    }
+}
+
+fn run_link_audit(text: &str) -> LinkAuditResult {
+    let urls = extract_public_urls(text);
+    let client = match Client::builder()
+        .timeout(Duration::from_secs(15))
+        .redirect(Policy::limited(5))
+        .user_agent(format!(
+            "Maestro Editorial AI/{}",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return LinkAuditResult {
+                urls_found: urls.len(),
+                checked: 0,
+                ok: 0,
+                failed: urls.len(),
+                rows: vec![link_audit_row(
+                    "http-client",
+                    format!("cliente HTTP falhou: {error}"),
+                    "error",
+                )],
+            };
+        }
+    };
+
+    let rows = urls
+        .iter()
+        .map(|url| probe_public_url(&client, url))
+        .collect::<Vec<_>>();
+    let ok = rows.iter().filter(|row| row.tone == "ok").count();
+    let failed = rows
+        .iter()
+        .filter(|row| row.tone == "error" || row.tone == "blocked")
+        .count();
+
+    LinkAuditResult {
+        urls_found: urls.len(),
+        checked: rows.len(),
+        ok,
+        failed,
+        rows,
+    }
+}
+
+fn extract_public_urls(text: &str) -> Vec<String> {
+    let Some(regex) = Regex::new(r#"https?://[^\s<>"')\]]+"#).ok() else {
+        return Vec::new();
+    };
+
+    let mut urls = BTreeSet::new();
+    for matched in regex.find_iter(text).take(80) {
+        let cleaned = matched
+            .as_str()
+            .trim_end_matches(|character: char| matches!(character, '.' | ',' | ';' | ':'))
+            .to_string();
+        if is_public_http_url(&cleaned) {
+            urls.insert(cleaned);
+        }
+        if urls.len() >= 30 {
+            break;
+        }
+    }
+    urls.into_iter().collect()
+}
+
+fn is_public_http_url(value: &str) -> bool {
+    let Ok(url) = Url::parse(value) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(host) = url.host_str().map(|host| host.to_ascii_lowercase()) else {
+        return false;
+    };
+
+    if matches!(host.as_str(), "localhost" | "localhost.localdomain")
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+    {
+        return false;
+    }
+
+    let host_for_ip = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = host_for_ip.parse::<IpAddr>() {
+        return !is_blocked_link_audit_ip(ip);
+    }
+
+    true
+}
+
+fn is_blocked_link_audit_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ipv4) => is_blocked_link_audit_ipv4(ipv4),
+        IpAddr::V6(ipv6) => is_blocked_link_audit_ipv6(ipv6),
+    }
+}
+
+fn is_blocked_link_audit_ipv4(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    octets[0] == 0
+        || octets[0] == 10
+        || octets[0] == 127
+        || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        || (octets[0] == 169 && octets[1] == 254)
+        || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+        || (octets[0] == 192 && octets[1] == 168)
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
+        || (octets[0] == 198 && (18..=19).contains(&octets[1]))
+        || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+        || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+        || octets[0] >= 224
+}
+
+fn is_blocked_link_audit_ipv6(ip: Ipv6Addr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() {
+        return true;
+    }
+
+    if let Some(mapped) = ip.to_ipv4_mapped() {
+        return is_blocked_link_audit_ipv4(mapped);
+    }
+
+    let segments = ip.segments();
+    if segments[0..5].iter().all(|segment| *segment == 0)
+        && (segments[5] == 0 || segments[5] == 0xffff)
+    {
+        let [a, b] = segments[6].to_be_bytes();
+        let [c, d] = segments[7].to_be_bytes();
+        return is_blocked_link_audit_ipv4(Ipv4Addr::new(a, b, c, d));
+    }
+
+    let first_segment = segments[0];
+    (first_segment & 0xfe00) == 0xfc00
+        || (first_segment & 0xffc0) == 0xfe80
+        || (first_segment & 0xff00) == 0xff00
+        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+}
+
+fn probe_public_url(client: &Client, url: &str) -> LinkAuditRow {
+    let head = client.head(url).send();
+    match head {
+        Ok(response) if response.status().is_success() || response.status().is_redirection() => {
+            link_audit_row(url, format!("HTTP {}", response.status().as_u16()), "ok")
+        }
+        Ok(response) if response.status().as_u16() == 405 || response.status().as_u16() == 403 => {
+            probe_public_url_with_get(client, url)
+        }
+        Ok(response) => link_audit_row(
+            url,
+            format!("HTTP {}", response.status().as_u16()),
+            if response.status().is_client_error() || response.status().is_server_error() {
+                "error"
+            } else {
+                "warn"
+            },
+        ),
+        Err(_) => probe_public_url_with_get(client, url),
+    }
+}
+
+fn probe_public_url_with_get(client: &Client, url: &str) -> LinkAuditRow {
+    match client.get(url).send() {
+        Ok(response) if response.status().is_success() || response.status().is_redirection() => {
+            link_audit_row(url, format!("HTTP {}", response.status().as_u16()), "ok")
+        }
+        Ok(response) => link_audit_row(
+            url,
+            format!("HTTP {}", response.status().as_u16()),
+            if response.status().is_client_error() || response.status().is_server_error() {
+                "error"
+            } else {
+                "warn"
+            },
+        ),
+        Err(error) => link_audit_row(url, format!("falha HTTP: {error}"), "error"),
+    }
+}
+
+fn link_audit_row(
+    url: impl Into<String>,
+    status: impl Into<String>,
+    tone: impl Into<String>,
+) -> LinkAuditRow {
+    LinkAuditRow {
+        url: sanitize_text(&url.into(), 240),
+        status: sanitize_text(&status.into(), 160),
+        tone: sanitize_short(&tone.into(), 16),
+    }
+}
+
 fn token_source_label(request: &CloudflareProbeRequest) -> String {
     if request
         .api_token
@@ -2540,6 +3177,7 @@ fn run_cloudflare_probe(request: &CloudflareProbeRequest) -> CloudflareProbeResu
     let publication_database = sanitize_short(&request.publication_database, 80);
     let secret_store = sanitize_short(&request.secret_store, 80);
     let mut rows = Vec::new();
+    let mut maestro_database_id: Option<String> = None;
 
     let Some((token_source, token_value)) = token else {
         return CloudflareProbeResult {
@@ -2668,24 +3306,85 @@ fn run_cloudflare_probe(request: &CloudflareProbeRequest) -> CloudflareProbeResu
     match cloudflare_get(&client, &token_value, &d1_path) {
         Ok(value) => {
             let names = cloudflare_result_names(&value);
-            let mut missing = Vec::new();
-            if !persistence_database.is_empty() && !names.contains(&persistence_database) {
-                missing.push(persistence_database.clone());
+            if !persistence_database.is_empty() && names.contains(&persistence_database) {
+                maestro_database_id = cloudflare_result_id_for_name(&value, &persistence_database);
+                if let Some(database_id) = maestro_database_id.as_deref() {
+                    let _ = provision_maestro_d1_schema(
+                        &client,
+                        &token_value,
+                        &account_id,
+                        database_id,
+                    );
+                }
             }
-            if !publication_database.is_empty() && !names.contains(&publication_database) {
-                missing.push(publication_database.clone());
-            }
+            let publication_missing =
+                !publication_database.is_empty() && !names.contains(&publication_database);
+            let persistence_missing =
+                !persistence_database.is_empty() && !names.contains(&persistence_database);
 
-            if missing.is_empty() {
+            if !persistence_missing && !publication_missing {
                 rows.push(probe_row(
                     "D1 Read/Edit",
                     format!("{persistence_database} + {publication_database} acessiveis"),
                     "ok",
                 ));
+            } else if persistence_missing {
+                let create_result = cloudflare_post_json(
+                    &client,
+                    &token_value,
+                    &d1_path,
+                    json!({ "name": persistence_database }),
+                );
+
+                match create_result {
+                    Ok(created) => {
+                        let database_id = cloudflare_created_result_id(&created).or_else(|| {
+                            cloudflare_result_id_for_name(&value, &persistence_database)
+                        });
+                        maestro_database_id = database_id.clone();
+                        let (schema_status, schema_ok) = if let Some(database_id) = database_id {
+                            match provision_maestro_d1_schema(
+                                &client,
+                                &token_value,
+                                &account_id,
+                                &database_id,
+                            ) {
+                                Ok(_) => ("schema Maestro criado".to_string(), true),
+                                Err(error) => (format!("schema pendente: {error}"), false),
+                            }
+                        } else {
+                            (
+                                "schema pendente: id da base nao retornado".to_string(),
+                                false,
+                            )
+                        };
+
+                        if publication_missing {
+                            rows.push(probe_row(
+                                "D1 Read/Edit",
+                                format!(
+                                    "{persistence_database} criada; {schema_status}; {publication_database} ausente"
+                                ),
+                                "warn",
+                            ));
+                        } else {
+                            rows.push(probe_row(
+                                "D1 Read/Edit",
+                                format!("{persistence_database} criada; {schema_status}"),
+                                if schema_ok { "ok" } else { "warn" },
+                            ));
+                        }
+                    }
+                    Err(error) => rows.push(probe_row(
+                        "D1 Read/Edit",
+                        format!("{persistence_database} ausente e criacao falhou: {error}"),
+                        "error",
+                    )),
+                }
             } else {
                 rows.push(probe_row(
                     "D1 Read/Edit",
-                    format!("endpoint D1 acessivel; ausente: {}", missing.join(", ")),
+                    format!("{persistence_database} acessivel; {publication_database} ausente"),
                     "warn",
                 ));
             }
@@ -2696,21 +3395,64 @@ fn run_cloudflare_probe(request: &CloudflareProbeRequest) -> CloudflareProbeResu
     let stores_path = format!("/accounts/{account_id}/secrets_store/stores");
     match cloudflare_get(&client, &token_value, &stores_path) {
         Ok(value) => {
-            let stores = cloudflare_result_names(&value);
             if secret_store.is_empty() {
                 rows.push(probe_row("Secrets Store", "endpoint acessivel", "ok"));
-            } else if stores.contains(&secret_store) {
-                rows.push(probe_row(
-                    "Secrets Store",
-                    format!("store {secret_store} acessivel"),
-                    "ok",
-                ));
+            } else if let Some(store) =
+                cloudflare_store_for_target_or_existing(&value, &secret_store)
+            {
+                let link_status = link_secret_store_reference(
+                    &client,
+                    &token_value,
+                    &account_id,
+                    maestro_database_id.as_deref(),
+                    &secret_store,
+                    &store.name,
+                    &store.id,
+                );
+                if store.name == secret_store {
+                    rows.push(probe_row(
+                        "Secrets Store",
+                        format!("store {secret_store} acessivel; {link_status}"),
+                        "ok",
+                    ));
+                } else {
+                    rows.push(probe_row(
+                        "Secrets Store",
+                        format!("usando store existente {}; {link_status}", store.name),
+                        "ok",
+                    ));
+                }
             } else {
-                rows.push(probe_row(
-                    "Secrets Store",
-                    format!("endpoint acessivel; store {secret_store} ausente"),
-                    "warn",
-                ));
+                match cloudflare_post_json(
+                    &client,
+                    &token_value,
+                    &stores_path,
+                    json!({ "name": secret_store }),
+                ) {
+                    Ok(created) => {
+                        let store_id = cloudflare_created_result_id(&created)
+                            .unwrap_or_else(|| "id-nao-retornado".to_string());
+                        let link_status = link_secret_store_reference(
+                            &client,
+                            &token_value,
+                            &account_id,
+                            maestro_database_id.as_deref(),
+                            &secret_store,
+                            &secret_store,
+                            &store_id,
+                        );
+                        rows.push(probe_row(
+                            "Secrets Store",
+                            format!("store {secret_store} criado; {link_status}"),
+                            "ok",
+                        ));
+                    }
+                    Err(error) => rows.push(probe_row(
+                        "Secrets Store",
+                        format!("nenhum store existente e criacao falhou: {error}"),
+                        "error",
+                    )),
+                }
             }
         }
         Err(error) => rows.push(probe_row("Secrets Store", error, "error")),
@@ -2724,6 +3466,42 @@ fn cloudflare_get(client: &Client, token: &str, path: &str) -> Result<Value, Str
     let response = client
         .get(url)
         .bearer_auth(token)
+        .send()
+        .map_err(|error| format!("falha HTTP: {error}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|error| format!("falha ao ler resposta Cloudflare: {error}"))?;
+    let value: Value = serde_json::from_str(&body).map_err(|error| {
+        format!(
+            "resposta Cloudflare invalida (HTTP {}): {}",
+            status.as_u16(),
+            sanitize_text(&error.to_string(), 120)
+        )
+    })?;
+    let success = value
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| status.is_success());
+
+    if status.is_success() && success {
+        Ok(value)
+    } else {
+        Err(cloudflare_error_summary(status.as_u16(), &value))
+    }
+}
+
+fn cloudflare_post_json(
+    client: &Client,
+    token: &str,
+    path: &str,
+    body: Value,
+) -> Result<Value, String> {
+    let url = format!("https://api.cloudflare.com/client/v4{path}");
+    let response = client
+        .post(url)
+        .bearer_auth(token)
+        .json(&body)
         .send()
         .map_err(|error| format!("falha HTTP: {error}"))?;
     let status = response.status();
@@ -2792,6 +3570,12 @@ fn cloudflare_error_summary(status: u16, value: &Value) -> String {
     }
 }
 
+#[derive(Clone)]
+struct CloudflareStoreRecord {
+    name: String,
+    id: String,
+}
+
 fn cloudflare_result_names(value: &Value) -> BTreeSet<String> {
     value
         .get("result")
@@ -2805,6 +3589,134 @@ fn cloudflare_result_names(value: &Value) -> BTreeSet<String> {
         })
         .map(|name| name.to_string())
         .collect()
+}
+
+fn cloudflare_result_id_for_name(value: &Value, target_name: &str) -> Option<String> {
+    value
+        .get("result")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flat_map(|items| items.iter())
+        .find_map(|item| {
+            let name = item.get("name").and_then(Value::as_str)?;
+            if name != target_name {
+                return None;
+            }
+            ["uuid", "id"]
+                .into_iter()
+                .find_map(|key| item.get(key).and_then(Value::as_str))
+                .map(|id| id.to_string())
+        })
+}
+
+fn cloudflare_store_for_target_or_existing(
+    value: &Value,
+    target_name: &str,
+) -> Option<CloudflareStoreRecord> {
+    let stores = cloudflare_store_records(value);
+    stores
+        .iter()
+        .find(|store| store.name == target_name)
+        .cloned()
+        .or_else(|| stores.into_iter().next())
+}
+
+fn cloudflare_store_records(value: &Value) -> Vec<CloudflareStoreRecord> {
+    value
+        .get("result")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flat_map(|items| items.iter())
+        .filter_map(|item| {
+            let name = item.get("name").and_then(Value::as_str)?;
+            let id = ["id", "uuid"]
+                .into_iter()
+                .find_map(|key| item.get(key).and_then(Value::as_str))
+                .unwrap_or(name);
+            Some(CloudflareStoreRecord {
+                name: sanitize_short(name, 80),
+                id: sanitize_short(id, 80),
+            })
+        })
+        .collect()
+}
+
+fn link_secret_store_reference(
+    client: &Client,
+    token: &str,
+    account_id: &str,
+    database_id: Option<&str>,
+    requested_store_name: &str,
+    effective_store_name: &str,
+    effective_store_id: &str,
+) -> String {
+    let Some(database_id) = database_id.filter(|value| !value.trim().is_empty()) else {
+        return "vinculo local pendente: maestro_db indisponivel".to_string();
+    };
+
+    let raw_path = format!("/accounts/{account_id}/d1/database/{database_id}/raw");
+    let value_json = json!({
+        "requested_store_name": requested_store_name,
+        "effective_store_name": effective_store_name,
+        "effective_store_id": effective_store_id,
+        "linked_at": Utc::now().to_rfc3339(),
+        "note": "Maestro usa o Secrets Store existente quando o plano Cloudflare permite apenas um store."
+    })
+    .to_string();
+    let updated_at = Utc::now().to_rfc3339();
+
+    match cloudflare_post_json(
+        client,
+        token,
+        &raw_path,
+        json!({
+            "sql": "INSERT OR REPLACE INTO maestro_settings (key, value_json, updated_at) VALUES (?, ?, ?)",
+            "params": ["cloudflare.secrets_store", value_json, updated_at]
+        }),
+    ) {
+        Ok(_) => "vinculado em maestro_db".to_string(),
+        Err(error) => format!("vinculo pendente: {error}"),
+    }
+}
+
+fn cloudflare_created_result_id(value: &Value) -> Option<String> {
+    ["uuid", "id"]
+        .into_iter()
+        .find_map(|key| {
+            value
+                .pointer(&format!("/result/{key}"))
+                .and_then(Value::as_str)
+        })
+        .map(|id| id.to_string())
+}
+
+fn provision_maestro_d1_schema(
+    client: &Client,
+    token: &str,
+    account_id: &str,
+    database_id: &str,
+) -> Result<(), String> {
+    let raw_path = format!("/accounts/{account_id}/d1/database/{database_id}/raw");
+    let statements = [
+        "CREATE TABLE IF NOT EXISTS maestro_settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS maestro_sessions (run_id TEXT PRIMARY KEY, status TEXT NOT NULL, metadata_json TEXT NOT NULL, updated_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS maestro_artifacts (run_id TEXT NOT NULL, name TEXT NOT NULL, content TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (run_id, name))",
+        "CREATE TABLE IF NOT EXISTS maestro_secret_refs (name TEXT PRIMARY KEY, store_id TEXT, secret_id TEXT, updated_at TEXT NOT NULL)",
+    ];
+
+    for sql in statements {
+        cloudflare_post_json(
+            client,
+            token,
+            &raw_path,
+            json!({
+                "sql": sql,
+                "params": []
+            }),
+        )?;
+    }
+
+    Ok(())
 }
 
 fn probe_row(
@@ -2952,75 +3864,30 @@ fn command_search_dirs() -> Vec<PathBuf> {
         .collect()
 }
 
+struct CommandProgressContext<'a> {
+    log_session: &'a LogSession,
+    run_id: &'a str,
+    agent: &'a str,
+    role: &'a str,
+    cli: &'a str,
+    output_path: &'a Path,
+}
+
 fn run_resolved_command_with_timeout(
     path: &Path,
     args: &[String],
     timeout: Duration,
     stdin_text: Option<&str>,
 ) -> std::io::Result<TimedCommandOutput> {
-    let started = Instant::now();
-    let mut command = resolved_command_builder(path, args);
-    command
-        .current_dir(app_root())
-        .stdin(if stdin_text.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn()?;
-    if let Some(text) = stdin_text {
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(text.as_bytes())?;
-        }
-    }
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let stdout_handle = thread::spawn(move || read_pipe_to_end(stdout));
-    let stderr_handle = thread::spawn(move || read_pipe_to_end(stderr));
-
-    loop {
-        if let Some(status) = child.try_wait()? {
-            let stdout = stdout_handle.join().unwrap_or_default();
-            let stderr = stderr_handle.join().unwrap_or_default();
-            let output = Output {
-                status,
-                stdout,
-                stderr,
-            };
-            return Ok(TimedCommandOutput {
-                output,
-                duration_ms: started.elapsed().as_millis(),
-                timed_out: false,
-            });
-        }
-
-        if started.elapsed() >= timeout {
-            let _ = child.kill();
-            let status = child.wait()?;
-            let stdout = stdout_handle.join().unwrap_or_default();
-            let stderr = stderr_handle.join().unwrap_or_default();
-            let output = Output {
-                status,
-                stdout,
-                stderr,
-            };
-            return Ok(TimedCommandOutput {
-                output,
-                duration_ms: started.elapsed().as_millis(),
-                timed_out: true,
-            });
-        }
-
-        thread::sleep(Duration::from_millis(250));
-    }
+    run_resolved_command_observed(path, args, Some(timeout), stdin_text, None)
 }
 
-fn run_resolved_command_unbounded(
+fn run_resolved_command_observed(
     path: &Path,
     args: &[String],
+    timeout: Option<Duration>,
     stdin_text: Option<&str>,
+    progress: Option<CommandProgressContext<'_>>,
 ) -> std::io::Result<TimedCommandOutput> {
     let started = Instant::now();
     let mut command = resolved_command_builder(path, args);
@@ -3034,34 +3901,93 @@ fn run_resolved_command_unbounded(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn()?;
+    let child_id = child.id();
+    if let Some(progress) = progress.as_ref() {
+        log_editorial_agent_spawned(progress, child_id, path);
+    }
     if let Some(text) = stdin_text {
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(text.as_bytes())?;
+            if let Err(error) = stdin.write_all(text.as_bytes()) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
         }
     }
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let stdout_handle = thread::spawn(move || read_pipe_to_end(stdout));
-    let stderr_handle = thread::spawn(move || read_pipe_to_end(stderr));
-    let status = child.wait()?;
-    let stdout = stdout_handle.join().unwrap_or_default();
-    let stderr = stderr_handle.join().unwrap_or_default();
+    let stdout_bytes = Arc::new(AtomicU64::new(0));
+    let stderr_bytes = Arc::new(AtomicU64::new(0));
+    let stdout_counter = Arc::clone(&stdout_bytes);
+    let stderr_counter = Arc::clone(&stderr_bytes);
+    let stdout_handle = thread::spawn(move || read_pipe_to_end_counting(stdout, stdout_counter));
+    let stderr_handle = thread::spawn(move || read_pipe_to_end_counting(stderr, stderr_counter));
+    let mut last_progress = Instant::now();
 
-    Ok(TimedCommandOutput {
-        output: Output {
-            status,
-            stdout,
-            stderr,
-        },
-        duration_ms: started.elapsed().as_millis(),
-        timed_out: false,
-    })
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let stdout = stdout_handle.join().unwrap_or_default();
+            let stderr = stderr_handle.join().unwrap_or_default();
+            return Ok(TimedCommandOutput {
+                output: Output {
+                    status,
+                    stdout,
+                    stderr,
+                },
+                duration_ms: started.elapsed().as_millis(),
+                timed_out: false,
+            });
+        }
+
+        if let Some(timeout) = timeout {
+            if started.elapsed() >= timeout {
+                let _ = child.kill();
+                let status = child.wait()?;
+                let stdout = stdout_handle.join().unwrap_or_default();
+                let stderr = stderr_handle.join().unwrap_or_default();
+                return Ok(TimedCommandOutput {
+                    output: Output {
+                        status,
+                        stdout,
+                        stderr,
+                    },
+                    duration_ms: started.elapsed().as_millis(),
+                    timed_out: true,
+                });
+            }
+        }
+
+        if last_progress.elapsed() >= Duration::from_secs(30) {
+            if let Some(progress) = progress.as_ref() {
+                log_editorial_agent_running(
+                    progress,
+                    child_id,
+                    started.elapsed(),
+                    stdout_bytes.load(Ordering::Relaxed),
+                    stderr_bytes.load(Ordering::Relaxed),
+                );
+            }
+            last_progress = Instant::now();
+        }
+
+        thread::sleep(Duration::from_millis(250));
+    }
 }
 
-fn read_pipe_to_end(pipe: Option<impl Read>) -> Vec<u8> {
+fn read_pipe_to_end_counting(pipe: Option<impl Read>, byte_counter: Arc<AtomicU64>) -> Vec<u8> {
     let mut buffer = Vec::new();
+    let mut chunk = [0u8; 8192];
     if let Some(mut pipe) = pipe {
-        let _ = pipe.read_to_end(&mut buffer);
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(count) => {
+                    byte_counter.fetch_add(count as u64, Ordering::Relaxed);
+                    buffer.extend_from_slice(&chunk[..count]);
+                }
+                Err(_) => break,
+            }
+        }
     }
     buffer
 }
@@ -3250,6 +4176,91 @@ mod tests {
     }
 
     #[test]
+    fn link_audit_blocks_local_and_private_targets() {
+        assert!(!is_public_http_url("http://localhost:8787/test"));
+        assert!(!is_public_http_url("http://127.0.0.1/test"));
+        assert!(!is_public_http_url("http://0.0.0.0/test"));
+        assert!(!is_public_http_url("http://10.0.0.1/test"));
+        assert!(!is_public_http_url("http://192.168.1.10/test"));
+        assert!(!is_public_http_url("http://172.16.0.1/test"));
+        assert!(!is_public_http_url("http://100.64.0.1/test"));
+        assert!(!is_public_http_url("http://169.254.169.254/latest"));
+        assert!(!is_public_http_url("http://192.0.2.1/test"));
+        assert!(!is_public_http_url("http://198.51.100.1/test"));
+        assert!(!is_public_http_url("http://203.0.113.1/test"));
+        assert!(!is_public_http_url("http://224.0.0.1/test"));
+        assert!(!is_public_http_url("http://255.255.255.255/test"));
+        assert!(!is_public_http_url("http://[::1]/test"));
+        assert!(!is_public_http_url("http://[fc00::1]/test"));
+        assert!(!is_public_http_url("http://[fe80::1]/test"));
+        assert!(!is_public_http_url("http://[ff02::1]/test"));
+        assert!(!is_public_http_url("http://[2001:db8::1]/test"));
+        assert!(!is_public_http_url("http://[::127.0.0.1]/test"));
+        assert!(!is_public_http_url("http://[::ffff:127.0.0.1]/test"));
+        assert!(is_public_http_url("https://example.com/source"));
+        assert!(is_public_http_url("https://10.0.0.1.example.com/source"));
+    }
+
+    #[test]
+    fn link_audit_extracts_public_urls_only() {
+        let urls = extract_public_urls(
+            "Veja https://example.com/a, http://localhost:8787/x e https://example.org/b.",
+        );
+        assert_eq!(urls, vec!["https://example.com/a", "https://example.org/b"]);
+    }
+
+    #[test]
+    fn ai_provider_config_trims_empty_secret_fields() {
+        let config = sanitize_ai_provider_config(AiProviderConfig {
+            schema_version: 99,
+            provider_mode: "api".to_string(),
+            credential_storage_mode: "windows_env".to_string(),
+            openai_api_key: Some("  sk-test-value  ".to_string()),
+            anthropic_api_key: Some("   ".to_string()),
+            gemini_api_key: None,
+            updated_at: "old".to_string(),
+        });
+
+        assert_eq!(config.schema_version, 1);
+        assert_eq!(config.provider_mode, "api");
+        assert_eq!(config.credential_storage_mode, "windows_env");
+        assert_eq!(config.openai_api_key.as_deref(), Some("sk-test-value"));
+        assert!(config.anthropic_api_key.is_none());
+        assert!(config.gemini_api_key.is_none());
+    }
+
+    #[test]
+    fn secrets_store_selection_prefers_target_without_renaming() {
+        let value = json!({
+            "result": [
+                { "id": "store-1", "name": "existing-store" },
+                { "id": "store-2", "name": "maestro" }
+            ]
+        });
+
+        let selected = cloudflare_store_for_target_or_existing(&value, "maestro")
+            .expect("target store should be selected");
+
+        assert_eq!(selected.name, "maestro");
+        assert_eq!(selected.id, "store-2");
+    }
+
+    #[test]
+    fn secrets_store_selection_uses_existing_store_when_target_absent() {
+        let value = json!({
+            "result": [
+                { "id": "only-store-id", "name": "account-store" }
+            ]
+        });
+
+        let selected = cloudflare_store_for_target_or_existing(&value, "maestro")
+            .expect("existing account store should be reused");
+
+        assert_eq!(selected.name, "account-store");
+        assert_eq!(selected.id, "only-store-id");
+    }
+
+    #[test]
     fn keeps_safe_diagnostic_token_metadata_visible() {
         assert!(!should_redact_key("cloudflare_api_token_present"));
         assert!(!should_redact_key("cloudflare_api_token_env_var"));
@@ -3382,17 +4393,12 @@ mod tests {
 
     #[test]
     fn resolves_portable_root_from_current_exe_parent() {
-        let root = std::env::temp_dir().join(format!(
-            "maestro-portable-root-test-{}",
-            Utc::now().timestamp_nanos_opt().unwrap_or_default()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        let exe_path = root.join("maestro-editorial-ai.exe");
+        let exe_path = std::env::current_exe().unwrap();
+        let expected_root = exe_path.parent().unwrap().canonicalize().unwrap();
 
         let resolved = portable_root_from_exe_path(&exe_path).unwrap();
 
-        assert_eq!(resolved, root.canonicalize().unwrap());
-        let _ = fs::remove_dir_all(&root);
+        assert_eq!(resolved, expected_root);
     }
 
     #[test]
@@ -3460,6 +4466,11 @@ mod tests {
             "# Gemini - revision\n\n- CLI: `gemini`\n- Status: `DRAFT_CREATED`\n- Exit code: `0`\n- Duration ms: `20`\n\n## Stdout\n\n```text\nrascunho revisado\n```\n\n## Stderr\n\n```text\n\n```\n",
         )
         .unwrap();
+        write_text_file(
+            &agent_dir.join("round-008-claude-revision.md"),
+            "# Claude - revision\n\n- CLI: `claude`\n- Status: `RUNNING`\n- Exit code: `unknown`\n- Duration ms: `0`\n\n## Stdout\n\n```text\n\n```\n\n## Stderr\n\n```text\n\n```\n",
+        )
+        .unwrap();
 
         let info = inspect_resumable_session_dir(&session_dir)
             .unwrap()
@@ -3475,7 +4486,7 @@ mod tests {
         let state = load_resume_session_state(&agent_dir).unwrap();
         assert_eq!(state.current_draft, "rascunho revisado");
         assert_eq!(state.next_review_round, 7);
-        assert_eq!(state.existing_agents.len(), 2);
+        assert_eq!(state.existing_agents.len(), 3);
 
         let _ = fs::remove_dir_all(&session_dir);
     }
@@ -3559,6 +4570,11 @@ pub fn run() {
             diagnostics_snapshot,
             read_bootstrap_config,
             write_bootstrap_config,
+            read_ai_provider_config,
+            write_ai_provider_config,
+            verify_ai_provider_credentials,
+            audit_links,
+            open_data_file,
             cloudflare_env_snapshot,
             dependency_preflight,
             verify_cloudflare_credentials,

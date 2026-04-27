@@ -1357,6 +1357,30 @@ button:disabled {
   font-style: normal;
 }
 
+.settings-status {
+  margin-top: 10px;
+  padding: 9px 10px;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.button-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.compact-checks {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 .connector-row,
 .pipeline-row {
   display: grid;

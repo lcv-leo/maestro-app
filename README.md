@@ -13,9 +13,9 @@ Portable Windows editorial workbench for protocol-driven AI drafting, source ver
 ![state](https://img.shields.io/badge/state-JSON%2FNDJSON-informational)
 ![license](https://img.shields.io/badge/license-AGPL--3.0-blue)
 
-Status: functional alpha with live bootstrap, diagnostics, navigation, Cloudflare credential probing, PostEditor parity, and a real background Claude/Codex/Gemini editorial session path.
+Status: functional alpha with live bootstrap, diagnostics, navigation, Cloudflare credential provisioning, AI API credential checks, PostEditor parity, link auditing, and a real background Claude/Codex/Gemini editorial session path.
 
-Current project version: `v0.3.6`.
+Current project version: `v0.3.7`.
 
 Maestro is independent from `cross-review-mcp`; it incorporates the same strict convergence discipline in its own application logic. It is designed to run from a folder, keep runtime data out of Git, and store operator protocols, drafts, evidence, and sessions locally under ignored runtime paths.
 
@@ -33,9 +33,9 @@ First-run dependency checks, authorized background installation, CLI setup, and 
 
 CLI adapter feasibility and risks are audited under `docs/cli-agent-audit.md`.
 
-Cloudflare account/token configuration, D1 permission validation, and API-first D1 access are planned under `docs/cloudflare-credentials.md`.
+Cloudflare account/token configuration now verifies the token, prepares `maestro_db`, reuses an existing account Secrets Store when present, and creates `maestro` only when no store exists and creation is permitted. Broader API-first D1 publishing remains tracked under `docs/cloudflare-credentials.md`.
 
-Official AI provider API/SDK credentials are planned under `docs/ai-provider-credentials.md`, alongside the existing CLI path.
+Official AI provider API credentials can be saved locally in `data/config/ai-providers.json` and verified against OpenAI, Anthropic, and Gemini model-list endpoints. Full SDK orchestration remains tracked under `docs/ai-provider-credentials.md`, alongside the existing CLI path.
 
 Configuration persistence supports three modes: local JSON for everything, Windows env-var hybrid for tokens/API keys plus JSON for other settings, and Cloudflare remote persistence through D1 `maestro_db` plus Cloudflare Secrets Store. See `docs/configuration-persistence.md`.
 

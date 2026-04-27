@@ -1,6 +1,6 @@
 # AI Provider Credentials
 
-Status: implementation contract.
+Status: implementation contract with v0.3.7 partial implementation.
 Date: 2026-04-26.
 
 Maestro must keep CLI orchestration and official API/SDK orchestration as first-class options. The operator should be able to use a subscription-backed CLI when that is convenient, or provide API credentials and pay through provider credits when that is the better path.
@@ -43,6 +43,19 @@ Validation statuses:
 - `quota_unavailable`
 - `rate_limited`
 - `ready`
+
+Implemented in v0.3.7:
+
+- The settings screen has explicit `Salvar APIs` and `Verificar APIs` actions.
+- Local JSON persistence writes `data/config/ai-providers.json`, which remains under ignored runtime data.
+- Verification calls official model-list endpoints for OpenAI, Anthropic, and Gemini and reports provider-level status without logging raw keys.
+- Network-error rendering strips request URLs before messages reach the UI/logs, so query-string API keys are not echoed when a provider request fails before a response is received.
+
+Still pending:
+
+- Windows env-var write/read UX for provider keys.
+- Cloudflare Secrets Store persistence for provider keys.
+- Full SDK/API orchestration as an alternative to CLI editorial sessions.
 
 If a provider credential is invalid or underfunded, Maestro must explain which provider path is blocked and whether the CLI path can still satisfy that peer.
 

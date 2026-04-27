@@ -1,6 +1,6 @@
 # Cloudflare Credentials
 
-Status: implementation contract.
+Status: implementation contract with v0.3.7 partial implementation.
 Date: 2026-04-26.
 
 Maestro must provide a settings screen for Cloudflare credentials used by D1 import/export, MainSite publishing workflows, and optional Cloudflare-backed Maestro configuration persistence. All Cloudflare D1 operations use the Cloudflare API as the primary path. Wrangler is a fallback for API outage, provider/API drift, diagnostics, and operator-approved recovery. When Wrangler fallback is needed, Maestro must invoke `wrangler@latest` and may auto-authorize the update/install step associated with that fallback.
@@ -42,6 +42,19 @@ Validation must produce a clear status:
 - `secrets_store_not_ready`
 - `write_probe_not_authorized`
 - `ready`
+
+Implemented in v0.3.7:
+
+- Token verification uses the correct user-token or account-token endpoint.
+- The settings button `Verificar e preparar` validates the account, lists D1 databases, creates missing `maestro_db`, runs idempotent Maestro tables, lists Secrets Store stores, reuses any existing account store without renaming it, and creates the `maestro` store only when no store exists.
+- When an existing store is reused because the Cloudflare plan allows a single Secrets Store, Maestro records the effective store name/id in `maestro_db` as the active Secrets Store reference.
+- The UI reports per-item success, warning, or failure without logging the raw token.
+
+Still pending:
+
+- Safe read probe against `mainsite_posts`.
+- Controlled write dry-run.
+- Secret write/update probe and full remote persistence of provider secrets.
 
 ## Required Cloudflare Permissions
 

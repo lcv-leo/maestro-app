@@ -15,6 +15,7 @@ Este pacote e portatil para Windows 11+. Ele nao instala servicos, nao cria entr
 ## Arquivos locais criados pelo app
 
 - `data/config/bootstrap.json`: arquivo local sem segredos. Ele informa ao app qual arranjo de configuracao foi escolhido.
+- `data/config/ai-providers.json`: arquivo local das credenciais de API dos agentes quando o usuario clicar em `Salvar APIs`.
 - `data/logs/maestro-<timestamp>-pid<id>.ndjson`: um arquivo novo por execucao do app.
 - `data/sessions/<run>/`: prompt, protocolo fixado, saidas dos agentes, ata da sessao e texto final quando houver unanimidade.
 - Cache e artefatos ficam sob `data/` e continuam fora do Git.
@@ -46,6 +47,12 @@ Em toda abertura o app procura estas variaveis:
 O app pode preencher o Account ID na tela. O valor do token nao e exibido nem gravado em log; o app registra apenas se ele existe e o nome da env var usada.
 
 Na validacao real, o Maestro diferencia tokens de usuario (`cfut_`) e tokens de conta (`cfat_`). Tokens de conta exigem Account ID e sao verificados pelo endpoint de conta da Cloudflare. A tela informa se a env var foi vista pelo processo, pelo escopo de usuario ou pelo escopo de maquina.
+
+O botao `Verificar e preparar` valida o token e tenta preparar os recursos essenciais quando estiverem ausentes: D1 `maestro_db` e tabelas internas do Maestro. Para Secrets Store, o app primeiro usa qualquer store ja existente na conta, sem renomear. Ele so tenta criar `maestro` quando nenhum Secrets Store existir. Se o token nao tiver permissao para criar algum recurso, a tela mostra a falha no item correspondente.
+
+## APIs dos agentes
+
+Em `Ajustes > Agentes via API`, informe as chaves e clique em `Salvar APIs` para gravar o estado local. O app mostra uma mensagem de status informando quando salvou. `Verificar APIs` salva antes de testar e consulta endpoints reais de listagem de modelos da OpenAI, Anthropic e Gemini. As chaves nao sao gravadas nos logs.
 
 ## Modos de persistencia
 

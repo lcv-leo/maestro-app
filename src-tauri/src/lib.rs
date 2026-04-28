@@ -201,6 +201,20 @@ struct EditorialAgentResult {
     output_path: String,
 }
 
+#[derive(Clone)]
+struct PreparedAgentInput {
+    stdin_text: String,
+    original_chars: usize,
+    input_path: Option<PathBuf>,
+}
+
+struct EffectiveAgentInput {
+    args: Vec<String>,
+    stdin_text: Option<String>,
+    stdin_chars: usize,
+    delivery: &'static str,
+}
+
 #[derive(Serialize)]
 struct ResumableSessionInfo {
     run_id: String,
@@ -1665,7 +1679,7 @@ fn run_editorial_session_core(
         });
     }
 
-    let mut final_path: Option<PathBuf> = None;
+    let final_path: PathBuf;
     loop {
         let review_specs = vec![
             (
@@ -1734,7 +1748,7 @@ fn run_editorial_session_core(
         if consensus_ready {
             let path = session_dir.join("texto-final.md");
             write_text_file(&path, &current_draft)?;
-            final_path = Some(path);
+            final_path = path;
             break;
         }
 
@@ -1752,11 +1766,10 @@ fn run_editorial_session_core(
                         "run_id": &run_id,
                         "round": round,
                         "policy": "no_final_delivery_without_unanimity",
-                        "next_state": "paused_for_operator_or_retry"
+                        "next_state": "continue_with_revision_and_retry_reviews"
                     })),
                 },
             );
-            break;
         }
 
         let _ = write_log_record(
@@ -1817,47 +1830,35 @@ fn run_editorial_session_core(
                     level: "warn".to_string(),
                     category: "session.revision.unavailable".to_string(),
                     message:
-                        "no revision agent produced usable text; final delivery remains unavailable"
+                        "no revision agent produced usable text; keeping current draft and retrying review"
                             .to_string(),
                     context: Some(json!({
                         "run_id": &run_id,
                         "round": round,
-                        "policy": "no_final_delivery_without_unanimity"
+                        "policy": "continue_until_unanimous_ready"
                     })),
                 },
             );
-            break;
         }
     }
 
-    let consensus_ready = final_path.is_some();
     let minutes_path = session_dir.join("ata-da-sessao.md");
     write_text_file(
         &minutes_path,
-        &build_session_minutes(
-            request,
-            &run_id,
-            &agents,
-            consensus_ready,
-            final_path.as_ref(),
-        ),
+        &build_session_minutes(request, &run_id, &agents, true, Some(&final_path)),
     )?;
 
     Ok(EditorialSessionResult {
         run_id,
         session_dir: session_dir.to_string_lossy().to_string(),
-        final_markdown_path: final_path.map(|path| path.to_string_lossy().to_string()),
+        final_markdown_path: Some(final_path.to_string_lossy().to_string()),
         session_minutes_path: minutes_path.to_string_lossy().to_string(),
         prompt_path: prompt_path.to_string_lossy().to_string(),
         protocol_path: protocol_path.to_string_lossy().to_string(),
         draft_path: current_draft_path.map(|path| path.to_string_lossy().to_string()),
         agents,
-        consensus_ready,
-        status: if consensus_ready {
-            "READY_UNANIMOUS".to_string()
-        } else {
-            "PAUSED_WITH_REAL_AGENT_OUTPUTS".to_string()
-        },
+        consensus_ready: true,
+        status: "READY_UNANIMOUS".to_string(),
     })
 }
 
@@ -2468,10 +2469,18 @@ fn build_revision_prompt(
     let mut review_notes = String::new();
     for agent in review_agents {
         let artifact = read_text_file(Path::new(&agent.output_path)).unwrap_or_default();
-        let artifact_excerpt = artifact.chars().take(40_000).collect::<String>();
+        let stdout = extract_stdout_block(&artifact).unwrap_or_default().trim();
+        let useful_excerpt = if stdout.is_empty() {
+            format!(
+                "Sem parecer editorial utilizavel nesta tentativa. Status operacional: {} / {}.",
+                agent.status, agent.tone
+            )
+        } else {
+            stdout.chars().take(18_000).collect::<String>()
+        };
         review_notes.push_str(&format!(
             "\n### {} / {}\n\nStatus: `{}` (`{}`)\nArtifact: `{}`\n\n```markdown\n{}\n```\n",
-            agent.name, agent.role, agent.status, agent.tone, agent.output_path, artifact_excerpt
+            agent.name, agent.role, agent.status, agent.tone, agent.output_path, useful_excerpt
         ));
     }
 
@@ -2529,6 +2538,8 @@ fn run_editorial_agent(
 ) -> EditorialAgentResult {
     let started = Instant::now();
     let working_dir = command_working_dir_for_output(output_path);
+    let prepared_input = prepare_agent_input(name, role, &stdin_text, output_path);
+    let effective_input = effective_agent_input(command, args, &prepared_input);
     let _ = write_log_record(
         log_session,
         LogEventInput {
@@ -2540,7 +2551,13 @@ fn run_editorial_agent(
                 "agent": name,
                 "role": role,
                 "cli": command,
-                "stdin_chars": stdin_text.chars().count(),
+                "stdin_chars": effective_input.stdin_chars,
+                "original_prompt_chars": prepared_input.original_chars,
+                "input_path": prepared_input
+                    .input_path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().to_string()),
+                "input_delivery": effective_input.delivery,
                 "timeout_seconds": timeout.map(|value| value.as_secs()),
                 "timeout_policy": if timeout.is_some() { "diagnostic_or_limited" } else { "none_editorial_session" },
                 "working_dir": working_dir.to_string_lossy().to_string(),
@@ -2576,8 +2593,10 @@ fn run_editorial_agent(
         role,
         command,
         &path,
-        &args,
-        stdin_text.chars().count(),
+        &effective_input.args,
+        effective_input.stdin_chars,
+        prepared_input.original_chars,
+        prepared_input.input_path.as_deref(),
     );
 
     let progress = CommandProgressContext {
@@ -2588,8 +2607,13 @@ fn run_editorial_agent(
         cli: command,
         output_path,
     };
-    let command_result =
-        run_resolved_command_observed(&path, &args, timeout, Some(&stdin_text), Some(progress));
+    let command_result = run_resolved_command_observed(
+        &path,
+        &effective_input.args,
+        timeout,
+        effective_input.stdin_text.as_deref(),
+        Some(progress),
+    );
 
     match command_result {
         Ok(result) => {
@@ -2623,16 +2647,22 @@ fn run_editorial_agent(
             } else {
                 ""
             };
+            let input_line = prepared_input
+                .input_path
+                .as_ref()
+                .map(|input_path| format!("- Input file: `{}`\n", input_path.to_string_lossy()))
+                .unwrap_or_else(|| "- Input file: `inline stdin`\n".to_string());
             let artifact = format!(
-                "# {name} - {role}\n\n- CLI: `{command}`\n- Resolved path: `{}`\n- Args: `{}`\n- Status: `{status}`\n- Exit code: `{}`\n- Duration ms: `{}`\n- Timed out: `{}`\n- Stdin chars: `{}`\n- Stdout chars: `{}`\n- Stderr chars: `{}`\n{note}\n## Stdout\n\n```text\n{}\n```\n\n## Stderr\n\n```text\n{}\n```\n",
+                "# {name} - {role}\n\n- CLI: `{command}`\n- Resolved path: `{}`\n- Args: `{}`\n- Status: `{status}`\n- Exit code: `{}`\n- Duration ms: `{}`\n- Timed out: `{}`\n- Stdin chars: `{}`\n- Original prompt chars: `{}`\n{input_line}- Stdout chars: `{}`\n- Stderr chars: `{}`\n{note}\n## Stdout\n\n```text\n{}\n```\n\n## Stderr\n\n```text\n{}\n```\n",
                 path.to_string_lossy(),
-                sanitize_text(&args.join(" "), 1000),
+                sanitize_text(&effective_input.args.join(" "), 1000),
                 exit_code
                     .map(|code| code.to_string())
                     .unwrap_or_else(|| "unknown".to_string()),
                 result.duration_ms,
                 result.timed_out,
-                stdin_text.chars().count(),
+                effective_input.stdin_chars,
+                prepared_input.original_chars,
                 stdout.chars().count(),
                 stderr.chars().count(),
                 stdout,
@@ -2669,10 +2699,12 @@ fn run_editorial_agent(
                 role,
                 command,
                 &path,
-                &args,
+                &effective_input.args,
                 &status,
                 started.elapsed().as_millis(),
-                stdin_text.chars().count(),
+                effective_input.stdin_chars,
+                prepared_input.original_chars,
+                prepared_input.input_path.as_deref(),
             );
             let agent_result = EditorialAgentResult {
                 name: name.to_string(),
@@ -2698,6 +2730,84 @@ fn run_editorial_agent(
     }
 }
 
+fn effective_agent_input(
+    command: &str,
+    args: Vec<String>,
+    prepared: &PreparedAgentInput,
+) -> EffectiveAgentInput {
+    if command == "gemini" && prepared.input_path.is_some() {
+        let mut next_args = args;
+        if let Some(prompt_index) = next_args.iter().position(|arg| arg == "--prompt") {
+            if let Some(prompt) = next_args.get_mut(prompt_index + 1) {
+                *prompt = prepared.stdin_text.clone();
+            }
+        }
+
+        return EffectiveAgentInput {
+            args: next_args,
+            stdin_text: None,
+            stdin_chars: 0,
+            delivery: "prompt_arg_sidecar",
+        };
+    }
+
+    EffectiveAgentInput {
+        args,
+        stdin_text: Some(prepared.stdin_text.clone()),
+        stdin_chars: prepared.stdin_text.chars().count(),
+        delivery: if prepared.input_path.is_some() {
+            "stdin_sidecar"
+        } else {
+            "stdin_inline"
+        },
+    }
+}
+
+fn prepare_agent_input(
+    name: &str,
+    role: &str,
+    input: &str,
+    output_path: &Path,
+) -> PreparedAgentInput {
+    const INLINE_PROMPT_LIMIT_CHARS: usize = 48_000;
+    let original_chars = input.chars().count();
+    if original_chars <= INLINE_PROMPT_LIMIT_CHARS {
+        return PreparedAgentInput {
+            stdin_text: input.to_string(),
+            original_chars,
+            input_path: None,
+        };
+    }
+
+    let input_path = output_path.with_file_name(format!(
+        "{}-input.md",
+        output_path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("maestro-agent")
+    ));
+    match write_text_file(&input_path, input) {
+        Ok(()) => {
+            let file_name = input_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("arquivo-de-entrada.md");
+            PreparedAgentInput {
+                stdin_text: format!(
+                    "# Maestro Editorial AI - entrada por arquivo\n\nAgente: {name}\nTarefa: {role}\n\nLeia integralmente o arquivo local `{file_name}` no diretorio de trabalho atual antes de responder.\nO arquivo contem a solicitacao, o protocolo editorial integral, o rascunho e as instrucoes obrigatorias para esta rodada.\nExecute exatamente as instrucoes do arquivo e escreva a resposta final somente na saida padrao.\n"
+                ),
+                original_chars,
+                input_path: Some(input_path),
+            }
+        }
+        Err(_) => PreparedAgentInput {
+            stdin_text: input.to_string(),
+            original_chars,
+            input_path: None,
+        },
+    }
+}
+
 fn write_editorial_agent_running_artifact(
     output_path: &Path,
     name: &str,
@@ -2706,11 +2816,16 @@ fn write_editorial_agent_running_artifact(
     resolved_path: &Path,
     args: &[String],
     stdin_chars: usize,
+    original_chars: usize,
+    input_path: Option<&Path>,
 ) -> Result<(), String> {
+    let input_line = input_path
+        .map(|path| format!("- Input file: `{}`\n", path.to_string_lossy()))
+        .unwrap_or_else(|| "- Input file: `inline stdin`\n".to_string());
     write_text_file(
         output_path,
         &format!(
-            "# {name} - {role}\n\n- CLI: `{command}`\n- Resolved path: `{}`\n- Args: `{}`\n- Status: `RUNNING`\n- Exit code: `unknown`\n- Duration ms: `0`\n- Timed out: `false`\n- Stdin chars: `{stdin_chars}`\n- Stdout chars: `0`\n- Stderr chars: `0`\n- Started at: `{}`\n\n## Stdout\n\n```text\n\n```\n\n## Stderr\n\n```text\n\n```\n",
+            "# {name} - {role}\n\n- CLI: `{command}`\n- Resolved path: `{}`\n- Args: `{}`\n- Status: `RUNNING`\n- Exit code: `unknown`\n- Duration ms: `0`\n- Timed out: `false`\n- Stdin chars: `{stdin_chars}`\n- Original prompt chars: `{original_chars}`\n{input_line}- Stdout chars: `0`\n- Stderr chars: `0`\n- Started at: `{}`\n\n## Stdout\n\n```text\n\n```\n\n## Stderr\n\n```text\n\n```\n",
             resolved_path.to_string_lossy(),
             sanitize_text(&args.join(" "), 1000),
             Utc::now().to_rfc3339(),
@@ -2728,11 +2843,16 @@ fn write_editorial_agent_error_artifact(
     status: &str,
     duration_ms: u128,
     stdin_chars: usize,
+    original_chars: usize,
+    input_path: Option<&Path>,
 ) -> Result<(), String> {
+    let input_line = input_path
+        .map(|path| format!("- Input file: `{}`\n", path.to_string_lossy()))
+        .unwrap_or_else(|| "- Input file: `inline stdin`\n".to_string());
     write_text_file(
         output_path,
         &format!(
-            "# {name} - {role}\n\n- CLI: `{command}`\n- Resolved path: `{}`\n- Args: `{}`\n- Status: `{}`\n- Exit code: `unknown`\n- Duration ms: `{duration_ms}`\n- Timed out: `false`\n- Stdin chars: `{stdin_chars}`\n- Stdout chars: `0`\n- Stderr chars: `0`\n\n## Stdout\n\n```text\n\n```\n\n## Stderr\n\n```text\n{}\n```\n",
+            "# {name} - {role}\n\n- CLI: `{command}`\n- Resolved path: `{}`\n- Args: `{}`\n- Status: `{}`\n- Exit code: `unknown`\n- Duration ms: `{duration_ms}`\n- Timed out: `false`\n- Stdin chars: `{stdin_chars}`\n- Original prompt chars: `{original_chars}`\n{input_line}- Stdout chars: `0`\n- Stderr chars: `0`\n\n## Stdout\n\n```text\n\n```\n\n## Stderr\n\n```text\n{}\n```\n",
             resolved_path.to_string_lossy(),
             sanitize_text(&args.join(" "), 1000),
             sanitize_text(status, 240),
@@ -3789,6 +3909,48 @@ fn cloudflare_get(client: &Client, token: &str, path: &str) -> Result<Value, Str
     }
 }
 
+fn cloudflare_get_paginated_results(
+    client: &Client,
+    token: &str,
+    path: &str,
+) -> Result<Value, String> {
+    let mut merged = cloudflare_get(client, token, &cloudflare_page_path(path, 1, 50))?;
+    let total_pages = merged
+        .pointer("/result_info/total_pages")
+        .and_then(Value::as_u64)
+        .unwrap_or(1);
+    if total_pages <= 1 {
+        return Ok(merged);
+    }
+
+    let mut all_items = merged
+        .get("result")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    for page in 2..=total_pages {
+        let page_value = cloudflare_get(
+            client,
+            token,
+            &cloudflare_page_path(path, page as usize, 50),
+        )?;
+        if let Some(items) = page_value.get("result").and_then(Value::as_array) {
+            all_items.extend(items.iter().cloned());
+        }
+    }
+
+    if let Some(object) = merged.as_object_mut() {
+        object.insert("result".to_string(), Value::Array(all_items));
+    }
+    Ok(merged)
+}
+
+fn cloudflare_page_path(path: &str, page: usize, per_page: usize) -> String {
+    let separator = if path.contains('?') { '&' } else { '?' };
+    format!("{path}{separator}page={page}&per_page={per_page}")
+}
+
 fn cloudflare_post_json(
     client: &Client,
     token: &str,
@@ -4101,15 +4263,12 @@ fn upsert_ai_provider_secrets(
     store: &CloudflareStoreRecord,
     secrets: &BTreeMap<&'static str, String>,
 ) -> Result<Vec<Value>, String> {
-    let listed = cloudflare_get(
-        client,
-        token,
-        &format!(
-            "/accounts/{account_id}/secrets_store/stores/{}/secrets",
-            store.id
-        ),
-    )?;
-    let existing = cloudflare_secret_ids_by_name(&listed);
+    let secrets_path = format!(
+        "/accounts/{account_id}/secrets_store/stores/{}/secrets",
+        store.id
+    );
+    let listed = cloudflare_get_paginated_results(client, token, &secrets_path)?;
+    let mut existing = cloudflare_secret_ids_by_name(&listed);
     let mut records = Vec::new();
 
     for (name, value) in secrets {
@@ -4129,20 +4288,42 @@ fn upsert_ai_provider_secrets(
                 }),
             )
         } else {
-            cloudflare_post_json(
+            match cloudflare_post_json(
                 client,
                 token,
-                &format!(
-                    "/accounts/{account_id}/secrets_store/stores/{}/secrets",
-                    store.id
-                ),
+                &secrets_path,
                 json!([{
                     "name": name,
                     "value": value,
                     "scopes": ["workers", "ai_gateway"],
                     "comment": comment
                 }]),
-            )
+            ) {
+                Ok(response) => Ok(response),
+                Err(error) if error.contains("secret_name_already_exists") => {
+                    let relisted = cloudflare_get_paginated_results(client, token, &secrets_path)?;
+                    existing = cloudflare_secret_ids_by_name(&relisted);
+                    let Some(secret_id) = existing.get(*name) else {
+                        return Err(format!(
+                            "{error}; segredo existente nao apareceu na listagem paginada"
+                        ));
+                    };
+                    cloudflare_patch_json(
+                        client,
+                        token,
+                        &format!(
+                            "/accounts/{account_id}/secrets_store/stores/{}/secrets/{secret_id}",
+                            store.id
+                        ),
+                        json!({
+                            "value": value,
+                            "scopes": ["workers", "ai_gateway"],
+                            "comment": comment
+                        }),
+                    )
+                }
+                Err(error) => Err(error),
+            }
         }?;
 
         let secret_id = cloudflare_secret_id_from_response(&response)
@@ -4964,6 +5145,84 @@ mod tests {
         assert!(decision.contains("AGENT_FAILED_NO_OUTPUT"));
         assert!(decision.contains("Divergencias editoriais"));
         assert!(decision.contains("NOT_READY"));
+    }
+
+    #[test]
+    fn long_agent_input_is_materialized_as_sidecar_file() {
+        let session_dir = sessions_dir().join("run-agent-input-sidecar-test");
+        let _ = fs::remove_dir_all(&session_dir);
+        let agent_dir = session_dir.join("agent-runs");
+        fs::create_dir_all(&agent_dir).unwrap();
+        let output_path = agent_dir.join("round-001-claude-review.md");
+        let long_input = "protocolo e rascunho\n".repeat(3_000);
+
+        let prepared = prepare_agent_input("Claude", "review", &long_input, &output_path);
+
+        assert_eq!(prepared.original_chars, long_input.chars().count());
+        assert!(prepared.stdin_text.chars().count() < prepared.original_chars);
+        let input_path = prepared
+            .input_path
+            .expect("sidecar input file should be created");
+        assert!(input_path.ends_with("round-001-claude-review-input.md"));
+        assert_eq!(fs::read_to_string(&input_path).unwrap(), long_input);
+        assert!(prepared
+            .stdin_text
+            .contains("round-001-claude-review-input.md"));
+        let _ = fs::remove_dir_all(&session_dir);
+    }
+
+    #[test]
+    fn gemini_sidecar_input_is_delivered_through_prompt_arg() {
+        let prepared = PreparedAgentInput {
+            stdin_text: "Leia integralmente o arquivo local `large-input.md`.".to_string(),
+            original_chars: 60_000,
+            input_path: Some(PathBuf::from("large-input.md")),
+        };
+
+        let effective = effective_agent_input("gemini", gemini_args(), &prepared);
+        let prompt_index = effective
+            .args
+            .iter()
+            .position(|arg| arg == "--prompt")
+            .expect("gemini args should include --prompt");
+
+        assert_eq!(
+            effective.args.get(prompt_index + 1),
+            Some(&prepared.stdin_text)
+        );
+        assert!(effective.stdin_text.is_none());
+        assert_eq!(effective.stdin_chars, 0);
+        assert_eq!(effective.delivery, "prompt_arg_sidecar");
+    }
+
+    #[test]
+    fn non_gemini_sidecar_input_stays_on_stdin() {
+        let prepared = PreparedAgentInput {
+            stdin_text: "Leia integralmente o arquivo local `large-input.md`.".to_string(),
+            original_chars: 60_000,
+            input_path: Some(PathBuf::from("large-input.md")),
+        };
+
+        let effective = effective_agent_input("claude", claude_args(), &prepared);
+
+        assert_eq!(
+            effective.stdin_text.as_deref(),
+            Some(prepared.stdin_text.as_str())
+        );
+        assert_eq!(effective.stdin_chars, prepared.stdin_text.chars().count());
+        assert_eq!(effective.delivery, "stdin_sidecar");
+    }
+
+    #[test]
+    fn cloudflare_page_path_preserves_existing_query_parameters() {
+        assert_eq!(
+            cloudflare_page_path("/accounts/abc/secrets_store/stores/xyz/secrets", 2, 50),
+            "/accounts/abc/secrets_store/stores/xyz/secrets?page=2&per_page=50"
+        );
+        assert_eq!(
+            cloudflare_page_path("/accounts/abc/d1/database?name=maestro", 3, 100),
+            "/accounts/abc/d1/database?name=maestro&page=3&per_page=100"
+        );
     }
 
     #[test]

@@ -4,6 +4,16 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.10] - 2026-04-28
+
+- Fixed broken/paused session display overflow by making the app shell viewport-bound, moving page overflow to the workspace, bounding all repeated status lists, and summarizing agent history instead of rendering every historical agent result as visible UI.
+- Made visible session logs more human-readable: the UI now shows a concise latest-round summary while the detailed NDJSON and agent artifacts remain technical for diagnosis.
+- Changed the editorial orchestrator so review operational failures no longer end the session as paused; they are logged, fed into the next revision attempt, and the cycle continues until unanimous READY.
+- Kept sessions running when no revision agent produces a usable draft by retrying the next review round with the current draft instead of returning a blocked result.
+- Reduced CLI pipe failures on very large rounds by writing oversized agent prompts to ignored sidecar input files in `data/sessions/<run>/agent-runs/` and sending the CLIs a compact instruction to read the local file.
+- Reduced revision-prompt bloat by passing useful review stdout excerpts instead of whole diagnostic artifacts.
+- Fixed Cloudflare Secrets Store upsert when a provider secret already exists beyond the first paginated API page, and added a retry path for `secret_name_already_exists`.
+
 ## [v0.3.9] - 2026-04-28
 
 - Fixed Cloudflare API credential persistence so `credential_storage_mode=cloudflare` writes AI provider keys to Cloudflare Secrets Store and stores only non-secret markers/metadata locally and in D1.

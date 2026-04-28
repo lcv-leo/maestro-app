@@ -109,6 +109,14 @@ Every CLI adapter must produce this internal record before a peer response can e
 }
 ```
 
+Large prompt handling:
+
+- Inline stdin is allowed only while the prompt bundle stays below Maestro's safe inline threshold.
+- For oversized review or revision bundles, Maestro writes the full bundle to an ignored `*-input.md` sidecar file inside `data/sessions/<run>/agent-runs/` and sends the CLI a compact instruction to read that file completely before answering.
+- The sidecar file is a runtime artifact, never a Git artifact.
+- Agent artifacts record compact stdin size, original prompt size, and the sidecar path so support logs remain understandable without copying a very large prompt into the UI.
+- If a CLI exits without output because of a transient pipe, auth, or provider failure, Maestro logs the operational failure and retries through the next review/revision cycle; it must not publish a final text without unanimous READY.
+
 Raw stdout, stderr, prompts, and transcripts are ignored runtime artifacts. The UI receives only sanitized summaries.
 
 ## Hard Gates Before Real Adapter Implementation

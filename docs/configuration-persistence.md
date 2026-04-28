@@ -136,6 +136,7 @@ Important Secrets Store constraint:
 - Maestro must treat Cloudflare secret reads as metadata/status reads only.
 - If a later workflow needs to use a provider API key without keeping it locally, it must run through a Cloudflare-side broker or another Cloudflare product that can consume the secret securely.
 - If a local CLI/API adapter needs the raw value, the operator must provide it for that local session or choose JSON/env-var persistence instead.
+- Secret upsert must list Secrets Store entries with pagination and tolerate `secret_name_already_exists` by re-listing and patching the existing secret metadata/value reference instead of failing the whole save operation.
 
 API policy:
 

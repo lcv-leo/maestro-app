@@ -473,6 +473,70 @@ function humanizeRole(role: string) {
   return 'Atividade';
 }
 
+function agentStateFromTone(tone: EditorialAgentResult['tone']): AgentState {
+  if (tone === 'ok') return 'ready';
+  if (tone === 'warn') return 'evidence';
+  return 'blocked';
+}
+
+function agentResultRank(agent: EditorialAgentResult) {
+  const match = agent.output_path.match(/round-(\d{3})-/i);
+  const round = match ? Number.parseInt(match[1], 10) : 0;
+  const roleRank = agent.role === 'review' ? 3 : agent.role === 'revision' ? 2 : agent.role === 'draft' ? 1 : 0;
+  return round * 10 + roleRank;
+}
+
+function latestAgentResults(agents: EditorialAgentResult[]) {
+  const byName = new Map<string, EditorialAgentResult>();
+  for (const agent of agents) {
+    const current = byName.get(agent.name);
+    if (!current || agentResultRank(agent) >= agentResultRank(current)) {
+      byName.set(agent.name, agent);
+    }
+  }
+  return ['Claude', 'Codex', 'Gemini']
+    .map((name) => byName.get(name))
+    .filter((agent): agent is EditorialAgentResult => Boolean(agent));
+}
+
+function latestAgentCards(agents: EditorialAgentResult[]): AgentCard[] {
+  return latestAgentResults(agents).map((agent) => ({
+    name: agent.name,
+    cli: agent.cli,
+    state: agentStateFromTone(agent.tone),
+    note: `${humanizeRole(agent.role)}: ${humanizeAgentStatus(agent.status)}; ${formatElapsedTime(
+      Math.round(agent.duration_ms / 1000),
+    )}`,
+  }));
+}
+
+function latestProtocolGateItems(agents: EditorialAgentResult[]): ProtocolReadingGate[] {
+  return latestAgentResults(agents).map((agent) => ({
+    agent: agent.name,
+    progress: agent.tone === 'ok' ? 100 : agent.tone === 'warn' ? 70 : 35,
+    status: agent.tone === 'ok' ? 'Protocolo lido na ultima rodada' : humanizeAgentStatus(agent.status),
+  }));
+}
+
+function countAgentRounds(agents: EditorialAgentResult[]) {
+  return new Set(
+    agents
+      .map((agent) => agent.output_path.match(/round-(\d{3})-/i)?.[1])
+      .filter((round): round is string => Boolean(round)),
+  ).size;
+}
+
+function summarizeAgentResults(agents: EditorialAgentResult[]) {
+  const rounds = countAgentRounds(agents);
+  const latest = latestAgentResults(agents);
+  const latestText = latest.map((agent) => `${agent.name}: ${humanizeAgentStatus(agent.status)}`).join('; ');
+  const failures = agents.filter((agent) => agent.tone === 'error' || agent.tone === 'blocked').length;
+  const failureText = failures
+    ? ` ${failures.toLocaleString('pt-BR')} falha(s) operacional(is) registrada(s) no diagnostico.`
+    : '';
+  return `${rounds.toLocaleString('pt-BR')} rodada(s) registradas. Ultimo estado: ${latestText || 'sem avaliacao registrada'}.${failureText}`;
+}
+
 export function App() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [protocol, setProtocol] = useState<ProtocolSnapshot>({
@@ -1022,12 +1086,6 @@ export function App() {
     event.target.value = '';
   }
 
-  function agentStateFromTone(tone: EditorialAgentResult['tone']): AgentState {
-    if (tone === 'ok') return 'ready';
-    if (tone === 'warn') return 'evidence';
-    return 'blocked';
-  }
-
   function formatSessionActivity(session: ResumableSessionInfo) {
     if (!session.last_activity_unix) return 'sem data registrada';
     return formatBrazilDateTime(session.last_activity_unix * 1000);
@@ -1454,30 +1512,17 @@ export function App() {
           });
       window.clearInterval(heartbeat);
       setLastSessionMinutesPath(result.session_minutes_path);
-      const nextAgentCards = result.agents.map((agent) => ({
-        name: agent.name,
-        cli: agent.cli,
-        state: agentStateFromTone(agent.tone),
-        note: `${humanizeRole(agent.role)}: ${humanizeAgentStatus(agent.status)}; ${formatElapsedTime(
-          Math.round(agent.duration_ms / 1000),
-        )}`,
-      }));
+      const nextAgentCards = latestAgentCards(result.agents);
       setAgentCards([
         ...nextAgentCards,
         {
           name: 'Maestro',
           cli: 'motor local',
           state: result.consensus_ready ? 'ready' : 'evidence',
-          note: result.consensus_ready ? 'unanimidade registrada' : 'sessao pausada sem entrega final',
+          note: result.consensus_ready ? 'unanimidade registrada' : 'aguardando continuidade da sessao',
         },
       ]);
-      setProtocolGateItems(
-        result.agents.map((agent) => ({
-          agent: agent.name,
-          progress: agent.tone === 'ok' ? 100 : agent.tone === 'warn' ? 60 : 0,
-          status: agent.tone === 'ok' ? 'Protocolo lido nesta rodada' : humanizeAgentStatus(agent.status),
-        })),
-      );
+      setProtocolGateItems(latestProtocolGateItems(result.agents));
       setEvidenceRows([
         { label: 'DOI', value: 'revisado pelos agentes', tone: result.consensus_ready ? 'ok' : 'warn' },
         { label: 'Links', value: 'exige motor mecanico dedicado', tone: 'warn' },
@@ -1499,9 +1544,9 @@ export function App() {
         ...current,
       ]);
       appendActivity({
-        level: 'summary',
+        level: result.consensus_ready ? 'summary' : 'detail',
         title: result.consensus_ready ? 'Texto final liberado' : 'Sessao pausada',
-        detail: result.agents.map((agent) => `${agent.name}: ${humanizeAgentStatus(agent.status)}`).join('; '),
+        detail: summarizeAgentResults(result.agents),
       });
 
       if (result.consensus_ready) {

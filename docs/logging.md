@@ -12,7 +12,11 @@ During early development the logs are intentionally detailed. They should make U
 
 CLI agents run silently in background. On Windows release builds, child processes are created without visible terminal windows. The UI shows synthesized status, elapsed-time heartbeat progress, and blockers; it does not expose raw terminal output as the normal operator experience. Detailed CLI lifecycle events, sanitized command metadata, parsed statuses, exit codes, durations, timeout policy, and artifact paths belong in structured logs so they can be analyzed without forcing the operator to read terminal transcripts.
 
+The operator-facing interface must stay human-readable. Long diagnostic histories are summarized as latest-round status, elapsed time, and clear next state; repeated rows scroll inside bounded panels instead of stretching the full window. Technical names such as `session.agent.finished`, exit codes, stdout/stderr byte counters, and raw artifact paths remain in NDJSON and session files for support analysis.
+
 Raw prompts, full protocol text, stdout, and stderr are written to ignored session artifacts under `data/sessions/<run>/`. The NDJSON points to those artifacts and keeps only safe summaries.
+
+When a prompt bundle is too large for reliable stdin delivery, Maestro writes an ignored sidecar file beside the agent artifact, such as `round-072-codex-review-input.md`, and sends the CLI a compact instruction to read that local file. Logs record both compact stdin size and original prompt size so pipe failures can be diagnosed without exposing the full prompt in NDJSON.
 
 First-run bootstrap events use the same logging policy. Dependency scans, install plans, background installer exit codes, authentication handoffs, and post-install probes must be captured as structured events with secrets redacted.
 

@@ -877,6 +877,11 @@ button:disabled {
 .activity-feed {
   display: grid;
   gap: 8px;
+  max-height: min(36vh, 360px);
+  overflow-y: auto;
+  padding-right: 4px;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .activity-row {

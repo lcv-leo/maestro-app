@@ -4,7 +4,7 @@ use reqwest::{blocking::Client, redirect::Policy, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
     io::{Read, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
@@ -51,6 +51,15 @@ struct AiProviderConfig {
     anthropic_api_key: Option<String>,
     gemini_api_key: Option<String>,
     updated_at: String,
+}
+
+#[derive(Clone, Deserialize)]
+struct CloudflareProviderStorageRequest {
+    account_id: String,
+    api_token: Option<String>,
+    api_token_env_var: String,
+    persistence_database: String,
+    secret_store: String,
 }
 
 #[derive(Serialize)]
@@ -452,23 +461,43 @@ fn write_bootstrap_config(config: BootstrapConfig) -> Result<BootstrapConfig, St
 fn read_ai_provider_config() -> Result<AiProviderConfig, String> {
     let path = checked_data_child_path(&ai_provider_config_path())?;
     if !path.exists() {
-        let config = AiProviderConfig::default();
+        let config = AiProviderConfig {
+            credential_storage_mode: read_bootstrap_config()
+                .map(|config| config.credential_storage_mode)
+                .unwrap_or_else(|_| "local_json".to_string()),
+            ..AiProviderConfig::default()
+        };
         persist_ai_provider_config(&path, &config)?;
         return Ok(config);
     }
 
     let text = fs::read_to_string(&path)
         .map_err(|error| format!("failed to read AI provider config: {error}"))?;
-    let config: AiProviderConfig = serde_json::from_str(&text)
+    let mut config: AiProviderConfig = serde_json::from_str(&text)
         .map_err(|error| format!("failed to parse AI provider config: {error}"))?;
+    if let Ok(bootstrap) = read_bootstrap_config() {
+        config.credential_storage_mode =
+            normalize_storage_mode(&bootstrap.credential_storage_mode).to_string();
+    }
     Ok(sanitize_ai_provider_config(config))
 }
 
 #[tauri::command]
-fn write_ai_provider_config(config: AiProviderConfig) -> Result<AiProviderConfig, String> {
+fn write_ai_provider_config(
+    config: AiProviderConfig,
+    cloudflare: Option<CloudflareProviderStorageRequest>,
+) -> Result<AiProviderConfig, String> {
     let path = ai_provider_config_path();
     let sanitized = sanitize_ai_provider_config(config);
-    persist_ai_provider_config(&path, &sanitized)?;
+    if sanitized.credential_storage_mode == "cloudflare" {
+        let cloudflare = cloudflare.ok_or_else(|| {
+            "configuracao Cloudflare ausente para salvar APIs no Secrets Store".to_string()
+        })?;
+        persist_ai_provider_config_to_cloudflare(&sanitized, &cloudflare)?;
+        persist_ai_provider_cloudflare_marker(&path, &sanitized)?;
+    } else {
+        persist_ai_provider_config(&path, &sanitized)?;
+    }
     Ok(sanitized)
 }
 
@@ -1282,6 +1311,69 @@ fn persist_ai_provider_config(path: &PathBuf, config: &AiProviderConfig) -> Resu
     fs::write(&path, bytes).map_err(|error| format!("failed to write AI provider config: {error}"))
 }
 
+fn persist_ai_provider_cloudflare_marker(
+    path: &PathBuf,
+    config: &AiProviderConfig,
+) -> Result<(), String> {
+    let marker = AiProviderConfig {
+        schema_version: config.schema_version,
+        provider_mode: config.provider_mode.clone(),
+        credential_storage_mode: "cloudflare".to_string(),
+        openai_api_key: None,
+        anthropic_api_key: None,
+        gemini_api_key: None,
+        updated_at: config.updated_at.clone(),
+    };
+    persist_ai_provider_config(path, &marker)
+}
+
+fn persist_ai_provider_config_to_cloudflare(
+    config: &AiProviderConfig,
+    request: &CloudflareProviderStorageRequest,
+) -> Result<(), String> {
+    let token = cloudflare_token_from_provider_request(request)?;
+    let account_id = sanitize_short(request.account_id.trim(), 80);
+    if account_id.is_empty() {
+        return Err("Account ID da Cloudflare ausente".to_string());
+    }
+
+    let persistence_database = sanitize_short(&request.persistence_database, 80);
+    if persistence_database.is_empty() {
+        return Err("nome do banco D1 de persistencia ausente".to_string());
+    }
+
+    let requested_store_name = sanitize_short(&request.secret_store, 80);
+    if requested_store_name.is_empty() {
+        return Err("nome do Secrets Store ausente".to_string());
+    }
+
+    let client = cloudflare_client()?;
+    let database_id =
+        ensure_cloudflare_d1_database(&client, &token, &account_id, &persistence_database)?;
+    let store = ensure_cloudflare_secret_store(
+        &client,
+        &token,
+        &account_id,
+        &requested_store_name,
+        Some(&database_id),
+    )?;
+
+    let secrets = ai_provider_secret_values(config);
+    let secret_records =
+        upsert_ai_provider_secrets(&client, &token, &account_id, &store, &secrets)?;
+
+    write_ai_provider_metadata_to_cloudflare(
+        &client,
+        &token,
+        &account_id,
+        &database_id,
+        config,
+        &requested_store_name,
+        &store,
+        &secret_records,
+    )
+}
+
 fn normalize_storage_mode(value: &str) -> &'static str {
     match value {
         "windows_env" => "windows_env",
@@ -2006,7 +2098,10 @@ fn parse_agent_artifact_result(artifact: &SessionArtifact) -> Option<EditorialAg
         "ok"
     } else if status == "CLI_NOT_FOUND" {
         "blocked"
-    } else if status.starts_with("EXEC_ERROR") {
+    } else if status.starts_with("EXEC_ERROR")
+        || status == "AGENT_FAILED_NO_OUTPUT"
+        || status == "RUNNING"
+    {
         "error"
     } else {
         "warn"
@@ -2502,7 +2597,11 @@ fn run_editorial_agent(
             let stderr = String::from_utf8_lossy(&result.output.stderr).to_string();
             let exit_code = result.output.status.code();
             let status = if role == "review" {
-                extract_maestro_status(&stdout).unwrap_or("NOT_READY")
+                if !result.output.status.success() && stdout.trim().is_empty() {
+                    "AGENT_FAILED_NO_OUTPUT"
+                } else {
+                    extract_maestro_status(&stdout).unwrap_or("NOT_READY")
+                }
             } else if stdout.trim().is_empty() {
                 "EMPTY_DRAFT"
             } else {
@@ -2519,8 +2618,13 @@ fn run_editorial_agent(
             } else {
                 "error"
             };
+            let note = if status == "AGENT_FAILED_NO_OUTPUT" {
+                "\n> O agente encerrou sem entregar avaliacao editorial em stdout. Este arquivo e diagnostico operacional, nao parecer de revisao.\n"
+            } else {
+                ""
+            };
             let artifact = format!(
-                "# {name} - {role}\n\n- CLI: `{command}`\n- Resolved path: `{}`\n- Args: `{}`\n- Status: `{status}`\n- Exit code: `{}`\n- Duration ms: `{}`\n- Timed out: `{}`\n- Stdin chars: `{}`\n- Stdout chars: `{}`\n- Stderr chars: `{}`\n\n## Stdout\n\n```text\n{}\n```\n\n## Stderr\n\n```text\n{}\n```\n",
+                "# {name} - {role}\n\n- CLI: `{command}`\n- Resolved path: `{}`\n- Args: `{}`\n- Status: `{status}`\n- Exit code: `{}`\n- Duration ms: `{}`\n- Timed out: `{}`\n- Stdin chars: `{}`\n- Stdout chars: `{}`\n- Stderr chars: `{}`\n{note}\n## Stdout\n\n```text\n{}\n```\n\n## Stderr\n\n```text\n{}\n```\n",
                 path.to_string_lossy(),
                 sanitize_text(&args.join(" "), 1000),
                 exit_code
@@ -2787,13 +2891,77 @@ fn build_session_minutes(
     }
 
     if !consensus_ready {
-        text.push_str(
-            "\n## Decisao\n\nTexto final indisponivel nesta chamada. A regra permanece: divergencia editorial exige novas rodadas ate unanimidade; falha operacional exige retry ou intervencao do operador antes de qualquer entrega final.\n",
-        );
+        text.push_str("\n## Decisao\n\n");
+        text.push_str(&build_blocked_minutes_decision(agents));
     } else {
         text.push_str("\n## Decisao\n\nTexto final liberado por unanimidade trilateral.\n");
     }
 
+    text
+}
+
+fn build_blocked_minutes_decision(agents: &[EditorialAgentResult]) -> String {
+    let review_agents = agents
+        .iter()
+        .filter(|agent| agent.role == "review")
+        .collect::<Vec<_>>();
+    let ready_reviews = review_agents
+        .iter()
+        .filter(|agent| agent.status == "READY")
+        .count();
+    let operational_failures = agents
+        .iter()
+        .filter(|agent| {
+            agent.tone == "error"
+                || agent.tone == "blocked"
+                || agent.status == "RUNNING"
+                || agent.status == "AGENT_FAILED_NO_OUTPUT"
+                || agent.status.starts_with("EXEC_ERROR")
+        })
+        .collect::<Vec<_>>();
+    let editorial_divergences = review_agents
+        .iter()
+        .filter(|agent| agent.status != "READY" && agent.tone != "error" && agent.tone != "blocked")
+        .collect::<Vec<_>>();
+
+    let mut text = format!(
+        "Texto final indisponivel nesta chamada.\n\n- Revisoes READY registradas: {ready_reviews}/{}.\n- Falhas operacionais detectadas: {}.\n- Divergencias editoriais ainda abertas: {}.\n",
+        review_agents.len(),
+        operational_failures.len(),
+        editorial_divergences.len()
+    );
+
+    if !operational_failures.is_empty() {
+        text.push_str("\n### Falhas operacionais\n\n");
+        for agent in operational_failures.iter().rev().take(8) {
+            text.push_str(&format!(
+                "- **{} / {}**: `{}` (`{}`), exit code `{}`, artifact: `{}`\n",
+                agent.name,
+                agent.role,
+                agent.status,
+                agent.tone,
+                agent
+                    .exit_code
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                agent.output_path
+            ));
+        }
+    }
+
+    if !editorial_divergences.is_empty() {
+        text.push_str("\n### Divergencias editoriais\n\n");
+        for agent in editorial_divergences.iter().rev().take(8) {
+            text.push_str(&format!(
+                "- **{} / {}**: `{}` (`{}`), artifact: `{}`\n",
+                agent.name, agent.role, agent.status, agent.tone, agent.output_path
+            ));
+        }
+    }
+
+    text.push_str(
+        "\nA regra permanece: divergencia editorial exige novas rodadas ate unanimidade; falha operacional exige retry ou intervencao do operador antes de qualquer entrega final.\n",
+    );
     text
 }
 
@@ -3657,6 +3825,53 @@ fn cloudflare_post_json(
     }
 }
 
+fn cloudflare_patch_json(
+    client: &Client,
+    token: &str,
+    path: &str,
+    body: Value,
+) -> Result<Value, String> {
+    let url = format!("https://api.cloudflare.com/client/v4{path}");
+    let response = client
+        .patch(url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .map_err(|error| format!("falha HTTP: {error}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|error| format!("falha ao ler resposta Cloudflare: {error}"))?;
+    let value: Value = serde_json::from_str(&body).map_err(|error| {
+        format!(
+            "resposta Cloudflare invalida (HTTP {}): {}",
+            status.as_u16(),
+            sanitize_text(&error.to_string(), 120)
+        )
+    })?;
+    let success = value
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| status.is_success());
+
+    if status.is_success() && success {
+        Ok(value)
+    } else {
+        Err(cloudflare_error_summary(status.as_u16(), &value))
+    }
+}
+
+fn cloudflare_client() -> Result<Client, String> {
+    Client::builder()
+        .timeout(Duration::from_secs(30))
+        .user_agent(format!(
+            "Maestro Editorial AI/{}",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .build()
+        .map_err(|error| format!("cliente HTTP Cloudflare falhou: {error}"))
+}
+
 fn cloudflare_verify_path(token: &str, account_id: &str) -> String {
     if token.starts_with("cfat_") && !account_id.is_empty() {
         format!("/accounts/{account_id}/tokens/verify")
@@ -3769,6 +3984,263 @@ fn cloudflare_store_records(value: &Value) -> Vec<CloudflareStoreRecord> {
             })
         })
         .collect()
+}
+
+fn cloudflare_token_from_provider_request(
+    request: &CloudflareProviderStorageRequest,
+) -> Result<String, String> {
+    if let Some(token) = request
+        .api_token
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(token);
+    }
+
+    let requested_env = request.api_token_env_var.trim();
+    if !requested_env.is_empty() {
+        if let Some((_, value)) = env_value_with_scope(requested_env) {
+            return Ok(value);
+        }
+    }
+
+    first_env_value(&[
+        "MAESTRO_CLOUDFLARE_API_TOKEN",
+        "CLOUDFLARE_API_TOKEN",
+        "CF_API_TOKEN",
+    ])
+    .map(|(_, _, value)| value)
+    .ok_or_else(|| "token Cloudflare ausente: informe no campo ou em env var".to_string())
+}
+
+fn ensure_cloudflare_d1_database(
+    client: &Client,
+    token: &str,
+    account_id: &str,
+    database_name: &str,
+) -> Result<String, String> {
+    let d1_path = format!("/accounts/{account_id}/d1/database");
+    let listed = cloudflare_get(client, token, &d1_path)?;
+    if let Some(database_id) = cloudflare_result_id_for_name(&listed, database_name) {
+        provision_maestro_d1_schema(client, token, account_id, &database_id)?;
+        return Ok(database_id);
+    }
+
+    let created = cloudflare_post_json(client, token, &d1_path, json!({ "name": database_name }))?;
+    let database_id = cloudflare_created_result_id(&created)
+        .or_else(|| cloudflare_result_id_for_name(&listed, database_name))
+        .ok_or_else(|| "Cloudflare criou/listou D1 sem retornar id da base".to_string())?;
+    provision_maestro_d1_schema(client, token, account_id, &database_id)?;
+    Ok(database_id)
+}
+
+fn ensure_cloudflare_secret_store(
+    client: &Client,
+    token: &str,
+    account_id: &str,
+    requested_store_name: &str,
+    database_id: Option<&str>,
+) -> Result<CloudflareStoreRecord, String> {
+    let stores_path = format!("/accounts/{account_id}/secrets_store/stores");
+    let listed = cloudflare_get(client, token, &stores_path)?;
+    if let Some(store) = cloudflare_store_for_target_or_existing(&listed, requested_store_name) {
+        let _ = link_secret_store_reference(
+            client,
+            token,
+            account_id,
+            database_id,
+            requested_store_name,
+            &store.name,
+            &store.id,
+        );
+        return Ok(store);
+    }
+
+    let created = cloudflare_post_json(
+        client,
+        token,
+        &stores_path,
+        json!({ "name": requested_store_name }),
+    )?;
+    let store = CloudflareStoreRecord {
+        name: requested_store_name.to_string(),
+        id: cloudflare_created_result_id(&created)
+            .ok_or_else(|| "Cloudflare criou Secrets Store sem retornar id".to_string())?,
+    };
+    let _ = link_secret_store_reference(
+        client,
+        token,
+        account_id,
+        database_id,
+        requested_store_name,
+        &store.name,
+        &store.id,
+    );
+    Ok(store)
+}
+
+fn ai_provider_secret_values(config: &AiProviderConfig) -> BTreeMap<&'static str, String> {
+    let mut values = BTreeMap::new();
+    if let Some(value) = config.openai_api_key.as_ref() {
+        values.insert("MAESTRO_OPENAI_API_KEY", value.clone());
+    }
+    if let Some(value) = config.anthropic_api_key.as_ref() {
+        values.insert("MAESTRO_ANTHROPIC_API_KEY", value.clone());
+    }
+    if let Some(value) = config.gemini_api_key.as_ref() {
+        values.insert("MAESTRO_GEMINI_API_KEY", value.clone());
+    }
+    values
+}
+
+fn upsert_ai_provider_secrets(
+    client: &Client,
+    token: &str,
+    account_id: &str,
+    store: &CloudflareStoreRecord,
+    secrets: &BTreeMap<&'static str, String>,
+) -> Result<Vec<Value>, String> {
+    let listed = cloudflare_get(
+        client,
+        token,
+        &format!(
+            "/accounts/{account_id}/secrets_store/stores/{}/secrets",
+            store.id
+        ),
+    )?;
+    let existing = cloudflare_secret_ids_by_name(&listed);
+    let mut records = Vec::new();
+
+    for (name, value) in secrets {
+        let comment = format!("Maestro Editorial AI provider credential: {name}");
+        let response = if let Some(secret_id) = existing.get(*name) {
+            cloudflare_patch_json(
+                client,
+                token,
+                &format!(
+                    "/accounts/{account_id}/secrets_store/stores/{}/secrets/{secret_id}",
+                    store.id
+                ),
+                json!({
+                    "value": value,
+                    "scopes": ["workers", "ai_gateway"],
+                    "comment": comment
+                }),
+            )
+        } else {
+            cloudflare_post_json(
+                client,
+                token,
+                &format!(
+                    "/accounts/{account_id}/secrets_store/stores/{}/secrets",
+                    store.id
+                ),
+                json!([{
+                    "name": name,
+                    "value": value,
+                    "scopes": ["workers", "ai_gateway"],
+                    "comment": comment
+                }]),
+            )
+        }?;
+
+        let secret_id = cloudflare_secret_id_from_response(&response)
+            .or_else(|| existing.get(*name).cloned())
+            .unwrap_or_else(|| "id-nao-retornado".to_string());
+        records.push(json!({
+            "name": name,
+            "secret_id": secret_id,
+            "store_id": store.id,
+            "store_name": store.name,
+            "updated_at": Utc::now().to_rfc3339()
+        }));
+    }
+
+    Ok(records)
+}
+
+fn cloudflare_secret_ids_by_name(value: &Value) -> BTreeMap<String, String> {
+    value
+        .get("result")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flat_map(|items| items.iter())
+        .filter_map(|item| {
+            let name = item.get("name").and_then(Value::as_str)?;
+            let id = item.get("id").and_then(Value::as_str)?;
+            Some((name.to_string(), id.to_string()))
+        })
+        .collect()
+}
+
+fn cloudflare_secret_id_from_response(value: &Value) -> Option<String> {
+    value
+        .get("result")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("id").and_then(Value::as_str))
+        .or_else(|| value.pointer("/result/id").and_then(Value::as_str))
+        .map(|id| id.to_string())
+}
+
+fn write_ai_provider_metadata_to_cloudflare(
+    client: &Client,
+    token: &str,
+    account_id: &str,
+    database_id: &str,
+    config: &AiProviderConfig,
+    requested_store_name: &str,
+    store: &CloudflareStoreRecord,
+    secret_records: &[Value],
+) -> Result<(), String> {
+    let raw_path = format!("/accounts/{account_id}/d1/database/{database_id}/raw");
+    let updated_at = Utc::now().to_rfc3339();
+    let metadata = json!({
+        "schema_version": 1,
+        "provider_mode": config.provider_mode,
+        "credential_storage_mode": "cloudflare",
+        "requested_store_name": requested_store_name,
+        "effective_store_name": store.name,
+        "effective_store_id": store.id,
+        "secrets": secret_records,
+        "updated_at": updated_at
+    });
+
+    cloudflare_post_json(
+        client,
+        token,
+        &raw_path,
+        json!({
+            "sql": "INSERT OR REPLACE INTO maestro_settings (key, value_json, updated_at) VALUES (?, ?, ?)",
+            "params": ["ai.providers", metadata.to_string(), updated_at]
+        }),
+    )?;
+
+    for record in secret_records {
+        let Some(name) = record.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let store_id = record
+            .get("store_id")
+            .and_then(Value::as_str)
+            .unwrap_or(&store.id);
+        let secret_id = record
+            .get("secret_id")
+            .and_then(Value::as_str)
+            .unwrap_or("id-nao-retornado");
+        cloudflare_post_json(
+            client,
+            token,
+            &raw_path,
+            json!({
+                "sql": "INSERT OR REPLACE INTO maestro_secret_refs (name, store_id, secret_id, updated_at) VALUES (?, ?, ?, ?)",
+                "params": [name, store_id, secret_id, updated_at]
+            }),
+        )?;
+    }
+
+    Ok(())
 }
 
 fn link_secret_store_reference(
@@ -4393,6 +4865,105 @@ mod tests {
         assert_eq!(config.openai_api_key.as_deref(), Some("sk-test-value"));
         assert!(config.anthropic_api_key.is_none());
         assert!(config.gemini_api_key.is_none());
+    }
+
+    #[test]
+    fn cloudflare_ai_provider_marker_does_not_store_secret_values_locally() {
+        let config = sanitize_ai_provider_config(AiProviderConfig {
+            schema_version: 1,
+            provider_mode: "api".to_string(),
+            credential_storage_mode: "cloudflare".to_string(),
+            openai_api_key: Some("sk-test-value".to_string()),
+            anthropic_api_key: Some("sk-ant-test-value".to_string()),
+            gemini_api_key: Some("AIza-test-value".to_string()),
+            updated_at: "old".to_string(),
+        });
+        let path = config_dir().join("ai-provider-cloudflare-marker-test.json");
+        let _ = fs::remove_file(&path);
+
+        persist_ai_provider_cloudflare_marker(&path, &config).unwrap();
+
+        let text = fs::read_to_string(checked_data_child_path(&path).unwrap()).unwrap();
+        assert!(text.contains("\"credential_storage_mode\": \"cloudflare\""));
+        assert!(!text.contains("sk-test-value"));
+        assert!(!text.contains("sk-ant-test-value"));
+        assert!(!text.contains("AIza-test-value"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn ai_provider_secret_values_use_cloudflare_safe_names() {
+        let config = sanitize_ai_provider_config(AiProviderConfig {
+            schema_version: 1,
+            provider_mode: "api".to_string(),
+            credential_storage_mode: "cloudflare".to_string(),
+            openai_api_key: Some("sk-test-value".to_string()),
+            anthropic_api_key: None,
+            gemini_api_key: Some("AIza-test-value".to_string()),
+            updated_at: "old".to_string(),
+        });
+
+        let values = ai_provider_secret_values(&config);
+
+        assert_eq!(values.len(), 2);
+        assert!(values.contains_key("MAESTRO_OPENAI_API_KEY"));
+        assert!(values.contains_key("MAESTRO_GEMINI_API_KEY"));
+        assert!(!values.contains_key("MAESTRO_ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn nonzero_empty_review_output_is_operational_failure_not_editorial_not_ready() {
+        let session_dir = sessions_dir().join("run-empty-review-artifact-test");
+        let _ = fs::remove_dir_all(&session_dir);
+        let agent_dir = session_dir.join("agent-runs");
+        fs::create_dir_all(&agent_dir).unwrap();
+        let path = agent_dir.join("round-001-claude-review.md");
+        write_text_file(
+            &path,
+            "# Claude - review\n\n- CLI: `claude`\n- Status: `AGENT_FAILED_NO_OUTPUT`\n- Exit code: `1`\n- Duration ms: `42`\n\n## Stdout\n\n```text\n\n```\n",
+        )
+        .unwrap();
+
+        let artifact = parse_agent_artifact_name(&agent_dir, "round-001-claude-review.md")
+            .expect("artifact should parse");
+        let parsed = parse_agent_artifact_result(&artifact).expect("artifact result should parse");
+
+        assert_eq!(parsed.status, "AGENT_FAILED_NO_OUTPUT");
+        assert_eq!(parsed.tone, "error");
+        let _ = fs::remove_dir_all(&session_dir);
+    }
+
+    #[test]
+    fn blocked_minutes_decision_names_operational_failure() {
+        let agents = vec![
+            EditorialAgentResult {
+                name: "Claude".to_string(),
+                role: "review".to_string(),
+                cli: "claude".to_string(),
+                tone: "error".to_string(),
+                status: "AGENT_FAILED_NO_OUTPUT".to_string(),
+                duration_ms: 42,
+                exit_code: Some(1),
+                output_path: "agent-runs/round-001-claude-review.md".to_string(),
+            },
+            EditorialAgentResult {
+                name: "Gemini".to_string(),
+                role: "review".to_string(),
+                cli: "gemini".to_string(),
+                tone: "warn".to_string(),
+                status: "NOT_READY".to_string(),
+                duration_ms: 84,
+                exit_code: Some(0),
+                output_path: "agent-runs/round-001-gemini-review.md".to_string(),
+            },
+        ];
+
+        let decision = build_blocked_minutes_decision(&agents);
+
+        assert!(decision.contains("Falhas operacionais"));
+        assert!(decision.contains("AGENT_FAILED_NO_OUTPUT"));
+        assert!(decision.contains("Divergencias editoriais"));
+        assert!(decision.contains("NOT_READY"));
     }
 
     #[test]

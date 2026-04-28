@@ -1,3 +1,7 @@
+<p align="center">
+  <img src=".github/assets/lcv-ideas-software-logo.svg" alt="LCV Ideas &amp; Software" width="220">
+</p>
+
 # Maestro Editorial AI
 
 Portable Windows editorial workbench for protocol-driven AI drafting, source verification, and multi-agent editorial convergence.
@@ -15,7 +19,7 @@ Portable Windows editorial workbench for protocol-driven AI drafting, source ver
 
 Status: functional alpha with live bootstrap, diagnostics, navigation, Cloudflare credential provisioning, AI API credential checks, PostEditor parity, link auditing, and a real background Claude/Codex/Gemini editorial session path.
 
-Current project version: `v0.3.8`.
+Current project version: `v0.3.9`.
 
 Maestro is independent from `cross-review-mcp`; it incorporates the same strict convergence discipline in its own application logic. It is designed to run from a folder, keep runtime data out of Git, and store operator protocols, drafts, evidence, and sessions locally under ignored runtime paths.
 

@@ -130,6 +130,14 @@ type CloudflareProbeResult = {
   rows: CloudflarePermissionRow[];
 };
 
+type CloudflareProviderStorageRequest = {
+  account_id: string;
+  api_token: string | null;
+  api_token_env_var: string;
+  persistence_database: string;
+  secret_store: string;
+};
+
 type AiProviderConfig = {
   schema_version: number;
   provider_mode: ProviderMode;
@@ -873,6 +881,23 @@ export function App() {
     };
   }
 
+  function buildCloudflareProviderStorageRequest(): CloudflareProviderStorageRequest {
+    return {
+      account_id: cloudflareAccountId.trim() || cloudflareEnvSnapshot?.account_id || '',
+      api_token: cloudflareApiToken.trim() || null,
+      api_token_env_var:
+        cloudflareTokenEnvVar.trim() || cloudflareEnvSnapshot?.api_token_env_var || 'MAESTRO_CLOUDFLARE_API_TOKEN',
+      persistence_database: 'maestro_db',
+      secret_store: 'maestro',
+    };
+  }
+
+  function aiConfigStorageLabel(mode: CredentialStorageMode) {
+    if (mode === 'cloudflare') return 'Cloudflare D1 + Secrets Store';
+    if (mode === 'windows_env') return 'env vars do Windows + JSON local';
+    return 'data/config/ai-providers.json';
+  }
+
   async function loadAiProviderConfig() {
     try {
       const config = await invoke<AiProviderConfig>('read_ai_provider_config');
@@ -882,7 +907,7 @@ export function App() {
         anthropic: config.anthropic_api_key ?? '',
         gemini: config.gemini_api_key ?? '',
       });
-      setAiConfigStatus(`Configuracao carregada de data/config/ai-providers.json`);
+      setAiConfigStatus(`Configuracao carregada de ${aiConfigStorageLabel(config.credential_storage_mode)}`);
       void logEvent({
         level: 'info',
         category: 'settings.ai_provider.config_loaded',
@@ -911,6 +936,7 @@ export function App() {
     try {
       const saved = await invoke<AiProviderConfig>('write_ai_provider_config', {
         config: buildAiProviderConfig(nextProviderMode),
+        cloudflare: credentialStorageMode === 'cloudflare' ? buildCloudflareProviderStorageRequest() : null,
       });
       setProviderMode(saved.provider_mode);
       setAiCredentials({
@@ -918,11 +944,15 @@ export function App() {
         anthropic: saved.anthropic_api_key ?? '',
         gemini: saved.gemini_api_key ?? '',
       });
-      setAiConfigStatus(`Salvo em data/config/ai-providers.json as ${formatBrazilDateTime(new Date(saved.updated_at))}`);
+      const storageLabel = aiConfigStorageLabel(saved.credential_storage_mode);
+      setAiConfigStatus(`Salvo em ${storageLabel} as ${formatBrazilDateTime(new Date(saved.updated_at))}`);
       appendActivity({
         level: 'detail',
         title: 'Configuracao salva',
-        detail: 'As chaves de API foram salvas no arquivo local ignorado pelo Git.',
+        detail:
+          saved.credential_storage_mode === 'cloudflare'
+            ? 'As chaves informadas foram enviadas ao Cloudflare Secrets Store; o JSON local guarda apenas o marcador do modo remoto.'
+            : 'As chaves de API foram salvas conforme o modo de persistencia selecionado.',
       });
       void logEvent({
         level: 'info',

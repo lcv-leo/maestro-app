@@ -4,6 +4,14 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.9] - 2026-04-28
+
+- Fixed Cloudflare API credential persistence so `credential_storage_mode=cloudflare` writes AI provider keys to Cloudflare Secrets Store and stores only non-secret markers/metadata locally and in D1.
+- Reused the existing Cloudflare Secrets Store when the account already has one, without renaming it, and linked the effective store plus secret references in `maestro_db`.
+- Reclassified empty/failed agent review artifacts as operational failures instead of treating them as usable editorial review notes.
+- Kept the session activity feed bounded with internal scrolling so long runs no longer stretch the whole app vertically.
+- Expanded `ata-da-sessao.md` blocked decisions with concrete operational failures and editorial divergences.
+
 ## [v0.3.8] - 2026-04-28
 
 - Added operator choice for the editorial draft lead. Claude, Codex, or Gemini can now be selected before a session starts; the selected agent is saved with the session, writes the first version, and leads revision fallback order instead of Claude being hardcoded first.

@@ -69,6 +69,14 @@ If any peer remains `NOT_READY` or `NEEDS_EVIDENCE`, the session continues, paus
 - Spawn or execution errors are now written as parseable Markdown artifacts instead of bare one-line error text.
 - If stdin delivery fails after a child process has been spawned, Maestro kills and reaps that child before recording the parseable execution error artifact.
 
+`Unreleased` adds draft-lead selection and workspace isolation:
+
+- The operator can choose Claude, Codex, or Gemini as the draft lead before starting a session.
+- The selected draft lead is saved in `prompt.md`, writes the first version for new sessions, and is tried first in revision rounds; the other agents remain available as fallback if that CLI cannot produce usable text.
+- Resumed sessions keep the saved draft lead when present, so changing the visible picker later does not silently reorder an existing session.
+- Editorial CLI processes run with their current directory set to the session `agent-runs` folder, not the portable app root.
+- Any working draft remains an internal session artifact. Root-level `draft.md` is not a supported output and must not be treated as `texto-final.md`.
+
 This pass is still conservative. The deterministic link checker, ABNT engine, cancellable sessions, and MainSite D1 publication gates remain required before the workflow can be considered mature.
 
 1. Maestro builds an evidence pack and protocol pack.

@@ -154,6 +154,7 @@ struct EditorialSessionRequest {
     protocol_name: String,
     protocol_text: String,
     protocol_hash: String,
+    initial_agent: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -162,6 +163,7 @@ struct ResumeSessionRequest {
     protocol_name: Option<String>,
     protocol_text: Option<String>,
     protocol_hash: Option<String>,
+    initial_agent: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -211,6 +213,14 @@ struct ResumeSessionState {
     current_draft_path: Option<PathBuf>,
     next_review_round: usize,
     existing_agents: Vec<EditorialAgentResult>,
+}
+
+#[derive(Clone, Copy)]
+struct EditorialAgentSpec {
+    key: &'static str,
+    name: &'static str,
+    command: &'static str,
+    args: fn() -> Vec<String>,
 }
 
 #[derive(Clone)]
@@ -752,6 +762,7 @@ fn run_editorial_session_blocking(
                 "protocol_chars": request.protocol_text.chars().count(),
                 "protocol_lines": request.protocol_text.lines().count(),
                 "protocol_hash_prefix": sanitize_short(&request.protocol_hash, 16),
+                "initial_agent": resolve_initial_agent_key(request.initial_agent.as_deref()).0,
                 "agents": ["claude", "codex", "gemini"],
                 "artifact_policy": "raw agent outputs are written under data/sessions, not embedded in NDJSON"
             })),
@@ -840,6 +851,11 @@ fn resume_editorial_session_blocking(
 
     let session_name =
         extract_saved_session_name(&saved_prompt).unwrap_or_else(|| format!("Sessao {run_id}"));
+    let saved_initial_agent = extract_saved_initial_agent(&saved_prompt);
+    let requested_initial_agent = request.initial_agent.clone();
+    let effective_initial_agent = saved_initial_agent
+        .clone()
+        .or_else(|| requested_initial_agent.clone());
     let override_protocol = request
         .protocol_text
         .as_deref()
@@ -896,6 +912,9 @@ fn resume_editorial_session_blocking(
                 "protocol_chars": protocol_text.chars().count(),
                 "protocol_lines": protocol_text.lines().count(),
                 "protocol_hash_prefix": sanitize_short(&protocol_hash, 16),
+                "saved_initial_agent": saved_initial_agent.clone(),
+                "requested_initial_agent": requested_initial_agent.clone(),
+                "effective_initial_agent": effective_initial_agent.clone(),
                 "resume_draft_path": resume_state
                     .current_draft_path
                     .as_ref()
@@ -916,6 +935,7 @@ fn resume_editorial_session_blocking(
         protocol_name,
         protocol_text,
         protocol_hash,
+        initial_agent: effective_initial_agent,
     };
 
     let result = match run_editorial_session_core(&request, &log_session, Some(resume_state)) {
@@ -1395,6 +1415,12 @@ fn run_editorial_session_core(
     if request.protocol_text.trim().len() < 100 {
         return Err("protocolo editorial integral nao foi carregado".to_string());
     }
+    let (draft_lead_key, invalid_initial_agent) =
+        resolve_initial_agent_key(request.initial_agent.as_deref());
+    let draft_lead_name = ordered_editorial_agent_specs(draft_lead_key)
+        .first()
+        .map(|spec| spec.name)
+        .unwrap_or("Claude");
 
     let session_dir = checked_data_child_path(&sessions_dir().join(&run_id))?;
     let agent_dir = checked_data_child_path(&session_dir.join("agent-runs"))?;
@@ -1406,9 +1432,10 @@ fn run_editorial_session_core(
     write_text_file(
         &prompt_path,
         &format!(
-            "# Prompt da Sessao\n\nSessao: {}\nRun: `{}`\n\n{}",
+            "# Prompt da Sessao\n\nSessao: {}\nRun: `{}`\nAgente redator inicial: `{}`\n\n{}",
             sanitize_text(&request.session_name, 200),
             run_id,
+            draft_lead_key,
             prompt
         ),
     )?;
@@ -1418,6 +1445,42 @@ fn run_editorial_session_core(
     let mut current_draft = String::new();
     let mut current_draft_path: Option<PathBuf> = None;
     let mut round = 1usize;
+
+    if let Some(invalid_initial_agent) = invalid_initial_agent {
+        let _ = write_log_record(
+            log_session,
+            LogEventInput {
+                level: "warn".to_string(),
+                category: "session.draft_lead.invalid".to_string(),
+                message: "unknown initial editorial agent requested; falling back to Claude"
+                    .to_string(),
+                context: Some(json!({
+                    "run_id": &run_id,
+                    "requested_initial_agent": invalid_initial_agent,
+                    "fallback_initial_agent": "claude"
+                })),
+            },
+        );
+    }
+
+    let _ = write_log_record(
+        log_session,
+        LogEventInput {
+            level: "info".to_string(),
+            category: "session.draft_lead.selected".to_string(),
+            message: "editorial draft lead selected for initial draft and revision fallback order"
+                .to_string(),
+            context: Some(json!({
+                "run_id": &run_id,
+                "initial_agent": draft_lead_key,
+                "initial_agent_name": draft_lead_name,
+                "agent_order": ordered_editorial_agent_specs(draft_lead_key)
+                    .iter()
+                    .map(|spec| spec.key)
+                    .collect::<Vec<_>>()
+            })),
+        },
+    );
 
     if let Some(state) = resume_state {
         agents = state.existing_agents;
@@ -1442,22 +1505,17 @@ fn run_editorial_session_core(
     }
 
     if current_draft.trim().is_empty() {
-        let draft_specs = vec![
-            ("Claude", "claude", claude_args()),
-            ("Codex", "codex", codex_args()),
-            ("Gemini", "gemini", gemini_args()),
-        ];
+        let draft_specs = ordered_editorial_agent_specs(draft_lead_key);
 
-        for (name, command, args) in draft_specs {
-            let output_path =
-                agent_dir.join(format!("round-001-{}-draft.md", name.to_ascii_lowercase()));
+        for spec in draft_specs {
+            let output_path = agent_dir.join(format!("round-001-{}-draft.md", spec.key));
             let draft_run = run_editorial_agent(
                 log_session,
                 &run_id,
-                name,
+                spec.name,
                 "draft",
-                command,
-                args,
+                spec.command,
+                (spec.args)(),
                 build_draft_prompt(request, &run_id),
                 &output_path,
                 None,
@@ -1484,7 +1542,7 @@ fn run_editorial_session_core(
                         .to_string(),
                     context: Some(json!({
                         "run_id": &run_id,
-                        "agent": name,
+                        "agent": spec.name,
                         "status": draft_run.status,
                         "tone": draft_run.tone,
                         "next_policy": "continue_with_next_agent_without_final_delivery"
@@ -1631,24 +1689,17 @@ fn run_editorial_session_core(
         round += 1;
         let revision_prompt =
             build_revision_prompt(request, &run_id, round, &current_draft, &round_results);
-        let revision_specs = vec![
-            ("Claude", "claude", claude_args()),
-            ("Codex", "codex", codex_args()),
-            ("Gemini", "gemini", gemini_args()),
-        ];
+        let revision_specs = ordered_editorial_agent_specs(draft_lead_key);
         let mut revised = false;
-        for (name, command, args) in revision_specs {
-            let output_path = agent_dir.join(format!(
-                "round-{round:03}-{}-revision.md",
-                name.to_ascii_lowercase()
-            ));
+        for spec in revision_specs {
+            let output_path = agent_dir.join(format!("round-{round:03}-{}-revision.md", spec.key));
             let revision_run = run_editorial_agent(
                 log_session,
                 &run_id,
-                name,
+                spec.name,
                 "revision",
-                command,
-                args,
+                spec.command,
+                (spec.args)(),
                 revision_prompt.clone(),
                 &output_path,
                 None,
@@ -2014,6 +2065,19 @@ fn extract_saved_session_name(prompt_file: &str) -> Option<String> {
     })
 }
 
+fn extract_saved_initial_agent(prompt_file: &str) -> Option<String> {
+    prompt_file.lines().find_map(|line| {
+        let value = line.strip_prefix("Agente redator inicial: ")?;
+        let value = value.trim().trim_matches('`');
+        let (agent, invalid) = resolve_initial_agent_key(Some(value));
+        if invalid.is_some() {
+            None
+        } else {
+            Some(agent.to_string())
+        }
+    })
+}
+
 fn extract_saved_prompt(prompt_file: &str) -> Option<String> {
     let marker = "\n\n";
     let (_, prompt) = prompt_file.split_once(marker)?;
@@ -2184,6 +2248,54 @@ fn gemini_args() -> Vec<String> {
     ]
 }
 
+fn editorial_agent_specs() -> Vec<EditorialAgentSpec> {
+    vec![
+        EditorialAgentSpec {
+            key: "claude",
+            name: "Claude",
+            command: "claude",
+            args: claude_args,
+        },
+        EditorialAgentSpec {
+            key: "codex",
+            name: "Codex",
+            command: "codex",
+            args: codex_args,
+        },
+        EditorialAgentSpec {
+            key: "gemini",
+            name: "Gemini",
+            command: "gemini",
+            args: gemini_args,
+        },
+    ]
+}
+
+fn resolve_initial_agent_key(value: Option<&str>) -> (&'static str, Option<String>) {
+    let Some(value) = value else {
+        return ("claude", None);
+    };
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "claude" | "anthropic" => ("claude", None),
+        "codex" | "openai" | "chatgpt" => ("codex", None),
+        "gemini" | "google" => ("gemini", None),
+        "" => ("claude", None),
+        _ => ("claude", Some(sanitize_text(value, 80))),
+    }
+}
+
+fn ordered_editorial_agent_specs(first_key: &str) -> Vec<EditorialAgentSpec> {
+    let specs = editorial_agent_specs();
+    let mut ordered = specs
+        .iter()
+        .copied()
+        .filter(|spec| spec.key == first_key)
+        .collect::<Vec<_>>();
+    ordered.extend(specs.into_iter().filter(|spec| spec.key != first_key));
+    ordered
+}
+
 fn build_draft_prompt(request: &EditorialSessionRequest, run_id: &str) -> String {
     format!(
         r#"# Maestro Editorial AI - Geracao Real
@@ -2191,8 +2303,9 @@ fn build_draft_prompt(request: &EditorialSessionRequest, run_id: &str) -> String
 Run: `{run_id}`
 Sessao: {}
 
-Voce e o primeiro peer editorial. Leia integralmente o protocolo abaixo antes de escrever.
+Voce e o agente redator escolhido para abrir a sessao editorial. Leia integralmente o protocolo abaixo antes de escrever.
 Gere um rascunho em Markdown puro para a solicitacao do operador.
+Nao crie arquivos locais. Escreva a resposta inteira somente na saida padrao da CLI.
 Nao invente links. Se faltar evidencia, marque explicitamente `[EVIDENCIA_PENDENTE]`.
 
 ## Solicitacao do operador
@@ -2277,6 +2390,7 @@ Sessao: {}
 Leia integralmente o protocolo editorial, o rascunho atual e as manifestacoes dos peers.
 Sua tarefa e produzir uma nova versao completa do texto em Markdown puro, incorporando todas as correcoes concretas.
 Nao entregue comentarios sobre o processo. Entregue apenas o texto revisado.
+Nao crie arquivos locais. Escreva a resposta inteira somente na saida padrao da CLI.
 Nao invente links. Se faltar evidencia, preserve marcador `[EVIDENCIA_PENDENTE]`.
 
 ## Solicitacao do operador
@@ -2319,6 +2433,7 @@ fn run_editorial_agent(
     timeout: Option<Duration>,
 ) -> EditorialAgentResult {
     let started = Instant::now();
+    let working_dir = command_working_dir_for_output(output_path);
     let _ = write_log_record(
         log_session,
         LogEventInput {
@@ -2333,6 +2448,7 @@ fn run_editorial_agent(
                 "stdin_chars": stdin_text.chars().count(),
                 "timeout_seconds": timeout.map(|value| value.as_secs()),
                 "timeout_policy": if timeout.is_some() { "diagnostic_or_limited" } else { "none_editorial_session" },
+                "working_dir": working_dir.to_string_lossy().to_string(),
                 "output_path": output_path.to_string_lossy().to_string()
             })),
         },
@@ -2561,7 +2677,19 @@ fn log_editorial_agent_finished(
     );
 }
 
-fn log_editorial_agent_spawned(progress: &CommandProgressContext<'_>, child_id: u32, path: &Path) {
+fn command_working_dir_for_output(output_path: &Path) -> PathBuf {
+    output_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(app_root)
+}
+
+fn log_editorial_agent_spawned(
+    progress: &CommandProgressContext<'_>,
+    child_id: u32,
+    path: &Path,
+    working_dir: &Path,
+) {
     let _ = write_log_record(
         progress.log_session,
         LogEventInput {
@@ -2575,6 +2703,7 @@ fn log_editorial_agent_spawned(progress: &CommandProgressContext<'_>, child_id: 
                 "cli": progress.cli,
                 "child_pid": child_id,
                 "resolved_path": path.to_string_lossy().to_string(),
+                "working_dir": working_dir.to_string_lossy().to_string(),
                 "output_path": progress.output_path.to_string_lossy().to_string()
             })),
         },
@@ -2603,6 +2732,7 @@ fn log_editorial_agent_running(
                 "elapsed_seconds": elapsed.as_secs(),
                 "stdout_bytes_so_far": stdout_bytes,
                 "stderr_bytes_so_far": stderr_bytes,
+                "working_dir": command_working_dir_for_output(progress.output_path).to_string_lossy().to_string(),
                 "output_path": progress.output_path.to_string_lossy().to_string()
             })),
         },
@@ -3891,8 +4021,12 @@ fn run_resolved_command_observed(
 ) -> std::io::Result<TimedCommandOutput> {
     let started = Instant::now();
     let mut command = resolved_command_builder(path, args);
+    let working_dir = progress
+        .as_ref()
+        .map(|progress| command_working_dir_for_output(progress.output_path))
+        .unwrap_or_else(app_root);
     command
-        .current_dir(app_root())
+        .current_dir(&working_dir)
         .stdin(if stdin_text.is_some() {
             Stdio::piped()
         } else {
@@ -3903,7 +4037,7 @@ fn run_resolved_command_observed(
     let mut child = command.spawn()?;
     let child_id = child.id();
     if let Some(progress) = progress.as_ref() {
-        log_editorial_agent_spawned(progress, child_id, path);
+        log_editorial_agent_spawned(progress, child_id, path, &working_dir);
     }
     if let Some(text) = stdin_text {
         if let Some(mut stdin) = child.stdin.take() {
@@ -4170,6 +4304,38 @@ mod tests {
     }
 
     #[test]
+    fn resolves_requested_initial_agent_aliases() {
+        assert_eq!(resolve_initial_agent_key(Some("Codex")).0, "codex");
+        assert_eq!(resolve_initial_agent_key(Some("chatgpt")).0, "codex");
+        assert_eq!(resolve_initial_agent_key(Some("Google")).0, "gemini");
+        assert_eq!(resolve_initial_agent_key(Some("Anthropic")).0, "claude");
+        let (fallback, invalid) = resolve_initial_agent_key(Some("unknown-peer"));
+        assert_eq!(fallback, "claude");
+        assert_eq!(invalid.as_deref(), Some("unknown-peer"));
+    }
+
+    #[test]
+    fn orders_draft_lead_before_fallback_agents() {
+        let claude_order = ordered_editorial_agent_specs("claude")
+            .into_iter()
+            .map(|spec| spec.key)
+            .collect::<Vec<_>>();
+        assert_eq!(claude_order, vec!["claude", "codex", "gemini"]);
+
+        let codex_order = ordered_editorial_agent_specs("codex")
+            .into_iter()
+            .map(|spec| spec.key)
+            .collect::<Vec<_>>();
+        assert_eq!(codex_order, vec!["codex", "claude", "gemini"]);
+
+        let gemini_order = ordered_editorial_agent_specs("gemini")
+            .into_iter()
+            .map(|spec| spec.key)
+            .collect::<Vec<_>>();
+        assert_eq!(gemini_order, vec!["gemini", "claude", "codex"]);
+    }
+
+    #[test]
     fn preserves_whitespace_when_redacting() {
         let text = redact_secrets("line1\nline2\tcfat_12345678");
         assert_eq!(text, "line1\nline2\t<redacted>");
@@ -4429,10 +4595,14 @@ mod tests {
     #[test]
     fn extracts_saved_prompt_for_session_resume() {
         let prompt_file =
-            "# Prompt da Sessao\n\nSessao: Teste Editorial\nRun: `run-resume`\n\nEscreva o artigo.";
+            "# Prompt da Sessao\n\nSessao: Teste Editorial\nRun: `run-resume`\nAgente redator inicial: `codex`\n\nEscreva o artigo.";
         assert_eq!(
             extract_saved_session_name(prompt_file).as_deref(),
             Some("Teste Editorial")
+        );
+        assert_eq!(
+            extract_saved_initial_agent(prompt_file).as_deref(),
+            Some("codex")
         );
         assert_eq!(
             extract_saved_prompt(prompt_file).as_deref(),

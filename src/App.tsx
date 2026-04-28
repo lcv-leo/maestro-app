@@ -42,6 +42,7 @@ type VerbosityMode = 'resumo' | 'detalhado' | 'diagnostico';
 type PhaseState = 'done' | 'active' | 'waiting';
 type ProviderMode = 'cli' | 'api' | 'hybrid';
 type AiCredentialKey = 'openai' | 'anthropic' | 'gemini';
+type InitialAgentKey = 'claude' | 'codex' | 'gemini';
 type CredentialStorageMode = 'local_json' | 'windows_env' | 'cloudflare';
 type CloudflareTokenSource = 'prompt_each_launch' | 'windows_env' | 'local_encrypted';
 type ActiveSection = 'session' | 'protocols' | 'evidence' | 'agents' | 'settings' | 'setup';
@@ -332,6 +333,12 @@ const aiProviderRows = [
   meta: string;
 }>;
 
+const initialAgentOptions = [
+  { key: 'claude', label: 'Claude', detail: 'primeira versao e revisoes' },
+  { key: 'codex', label: 'Codex', detail: 'primeira versao e revisoes' },
+  { key: 'gemini', label: 'Gemini', detail: 'primeira versao e revisoes' },
+] satisfies Array<{ key: InitialAgentKey; label: string; detail: string }>;
+
 const verbosityOptions = [
   { mode: 'resumo', label: 'Resumo', icon: EyeOff },
   { mode: 'detalhado', label: 'Detalhado', icon: Eye },
@@ -476,6 +483,7 @@ export function App() {
     '<h1>Artigo em preparacao</h1><p style="text-align: justify">Texto inicial para edicao com o mesmo PostEditor usado pelo MainSite.</p>',
   );
   const [providerMode, setProviderMode] = useState<ProviderMode>('hybrid');
+  const [initialAgent, setInitialAgent] = useState<InitialAgentKey>('claude');
   const [credentialStorageMode, setCredentialStorageMode] = useState<CredentialStorageMode>('local_json');
   const [activeSection, setActiveSection] = useState<ActiveSection>('session');
   const [cloudflareAccountId, setCloudflareAccountId] = useState('');
@@ -531,6 +539,7 @@ export function App() {
   const operationIndeterminate = operation.status === 'running';
   const operationProgressLabel = operationMeterLabel(operation.status);
   const hasLoadedProtocolForResume = protocolText.trim().length >= 100 && protocol.hash !== 'aguardando importacao';
+  const initialAgentLabel = initialAgentOptions.find((option) => option.key === initialAgent)?.label ?? 'Claude';
 
   useEffect(() => {
     void logEvent({
@@ -1191,6 +1200,9 @@ export function App() {
     }
 
     setSessionRunId(runId);
+    const selectedInitialAgent = initialAgent;
+    const selectedInitialAgentLabel =
+      initialAgentOptions.find((option) => option.key === selectedInitialAgent)?.label ?? 'Claude';
     setOperation({
       title: 'Preparando sessao editorial',
       progress: 8,
@@ -1211,7 +1223,7 @@ export function App() {
       {
         round: '000',
         status: 'Sessao criada',
-        note: 'Prompt recebido. Nenhum agente foi chamado ainda; entrega final permanece bloqueada.',
+        note: `Prompt recebido. ${selectedInitialAgentLabel} abrira a primeira versao; entrega final permanece bloqueada ate unanimidade.`,
       },
     ]);
     setActivityItems([
@@ -1236,13 +1248,19 @@ export function App() {
         protocol_chars: protocolText.length,
         required_outputs: finalArtifacts.map((artifact) => artifact.name),
         consensus_gate: 'trilateral_ready_same_round',
+        initial_agent: selectedInitialAgent,
       },
     });
     void logEvent({
       level: 'info',
       category: 'session.orchestration.started',
       message: 'visible editorial session monitor started',
-      context: { run_id: runId, provider_mode: providerMode, credential_storage_mode: credentialStorageMode },
+      context: {
+        run_id: runId,
+        provider_mode: providerMode,
+        credential_storage_mode: credentialStorageMode,
+        initial_agent: selectedInitialAgent,
+      },
     });
 
     setOperation({
@@ -1281,7 +1299,7 @@ export function App() {
       message: 'local visible preflight completed',
       context: { run_id: runId },
     });
-    void runRealEditorialSession(runId, promptText);
+    void runRealEditorialSession(runId, promptText, undefined, selectedInitialAgent);
   }
 
   async function runRealEditorialSession(
@@ -1293,16 +1311,19 @@ export function App() {
       protocolHash?: string;
       nextRound?: number;
     },
+    selectedInitialAgent: InitialAgentKey = initialAgent,
   ) {
     const isResume = Boolean(resumeOptions);
     const startedAt = Date.now();
     const startedAtLabel = formatBrazilDateTime(startedAt);
+    const selectedInitialAgentLabel =
+      initialAgentOptions.find((option) => option.key === selectedInitialAgent)?.label ?? 'Claude';
     setOperation({
       title: isResume ? 'Retomando sessao editorial' : 'Sessao editorial em andamento',
       progress: 44,
       current: isResume
         ? `Continuando a partir da rodada ${resumeOptions?.nextRound?.toLocaleString('pt-BR') ?? 'salva'}.`
-        : 'Claude, Codex e Gemini estao trabalhando com o protocolo integral.',
+        : `${selectedInitialAgentLabel} esta preparando a primeira versao; os demais revisam em seguida.`,
       eta: `Inicio: ${startedAtLabel}`,
       status: 'running',
     });
@@ -1313,9 +1334,15 @@ export function App() {
       { label: 'Entrega', detail: 'aguardando unanimidade', state: 'waiting' },
     ]);
     setAgentCards([
-      { name: 'Claude', cli: 'claude', state: 'running', note: 'rascunho e revisao em andamento' },
-      { name: 'Codex', cli: 'codex', state: 'running', note: 'revisao em andamento' },
-      { name: 'Gemini', cli: 'gemini', state: 'running', note: 'revisao em andamento' },
+      ...initialAgentOptions.map((option) => ({
+        name: option.label,
+        cli: option.key,
+        state: 'running' as AgentState,
+        note:
+          option.key === selectedInitialAgent
+            ? 'primeira versao e ajustes em andamento'
+            : 'leitura e revisao em andamento',
+      })),
       { name: 'Maestro', cli: 'motor local', state: 'running', note: 'acompanhando a unanimidade' },
     ]);
     appendActivity({
@@ -1340,6 +1367,7 @@ export function App() {
         protocol_hash: protocol.hash,
         provider_mode: providerMode,
         credential_storage_mode: credentialStorageMode,
+        initial_agent: selectedInitialAgent,
       },
     });
 
@@ -1350,7 +1378,7 @@ export function App() {
       setOperation({
         title: isResume ? 'Retomando sessao editorial' : 'Sessao editorial em andamento',
         progress: 44,
-        current: `Agentes em execucao ha ${formatElapsedTime(elapsedSeconds)}.`,
+        current: `Trabalho em andamento ha ${formatElapsedTime(elapsedSeconds)}.`,
         eta: `Inicio: ${startedAtLabel}`,
         status: 'running',
       });
@@ -1380,6 +1408,7 @@ export function App() {
               protocol_name: resumeOptions.protocolName ?? null,
               protocol_text: resumeOptions.protocolText ?? null,
               protocol_hash: resumeOptions.protocolHash ?? null,
+              initial_agent: selectedInitialAgent,
             },
           })
         : await invoke<EditorialSessionResult>('run_editorial_session', {
@@ -1390,6 +1419,7 @@ export function App() {
               protocol_name: protocol.name,
               protocol_text: protocolText,
               protocol_hash: protocol.hash,
+              initial_agent: selectedInitialAgent,
             },
           });
       window.clearInterval(heartbeat);
@@ -1934,6 +1964,27 @@ export function App() {
                       <Play size={18} />
                       {isRunPreparing ? 'Preparando' : 'Submeter'}
                     </button>
+                  </div>
+                </div>
+                <div className="initial-agent-picker" aria-label="Agente redator inicial">
+                  <div>
+                    <span>Primeira versao</span>
+                    <strong>{initialAgentLabel}</strong>
+                  </div>
+                  <div className="initial-agent-buttons">
+                    {initialAgentOptions.map((option) => (
+                      <button
+                        className={initialAgent === option.key ? 'active' : ''}
+                        type="button"
+                        key={option.key}
+                        onClick={() => setInitialAgent(option.key)}
+                        aria-pressed={initialAgent === option.key}
+                        disabled={isRunPreparing}
+                        title={option.detail}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
                   </div>
                 </div>
                 <textarea

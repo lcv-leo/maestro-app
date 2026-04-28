@@ -25,7 +25,7 @@ Planned modern stack: Tauri 2 + WebView2, React 19, Vite 8, TypeScript 6, Vitest
 
 Diagnostic logs are structured NDJSON files under `data/logs/`, one file per app execution, with native/frontend context and per-agent process events so failures can be attached for precise analysis. See `docs/logging.md`.
 
-CLI agents run in background by design, without visible terminal windows in Windows release builds. Real editorial calls do not have an artificial timeout. The operator sees friendly progress, elapsed-time heartbeat status, phase status, resume controls, and a selectable UI verbosity level, while raw prompts, stdout, stderr, and transcripts stay out of the normal interface and remain protected as ignored local runtime artifacts under `data/sessions/`.
+CLI agents run in background by design, without visible terminal windows in Windows release builds. Real editorial calls do not have an artificial timeout. The operator can choose Claude, Codex, or Gemini to write the first version; that choice is saved with the session while all three remain part of the review cycle. The operator sees friendly progress, elapsed-time heartbeat status, phase status, resume controls, and a selectable UI verbosity level, while raw prompts, stdout, stderr, working drafts, and transcripts stay out of the normal interface and remain protected as ignored local runtime artifacts under `data/sessions/`.
 
 MainSite-bound editing uses a PostEditor parity module, not a generic editor. See `docs/text-editor-decision.md` and `docs/mainsite-compatibility-contract.md`.
 

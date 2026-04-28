@@ -47,7 +47,7 @@ Only `verified_supports_claim` and explicitly accepted `redirected_verified` lin
 {
   "schema_version": "link_evidence.v1",
   "link_id": "link-001",
-  "source_artifact": "draft.md",
+  "source_artifact": "data/sessions/<run>/agent-runs/round-001-<agent>-draft.md",
   "anchor_text": "artigo citado",
   "surrounding_text": "trecho curto ao redor do link",
   "original_url": "https://example.invalid/path",

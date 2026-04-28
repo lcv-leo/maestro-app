@@ -2,6 +2,8 @@ name: Release
 
 on:
   push:
+    branches:
+      - "main"
     tags:
       - "v*.*.*"
   workflow_dispatch:
@@ -19,22 +21,66 @@ permissions:
 
 env:
   NODE_VERSION: 24
-  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
+  prepare-release:
+    name: Prepare release tag
+    runs-on: ubuntu-latest
+
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            tag="${INPUT_TAG}"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            version="$(node -p "require('./package.json').version")"
+            tag="v${version}"
+            if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+              echo "::error::Release tag ${tag} already exists. Bump package.json, Cargo.toml, tauri.conf.json, and CHANGELOG.md before merging to main."
+              exit 1
+            fi
+          fi
+
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta[0-9]+)?$ ]]; then
+            echo "::error::Release tag must use vX.X.X or vX.X.X-betaN, got '${tag}'."
+            exit 1
+          fi
+
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
   build-windows-portable:
     name: Build Windows portable bundle
     runs-on: windows-latest
+    needs: prepare-release
+
+    env:
+      RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
 
     steps:
       - name: Checkout release ref
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
 
       - name: Setup Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -112,7 +158,12 @@ jobs:
   publish-github-release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: build-windows-portable
+    needs:
+      - prepare-release
+      - build-windows-portable
+
+    env:
+      RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
 
     steps:
       - name: Download portable archive
@@ -161,7 +212,7 @@ jobs:
           - Settings UI for Cloudflare credentials and AI provider credentials.
           - Three persistence modes in the product contract: local JSON, Windows env-var hybrid, and Cloudflare D1 `maestro_db` plus Secrets Store.
           - One NDJSON diagnostic log file per app execution, with expanded frontend/native context.
-          - First functional CLI orchestration pass: Claude draft plus Claude, Codex, and Gemini review.
+          - First functional CLI orchestration pass: selectable Claude/Codex/Gemini draft lead plus Claude, Codex, and Gemini review.
           - Windows background execution for CLI agents, with no visible terminal windows in release builds.
           - No artificial timeout for real editorial agent calls; long model latency is surfaced through UI heartbeat progress.
           - Session artifacts under `data/sessions/<run-id>/`, including prompts, per-agent raw outputs, minutes, and final text only when consensus is ready.
@@ -197,6 +248,9 @@ jobs:
             gh release upload "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
           else
             args=(release create "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --title "Maestro Editorial AI $tag" --notes-file RELEASE_NOTES.md)
+            if ! gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" >/dev/null 2>&1; then
+              args+=(--target "$GITHUB_SHA")
+            fi
             args+=(--latest)
             gh "${args[@]}"
           fi
@@ -204,7 +258,12 @@ jobs:
   publish-github-package:
     name: Publish GitHub Package
     runs-on: ubuntu-latest
-    needs: publish-github-release
+    needs:
+      - prepare-release
+      - publish-github-release
+
+    env:
+      RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
 
     steps:
       - name: Download portable archive

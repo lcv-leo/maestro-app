@@ -15,7 +15,7 @@ Portable Windows editorial workbench for protocol-driven AI drafting, source ver
 
 Status: functional alpha with live bootstrap, diagnostics, navigation, Cloudflare credential provisioning, AI API credential checks, PostEditor parity, link auditing, and a real background Claude/Codex/Gemini editorial session path.
 
-Current project version: `v0.3.7`.
+Current project version: `v0.3.8`.
 
 Maestro is independent from `cross-review-mcp`; it incorporates the same strict convergence discipline in its own application logic. It is designed to run from a folder, keep runtime data out of Git, and store operator protocols, drafts, evidence, and sessions locally under ignored runtime paths.
 

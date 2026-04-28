@@ -4,10 +4,14 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.8] - 2026-04-28
+
 - Added operator choice for the editorial draft lead. Claude, Codex, or Gemini can now be selected before a session starts; the selected agent is saved with the session, writes the first version, and leads revision fallback order instead of Claude being hardcoded first.
 - Isolated editorial CLI child processes inside the session `agent-runs` folder instead of the portable app root, preventing stray files such as root-level `draft.md` from looking like approved final output.
 - Clarified the UI and logs around the selected draft lead while preserving the rule that `texto-final.md` is created only after unanimous review approval.
 - Expanded `.gitignore` for root-level runtime draft spills and `.tmp/` working directories.
+- Enabled automatic release publication from `main`: the release workflow now derives `vX.X.X` from `package.json`, refuses to reuse an existing tag, creates the GitHub Release for the merge commit, and keeps the existing tag/manual release paths.
+- Bumped app metadata to `v0.3.8` for the draft-lead and release-automation build.
 
 ## [v0.3.7] - 2026-04-27
 

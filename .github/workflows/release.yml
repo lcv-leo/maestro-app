@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing vX.X.X or vX.X.X-betaN tag to publish"
+        description: "Existing vXX.YY.ZZ or vXX.YY.ZZ-betaN tag to publish"
         required: true
         type: string
 
@@ -33,6 +33,7 @@ jobs:
 
     outputs:
       tag: ${{ steps.release.outputs.tag }}
+      should_release: ${{ steps.release.outputs.should_release }}
 
     steps:
       - name: Checkout release source
@@ -48,30 +49,63 @@ jobs:
         run: |
           set -euo pipefail
 
+          universal_tag_from_version() {
+            local version="$1"
+            local core="${version%%-*}"
+            local suffix=""
+            if [[ "$version" == *-* ]]; then
+              suffix="-${version#*-}"
+            fi
+
+            IFS='.' read -r major minor patch <<< "$core"
+            printf 'v%02d.%02d.%02d%s' "$major" "$minor" "$patch" "$suffix"
+          }
+
+          legacy_tag_from_version() {
+            local version="$1"
+            local core="${version%%-*}"
+            local suffix=""
+            if [[ "$version" == *-* ]]; then
+              suffix="-${version#*-}"
+            fi
+
+            IFS='.' read -r major minor patch <<< "$core"
+            printf 'v%d.%d.%d%s' "$major" "$minor" "$patch" "$suffix"
+          }
+
+          should_release="true"
+
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             tag="${INPUT_TAG}"
           elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             tag="${GITHUB_REF_NAME}"
           else
             version="$(node -p "require('./package.json').version")"
-            tag="v${version}"
+            tag="$(universal_tag_from_version "$version")"
+            legacy_tag="$(legacy_tag_from_version "$version")"
+
             if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
-              echo "::error::Release tag ${tag} already exists. Bump package.json, Cargo.toml, tauri.conf.json, and CHANGELOG.md before merging to main."
-              exit 1
+              echo "Release tag ${tag} already exists. Skipping duplicate release."
+              should_release="false"
+            elif [[ "$legacy_tag" != "$tag" ]] && git ls-remote --exit-code --tags origin "refs/tags/${legacy_tag}" >/dev/null 2>&1; then
+              echo "Legacy release tag ${legacy_tag} already exists for ${tag}. Skipping duplicate release."
+              should_release="false"
             fi
           fi
 
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta[0-9]+)?$ ]]; then
-            echo "::error::Release tag must use vX.X.X or vX.X.X-betaN, got '${tag}'."
+          if [[ ! "$tag" =~ ^v[0-9]{2}\.[0-9]{2}\.[0-9]{2}(-beta[0-9]+)?$ ]]; then
+            echo "::error::Release tag must use vXX.YY.ZZ or vXX.YY.ZZ-betaN, got '${tag}'."
             exit 1
           fi
 
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "should_release=${should_release}" >> "$GITHUB_OUTPUT"
 
   build-windows-portable:
     name: Build Windows portable bundle
     runs-on: windows-latest
     needs: prepare-release
+    if: needs.prepare-release.outputs.should_release == 'true'
 
     env:
       RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
@@ -105,8 +139,8 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $tag = $env:RELEASE_TAG
-          if ($tag -notmatch '^v\d+\.\d+\.\d+(-beta\d+)?$') {
-            throw "Release tag must use vX.X.X or vX.X.X-betaN, got '$tag'."
+          if ($tag -notmatch '^v\d{2}\.\d{2}\.\d{2}(-beta\d+)?$') {
+            throw "Release tag must use vXX.YY.ZZ or vXX.YY.ZZ-betaN, got '$tag'."
           }
 
           $binary = "src-tauri\target\release\maestro-editorial-ai.exe"
@@ -161,6 +195,7 @@ jobs:
     needs:
       - prepare-release
       - build-windows-portable
+    if: needs.prepare-release.outputs.should_release == 'true'
 
     env:
       RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
@@ -179,8 +214,8 @@ jobs:
         run: |
           set -euo pipefail
           tag="${RELEASE_TAG}"
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta[0-9]+)?$ ]]; then
-            echo "Release tag must use vX.X.X or vX.X.X-betaN, got '$tag'." >&2
+          if [[ ! "$tag" =~ ^v[0-9]{2}\.[0-9]{2}\.[0-9]{2}(-beta[0-9]+)?$ ]]; then
+            echo "Release tag must use vXX.YY.ZZ or vXX.YY.ZZ-betaN, got '$tag'." >&2
             exit 1
           fi
 
@@ -261,6 +296,7 @@ jobs:
     needs:
       - prepare-release
       - publish-github-release
+    if: needs.prepare-release.outputs.should_release == 'true'
 
     env:
       RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
@@ -279,8 +315,8 @@ jobs:
         run: |
           set -euo pipefail
           tag="${RELEASE_TAG}"
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta[0-9]+)?$ ]]; then
-            echo "Release tag must use vX.X.X or vX.X.X-betaN, got '$tag'." >&2
+          if [[ ! "$tag" =~ ^v[0-9]{2}\.[0-9]{2}\.[0-9]{2}(-beta[0-9]+)?$ ]]; then
+            echo "Release tag must use vXX.YY.ZZ or vXX.YY.ZZ-betaN, got '$tag'." >&2
             exit 1
           fi
 

@@ -17,6 +17,15 @@ updates:
       interval: "daily"
       time: "03:00"
       timezone: "America/Sao_Paulo"
+    groups:
+      tiptap-editor:
+        patterns:
+          - "@tiptap/*"
+          - "tiptap-*"
+        update-types:
+          - "major"
+          - "minor"
+          - "patch"
     labels:
       - "dependencies"
       - "npm"

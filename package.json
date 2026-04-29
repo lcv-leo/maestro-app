@@ -27,7 +27,7 @@
     "@tauri-apps/api": "2.10.1",
     "@tiptap/core": "3.22.4",
     "@tiptap/extension-character-count": "3.22.4",
-    "@tiptap/extension-code-block-lowlight": "3.22.4",
+    "@tiptap/extension-code-block-lowlight": "3.22.5",
     "@tiptap/extension-color": "3.22.4",
     "@tiptap/extension-drag-handle": "3.22.4",
     "@tiptap/extension-drag-handle-react": "3.22.4",

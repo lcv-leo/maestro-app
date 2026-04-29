@@ -3,7 +3,9 @@ updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "daily"
+      time: "03:00"
+      timezone: "America/Sao_Paulo"
     labels:
       - "dependencies"
       - "github-actions"
@@ -12,7 +14,9 @@ updates:
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "daily"
+      time: "03:00"
+      timezone: "America/Sao_Paulo"
     labels:
       - "dependencies"
       - "npm"
@@ -21,7 +25,9 @@ updates:
   - package-ecosystem: "cargo"
     directory: "/src-tauri"
     schedule:
-      interval: "weekly"
+      interval: "daily"
+      time: "03:00"
+      timezone: "America/Sao_Paulo"
     labels:
       - "dependencies"
       - "rust"

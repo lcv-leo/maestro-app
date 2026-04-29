@@ -41,8 +41,8 @@ type AgentState = 'ready' | 'blocked' | 'evidence' | 'running';
 type VerbosityMode = 'resumo' | 'detalhado' | 'diagnostico';
 type PhaseState = 'done' | 'active' | 'waiting';
 type ProviderMode = 'cli' | 'api' | 'hybrid';
-type AiCredentialKey = 'openai' | 'anthropic' | 'gemini';
-type InitialAgentKey = 'claude' | 'codex' | 'gemini';
+type AiCredentialKey = 'openai' | 'anthropic' | 'gemini' | 'deepseek';
+type InitialAgentKey = 'claude' | 'codex' | 'gemini' | 'deepseek';
 type CredentialStorageMode = 'local_json' | 'windows_env' | 'cloudflare';
 type CloudflareTokenSource = 'prompt_each_launch' | 'windows_env' | 'local_encrypted';
 type ActiveSection = 'session' | 'protocols' | 'evidence' | 'agents' | 'settings' | 'setup';
@@ -145,6 +145,13 @@ type AiProviderConfig = {
   openai_api_key: string | null;
   anthropic_api_key: string | null;
   gemini_api_key: string | null;
+  deepseek_api_key: string | null;
+  openai_api_key_remote: boolean;
+  anthropic_api_key_remote: boolean;
+  gemini_api_key_remote: boolean;
+  deepseek_api_key_remote: boolean;
+  cloudflare_secret_store_id: string | null;
+  cloudflare_secret_store_name: string | null;
   updated_at: string;
 };
 
@@ -222,6 +229,7 @@ const initialAgents: AgentCard[] = [
   { name: 'Claude', cli: 'claude', state: 'blocked', note: 'aguardando sessao editorial' },
   { name: 'Codex', cli: 'codex', state: 'blocked', note: 'aguardando sessao editorial' },
   { name: 'Gemini', cli: 'gemini', state: 'blocked', note: 'aguardando sessao editorial' },
+  { name: 'DeepSeek', cli: 'deepseek-api', state: 'blocked', note: 'aguardando chave de API' },
   { name: 'Maestro', cli: 'motor local', state: 'blocked', note: 'aguardando verificacoes iniciais' },
 ];
 
@@ -236,6 +244,7 @@ const initialProtocolReadingGates: ProtocolReadingGate[] = [
   { agent: 'Claude', progress: 0, status: 'Aguardando' },
   { agent: 'Codex', progress: 0, status: 'Aguardando' },
   { agent: 'Gemini', progress: 0, status: 'Aguardando' },
+  { agent: 'DeepSeek', progress: 0, status: 'Aguardando' },
 ];
 
 const initialDiscussionRounds: DiscussionRound[] = [
@@ -243,7 +252,7 @@ const initialDiscussionRounds: DiscussionRound[] = [
 ];
 
 const finalArtifacts = [
-  { name: 'texto-final.md', detail: 'somente entregue com unanimidade trilateral' },
+  { name: 'texto-final.md', detail: 'somente entregue com unanimidade dos agentes' },
   { name: 'ata-da-sessao.md', detail: 'prompt, protocolo, rounds, divergencias e decisoes' },
 ];
 
@@ -288,6 +297,7 @@ const initialAiProviderChecks: AiProviderProbeRow[] = [
   { label: 'OpenAI / Codex', value: 'pendente de verificacao', tone: 'pending' },
   { label: 'Anthropic / Claude', value: 'pendente de verificacao', tone: 'pending' },
   { label: 'Google / Gemini', value: 'pendente de verificacao', tone: 'pending' },
+  { label: 'DeepSeek', value: 'pendente de verificacao', tone: 'pending' },
 ];
 
 const credentialStorageModes = [
@@ -333,6 +343,13 @@ const aiProviderRows = [
     secretLabel: 'Gemini API key',
     meta: 'Developer API ou Vertex AI, projeto e regiao',
   },
+  {
+    key: 'deepseek',
+    name: 'DeepSeek',
+    cli: 'deepseek-api',
+    secretLabel: 'DeepSeek API key',
+    meta: 'API oficial DeepSeek; melhor modelo disponivel via /models',
+  },
 ] satisfies Array<{
   key: AiCredentialKey;
   name: string;
@@ -345,6 +362,7 @@ const initialAgentOptions = [
   { key: 'claude', label: 'Claude', detail: 'primeira versao e revisoes' },
   { key: 'codex', label: 'Codex', detail: 'primeira versao e revisoes' },
   { key: 'gemini', label: 'Gemini', detail: 'primeira versao e revisoes' },
+  { key: 'deepseek', label: 'DeepSeek', detail: 'primeira versao e revisoes via API' },
 ] satisfies Array<{ key: InitialAgentKey; label: string; detail: string }>;
 
 const verbosityOptions = [
@@ -457,6 +475,8 @@ function humanizeAgentStatus(status: string) {
   if (normalized === 'NEEDS_EVIDENCE') return 'Precisa de verificacao';
   if (normalized === 'DRAFT_CREATED') return 'Rascunho gerado';
   if (normalized === 'CLI_NOT_FOUND') return 'CLI nao encontrada';
+  if (normalized === 'API_KEY_NOT_AVAILABLE') return 'Chave de API ausente';
+  if (normalized === 'REMOTE_SECRET_NOT_READABLE') return 'Segredo remoto nao legivel localmente';
   if (normalized === 'READY_UNANIMOUS') return 'Texto liberado';
   if (normalized === 'PAUSED_DRAFT_UNAVAILABLE') return 'Rascunho indisponivel';
   if (normalized === 'PAUSED_WITH_REAL_AGENT_OUTPUTS') return 'Aguardando ajustes';
@@ -494,7 +514,7 @@ function latestAgentResults(agents: EditorialAgentResult[]) {
       byName.set(agent.name, agent);
     }
   }
-  return ['Claude', 'Codex', 'Gemini']
+  return ['Claude', 'Codex', 'Gemini', 'DeepSeek']
     .map((name) => byName.get(name))
     .filter((agent): agent is EditorialAgentResult => Boolean(agent));
 }
@@ -567,6 +587,7 @@ export function App() {
     openai: '',
     anthropic: '',
     gemini: '',
+    deepseek: '',
   });
   const [sessionRunId, setSessionRunId] = useState<string | null>(null);
   const [lastSessionMinutesPath, setLastSessionMinutesPath] = useState<string | null>(null);
@@ -941,6 +962,13 @@ export function App() {
       openai_api_key: aiCredentials.openai.trim() || null,
       anthropic_api_key: aiCredentials.anthropic.trim() || null,
       gemini_api_key: aiCredentials.gemini.trim() || null,
+      deepseek_api_key: aiCredentials.deepseek.trim() || null,
+      openai_api_key_remote: false,
+      anthropic_api_key_remote: false,
+      gemini_api_key_remote: false,
+      deepseek_api_key_remote: false,
+      cloudflare_secret_store_id: null,
+      cloudflare_secret_store_name: null,
       updated_at: new Date().toISOString(),
     };
   }
@@ -970,8 +998,21 @@ export function App() {
         openai: config.openai_api_key ?? '',
         anthropic: config.anthropic_api_key ?? '',
         gemini: config.gemini_api_key ?? '',
+        deepseek: config.deepseek_api_key ?? '',
       });
-      setAiConfigStatus(`Configuracao carregada de ${aiConfigStorageLabel(config.credential_storage_mode)}`);
+      const remoteCount = [
+        config.openai_api_key_remote,
+        config.anthropic_api_key_remote,
+        config.gemini_api_key_remote,
+        config.deepseek_api_key_remote,
+      ].filter(Boolean).length;
+      setAiConfigStatus(
+        remoteCount > 0
+          ? `Configuracao carregada de ${aiConfigStorageLabel(
+              config.credential_storage_mode,
+            )}; ${remoteCount.toLocaleString('pt-BR')} referencia(s) remota(s) no Cloudflare`
+          : `Configuracao carregada de ${aiConfigStorageLabel(config.credential_storage_mode)}`,
+      );
       void logEvent({
         level: 'info',
         category: 'settings.ai_provider.config_loaded',
@@ -982,6 +1023,11 @@ export function App() {
           openai_key_present: Boolean(config.openai_api_key),
           anthropic_key_present: Boolean(config.anthropic_api_key),
           gemini_key_present: Boolean(config.gemini_api_key),
+          deepseek_key_present: Boolean(config.deepseek_api_key),
+          openai_remote_present: config.openai_api_key_remote,
+          anthropic_remote_present: config.anthropic_api_key_remote,
+          gemini_remote_present: config.gemini_api_key_remote,
+          deepseek_remote_present: config.deepseek_api_key_remote,
         },
       });
     } catch (error) {
@@ -1007,6 +1053,7 @@ export function App() {
         openai: saved.openai_api_key ?? '',
         anthropic: saved.anthropic_api_key ?? '',
         gemini: saved.gemini_api_key ?? '',
+        deepseek: saved.deepseek_api_key ?? '',
       });
       const storageLabel = aiConfigStorageLabel(saved.credential_storage_mode);
       setAiConfigStatus(`Salvo em ${storageLabel} as ${formatBrazilDateTime(new Date(saved.updated_at))}`);
@@ -1028,6 +1075,11 @@ export function App() {
           openai_key_present: Boolean(saved.openai_api_key),
           anthropic_key_present: Boolean(saved.anthropic_api_key),
           gemini_key_present: Boolean(saved.gemini_api_key),
+          deepseek_key_present: Boolean(saved.deepseek_api_key),
+          openai_remote_present: saved.openai_api_key_remote,
+          anthropic_remote_present: saved.anthropic_api_key_remote,
+          gemini_remote_present: saved.gemini_api_key_remote,
+          deepseek_remote_present: saved.deepseek_api_key_remote,
         },
       });
       return saved;
@@ -1335,7 +1387,7 @@ export function App() {
         protocol_lines: protocol.lines,
         protocol_chars: protocolText.length,
         required_outputs: finalArtifacts.map((artifact) => artifact.name),
-        consensus_gate: 'trilateral_ready_same_round',
+        consensus_gate: 'all_editorial_agents_ready_same_round',
         initial_agent: selectedInitialAgent,
       },
     });
@@ -1553,7 +1605,7 @@ export function App() {
         setOperation({
           title: 'Texto final liberado',
           progress: 100,
-          current: `Unanimidade trilateral registrada. Texto: ${result.final_markdown_path}`,
+          current: `Unanimidade dos agentes registrada. Texto: ${result.final_markdown_path}`,
           eta: `Ata: ${result.session_minutes_path}`,
           status: 'completed',
         });
@@ -1608,7 +1660,7 @@ export function App() {
               exit_code: agent.exit_code,
               output_path: agent.output_path,
             })),
-            final_delivery: 'blocked_without_trilateral_unanimity',
+            final_delivery: 'blocked_without_all_agent_unanimity',
           },
         });
       }
@@ -1625,6 +1677,7 @@ export function App() {
         { name: 'Claude', cli: 'claude', state: 'blocked', note: 'falha antes de resultado estruturado' },
         { name: 'Codex', cli: 'codex', state: 'blocked', note: 'falha antes de resultado estruturado' },
         { name: 'Gemini', cli: 'gemini', state: 'blocked', note: 'falha antes de resultado estruturado' },
+        { name: 'DeepSeek', cli: 'deepseek-api', state: 'blocked', note: 'falha antes de resultado estruturado' },
         { name: 'Maestro', cli: 'motor local', state: 'blocked', note: 'consulte diagnostico e arquivos da sessao' },
       ]);
       void logEvent({
@@ -1760,6 +1813,7 @@ export function App() {
         openai_key_present: aiCredentials.openai.length > 0,
         anthropic_key_present: aiCredentials.anthropic.length > 0,
         gemini_key_present: aiCredentials.gemini.length > 0,
+        deepseek_key_present: aiCredentials.deepseek.length > 0,
       },
     });
 
@@ -1769,6 +1823,7 @@ export function App() {
         { label: 'OpenAI / Codex', value: 'verificacao nao executada: falha ao salvar', tone: 'error' },
         { label: 'Anthropic / Claude', value: 'verificacao nao executada: falha ao salvar', tone: 'error' },
         { label: 'Google / Gemini', value: 'verificacao nao executada: falha ao salvar', tone: 'error' },
+        { label: 'DeepSeek', value: 'verificacao nao executada: falha ao salvar', tone: 'error' },
       ]);
       setIsVerifyingAiProviders(false);
       return;
@@ -1798,6 +1853,7 @@ export function App() {
         { label: 'OpenAI / Codex', value: 'falha local na verificacao', tone: 'error' },
         { label: 'Anthropic / Claude', value: 'falha local na verificacao', tone: 'error' },
         { label: 'Google / Gemini', value: 'falha local na verificacao', tone: 'error' },
+        { label: 'DeepSeek', value: 'falha local na verificacao', tone: 'error' },
       ]);
       void logEvent({
         level: 'error',
@@ -2070,7 +2126,7 @@ export function App() {
                 />
                 <div className="prompt-footer">
                   <span>{editorialPrompt.length.toLocaleString('pt-BR')} caracteres</span>
-                  <span>entrega: unanimidade trilateral</span>
+                  <span>entrega: unanimidade dos agentes</span>
                   <span>run: {sessionRunId ?? 'sem sessao'}</span>
                   <span>{protocol.lines} linhas de protocolo</span>
                 </div>
@@ -2170,7 +2226,7 @@ export function App() {
               </div>
             </section>
 
-            <section className="panel session-ledger-panel" aria-label="Discussao trilateral">
+            <section className="panel session-ledger-panel" aria-label="Discussao editorial">
               <div className="panel-heading">
                 <div>
                   <p className="eyebrow">Ata viva</p>

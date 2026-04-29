@@ -17,9 +17,9 @@ Portable Windows editorial workbench for protocol-driven AI drafting, source ver
 ![state](https://img.shields.io/badge/state-JSON%2FNDJSON-informational)
 ![license](https://img.shields.io/badge/license-AGPL--3.0-blue)
 
-Status: functional alpha with live bootstrap, diagnostics, navigation, Cloudflare credential provisioning, AI API credential checks, PostEditor parity, link auditing, and a real background Claude/Codex/Gemini editorial session path.
+Status: functional alpha with live bootstrap, diagnostics, navigation, Cloudflare credential provisioning, AI API credential checks, PostEditor parity, link auditing, and a real background Claude/Codex/Gemini/DeepSeek editorial session path.
 
-Current project version: `v0.3.10`.
+Current project version: `v0.3.11`.
 
 Maestro is independent from `cross-review-mcp`; it incorporates the same strict convergence discipline in its own application logic. It is designed to run from a folder, keep runtime data out of Git, and store operator protocols, drafts, evidence, and sessions locally under ignored runtime paths.
 
@@ -29,7 +29,7 @@ Planned modern stack: Tauri 2 + WebView2, React 19, Vite 8, TypeScript 6, Vitest
 
 Diagnostic logs are structured NDJSON files under `data/logs/`, one file per app execution, with native/frontend context and per-agent process events so failures can be attached for precise analysis. The app UI shows a human-readable activity summary while the raw NDJSON remains available for deep debugging. See `docs/logging.md`.
 
-CLI agents run in background by design, without visible terminal windows in Windows release builds. Real editorial calls do not have an artificial timeout. The operator can choose Claude, Codex, or Gemini to write the first version; that choice is saved with the session while all three remain part of the review cycle. The operator sees friendly progress, elapsed-time heartbeat status, phase status, resume controls, and a selectable UI verbosity level, while raw prompts, stdout, stderr, working drafts, and transcripts stay out of the normal interface and remain protected as ignored local runtime artifacts under `data/sessions/`.
+CLI agents run in background by design, without visible terminal windows in Windows release builds. DeepSeek runs through the official API path, not a local CLI. Real editorial calls do not have an artificial timeout. The operator can choose Claude, Codex, Gemini, or DeepSeek to write the first version; that choice is saved with the session while all four remain part of the review cycle. The operator sees friendly progress, elapsed-time heartbeat status, phase status, resume controls, and a selectable UI verbosity level, while raw prompts, stdout, stderr, working drafts, and transcripts stay out of the normal interface and remain protected as ignored local runtime artifacts under `data/sessions/`.
 
 MainSite-bound editing uses a PostEditor parity module, not a generic editor. See `docs/text-editor-decision.md` and `docs/mainsite-compatibility-contract.md`.
 
@@ -39,11 +39,13 @@ CLI adapter feasibility and risks are audited under `docs/cli-agent-audit.md`.
 
 Cloudflare account/token configuration now verifies the token, prepares `maestro_db`, reuses an existing account Secrets Store when present, and creates `maestro` only when no store exists and creation is permitted. Broader API-first D1 publishing remains tracked under `docs/cloudflare-credentials.md`.
 
-Official AI provider API credentials can be saved locally in `data/config/ai-providers.json` and verified against OpenAI, Anthropic, and Gemini model-list endpoints. Full SDK orchestration remains tracked under `docs/ai-provider-credentials.md`, alongside the existing CLI path.
+Official AI provider API credentials can be saved locally in `data/config/ai-providers.json` and verified against OpenAI, Anthropic, Gemini, and DeepSeek model-list endpoints. Full SDK orchestration remains tracked under `docs/ai-provider-credentials.md`, alongside the existing CLI path.
 
 Configuration persistence supports three modes: local JSON for everything, Windows env-var hybrid for tokens/API keys plus JSON for other settings, and Cloudflare remote persistence through D1 `maestro_db` plus Cloudflare Secrets Store. See `docs/configuration-persistence.md`.
 
 The portable ZIP includes `LEIAME.md` with first-run instructions for end users, including `data/config/bootstrap.json`, Cloudflare environment variables, and per-execution NDJSON logs.
+
+The growing native and React surfaces now have a staged modularization plan in `docs/code-split-plan.md`.
 
 Prompt-to-consensus sessions export separate final text and session minutes. Interrupted sessions can be resumed from `data/sessions/`; if a new protocol is loaded before resume, Maestro passes it to the agents and preserves the previous protocol as a local session artifact. See `docs/editorial-session-workflow.md`.
 

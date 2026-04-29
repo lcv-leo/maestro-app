@@ -4,6 +4,13 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.11] - 2026-04-28
+
+- Added DeepSeek as a real API-backed editorial peer: it can be selected as draft lead, participates in review/revision rounds, writes normal session artifacts, and selects the best available authenticated DeepSeek `/models` entry, with `deepseek-v4-pro` preferred when exposed.
+- Added DeepSeek credential storage and real model-list verification alongside OpenAI, Anthropic, and Gemini.
+- Improved Cloudflare Secrets Store reload behavior: Maestro now restores remote secret references from the local marker and `maestro_db` metadata, while clearly treating raw Secret Store values as non-readable by the desktop app.
+- Added the initial `docs/code-split-plan.md` roadmap for splitting the growing Rust and React surfaces without mixing refactor work with behavior changes.
+
 ## [v0.3.10] - 2026-04-28
 
 - Fixed broken/paused session display overflow by making the app shell viewport-bound, moving page overflow to the workspace, bounding all repeated status lists, and summarizing agent history instead of rendering every historical agent result as visible UI.

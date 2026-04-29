@@ -47,9 +47,26 @@ struct AiProviderConfig {
     schema_version: u8,
     provider_mode: String,
     credential_storage_mode: String,
+    #[serde(default)]
     openai_api_key: Option<String>,
+    #[serde(default)]
     anthropic_api_key: Option<String>,
+    #[serde(default)]
     gemini_api_key: Option<String>,
+    #[serde(default)]
+    deepseek_api_key: Option<String>,
+    #[serde(default)]
+    openai_api_key_remote: bool,
+    #[serde(default)]
+    anthropic_api_key_remote: bool,
+    #[serde(default)]
+    gemini_api_key_remote: bool,
+    #[serde(default)]
+    deepseek_api_key_remote: bool,
+    #[serde(default)]
+    cloudflare_secret_store_id: Option<String>,
+    #[serde(default)]
+    cloudflare_secret_store_name: Option<String>,
     updated_at: String,
 }
 
@@ -286,6 +303,13 @@ impl Default for AiProviderConfig {
             openai_api_key: None,
             anthropic_api_key: None,
             gemini_api_key: None,
+            deepseek_api_key: None,
+            openai_api_key_remote: false,
+            anthropic_api_key_remote: false,
+            gemini_api_key_remote: false,
+            deepseek_api_key_remote: false,
+            cloudflare_secret_store_id: None,
+            cloudflare_secret_store_name: None,
             updated_at: Utc::now().to_rfc3339(),
         }
     }
@@ -482,7 +506,7 @@ fn read_ai_provider_config() -> Result<AiProviderConfig, String> {
             ..AiProviderConfig::default()
         };
         persist_ai_provider_config(&path, &config)?;
-        return Ok(config);
+        return Ok(merge_ai_provider_env_values(config));
     }
 
     let text = fs::read_to_string(&path)
@@ -492,8 +516,13 @@ fn read_ai_provider_config() -> Result<AiProviderConfig, String> {
     if let Ok(bootstrap) = read_bootstrap_config() {
         config.credential_storage_mode =
             normalize_storage_mode(&bootstrap.credential_storage_mode).to_string();
+        if config.credential_storage_mode == "cloudflare" {
+            config = enrich_ai_provider_config_from_cloudflare(config, &bootstrap);
+        }
     }
-    Ok(sanitize_ai_provider_config(config))
+    Ok(merge_ai_provider_env_values(sanitize_ai_provider_config(
+        config,
+    )))
 }
 
 #[tauri::command]
@@ -697,7 +726,7 @@ fn run_cli_adapter_smoke(
                 "protocol_name": sanitize_text(&request.protocol_name, 160),
                 "protocol_lines": request.protocol_lines,
                 "protocol_hash_prefix": sanitize_short(&request.protocol_hash, 16),
-                "agents": ["claude", "codex", "gemini"]
+                "agents": ["claude", "codex", "gemini", "deepseek"]
             })),
         },
     );
@@ -806,7 +835,7 @@ fn run_editorial_session_blocking(
                 "protocol_lines": request.protocol_text.lines().count(),
                 "protocol_hash_prefix": sanitize_short(&request.protocol_hash, 16),
                 "initial_agent": resolve_initial_agent_key(request.initial_agent.as_deref()).0,
-                "agents": ["claude", "codex", "gemini"],
+                "agents": ["claude", "codex", "gemini", "deepseek"],
                 "artifact_policy": "raw agent outputs are written under data/sessions, not embedded in NDJSON"
             })),
         },
@@ -1336,6 +1365,15 @@ fn persist_ai_provider_cloudflare_marker(
         openai_api_key: None,
         anthropic_api_key: None,
         gemini_api_key: None,
+        deepseek_api_key: None,
+        openai_api_key_remote: config.openai_api_key.is_some() || config.openai_api_key_remote,
+        anthropic_api_key_remote: config.anthropic_api_key.is_some()
+            || config.anthropic_api_key_remote,
+        gemini_api_key_remote: config.gemini_api_key.is_some() || config.gemini_api_key_remote,
+        deepseek_api_key_remote: config.deepseek_api_key.is_some()
+            || config.deepseek_api_key_remote,
+        cloudflare_secret_store_id: config.cloudflare_secret_store_id.clone(),
+        cloudflare_secret_store_name: config.cloudflare_secret_store_name.clone(),
         updated_at: config.updated_at.clone(),
     };
     persist_ai_provider_config(path, &marker)
@@ -1421,6 +1459,19 @@ fn sanitize_ai_provider_config(config: AiProviderConfig) -> AiProviderConfig {
         openai_api_key: sanitize_optional_secret(config.openai_api_key),
         anthropic_api_key: sanitize_optional_secret(config.anthropic_api_key),
         gemini_api_key: sanitize_optional_secret(config.gemini_api_key),
+        deepseek_api_key: sanitize_optional_secret(config.deepseek_api_key),
+        openai_api_key_remote: config.openai_api_key_remote,
+        anthropic_api_key_remote: config.anthropic_api_key_remote,
+        gemini_api_key_remote: config.gemini_api_key_remote,
+        deepseek_api_key_remote: config.deepseek_api_key_remote,
+        cloudflare_secret_store_id: config
+            .cloudflare_secret_store_id
+            .map(|value| sanitize_short(&value, 80))
+            .filter(|value| !value.is_empty()),
+        cloudflare_secret_store_name: config
+            .cloudflare_secret_store_name
+            .map(|value| sanitize_short(&value, 80))
+            .filter(|value| !value.is_empty()),
         updated_at: Utc::now().to_rfc3339(),
     }
 }
@@ -1429,6 +1480,144 @@ fn sanitize_optional_secret(value: Option<String>) -> Option<String> {
     value
         .map(|text| text.trim().chars().take(4096).collect::<String>())
         .filter(|text| !text.is_empty())
+}
+
+fn merge_ai_provider_env_values(mut config: AiProviderConfig) -> AiProviderConfig {
+    if config.openai_api_key.is_none() {
+        config.openai_api_key = provider_env_value(&["MAESTRO_OPENAI_API_KEY", "OPENAI_API_KEY"]);
+    }
+    if config.anthropic_api_key.is_none() {
+        config.anthropic_api_key =
+            provider_env_value(&["MAESTRO_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]);
+    }
+    if config.gemini_api_key.is_none() {
+        config.gemini_api_key = provider_env_value(&["MAESTRO_GEMINI_API_KEY", "GEMINI_API_KEY"]);
+    }
+    if config.deepseek_api_key.is_none() {
+        config.deepseek_api_key =
+            provider_env_value(&["MAESTRO_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY"]);
+    }
+    sanitize_ai_provider_config(config)
+}
+
+fn provider_env_value(candidates: &[&str]) -> Option<String> {
+    first_env_value(candidates).map(|(_, _, value)| value)
+}
+
+fn enrich_ai_provider_config_from_cloudflare(
+    mut config: AiProviderConfig,
+    bootstrap: &BootstrapConfig,
+) -> AiProviderConfig {
+    if let Ok(remote) = read_ai_provider_cloudflare_metadata(bootstrap) {
+        config.provider_mode = remote.provider_mode;
+        config.openai_api_key_remote |= remote.openai_api_key_remote;
+        config.anthropic_api_key_remote |= remote.anthropic_api_key_remote;
+        config.gemini_api_key_remote |= remote.gemini_api_key_remote;
+        config.deepseek_api_key_remote |= remote.deepseek_api_key_remote;
+        config.cloudflare_secret_store_id = remote
+            .cloudflare_secret_store_id
+            .or(config.cloudflare_secret_store_id);
+        config.cloudflare_secret_store_name = remote
+            .cloudflare_secret_store_name
+            .or(config.cloudflare_secret_store_name);
+    }
+    config
+}
+
+fn read_ai_provider_cloudflare_metadata(
+    bootstrap: &BootstrapConfig,
+) -> Result<AiProviderConfig, String> {
+    let account_id = bootstrap
+        .cloudflare_account_id
+        .as_deref()
+        .map(|value| sanitize_short(value, 80))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Cloudflare account id ausente no bootstrap".to_string())?;
+    let token_request = CloudflareProviderStorageRequest {
+        account_id: account_id.clone(),
+        api_token: None,
+        api_token_env_var: bootstrap.cloudflare_api_token_env_var.clone(),
+        persistence_database: bootstrap.cloudflare_persistence_database.clone(),
+        secret_store: bootstrap.cloudflare_secret_store.clone(),
+    };
+    let token = cloudflare_token_from_provider_request(&token_request)?;
+    let client = cloudflare_client()?;
+    let d1_path = format!("/accounts/{account_id}/d1/database");
+    let listed = cloudflare_get(&client, &token, &d1_path)?;
+    let Some(database_id) =
+        cloudflare_result_id_for_name(&listed, &bootstrap.cloudflare_persistence_database)
+    else {
+        return Err("maestro_db nao encontrado para recuperar metadados".to_string());
+    };
+
+    let raw_path = format!("/accounts/{account_id}/d1/database/{database_id}/raw");
+    let value = cloudflare_post_json(
+        &client,
+        &token,
+        &raw_path,
+        json!({
+            "sql": "SELECT value_json FROM maestro_settings WHERE key = ?",
+            "params": ["ai.providers"]
+        }),
+    )?;
+    let Some(value_json) = json_find_first_string(&value, "value_json") else {
+        return Err("metadados ai.providers nao encontrados em maestro_db".to_string());
+    };
+    let metadata: Value = serde_json::from_str(&value_json)
+        .map_err(|error| format!("metadados ai.providers invalidos: {error}"))?;
+    let mut config = AiProviderConfig {
+        credential_storage_mode: "cloudflare".to_string(),
+        provider_mode: metadata
+            .get("provider_mode")
+            .and_then(Value::as_str)
+            .unwrap_or("hybrid")
+            .to_string(),
+        updated_at: metadata
+            .get("updated_at")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        cloudflare_secret_store_id: metadata
+            .get("effective_store_id")
+            .and_then(Value::as_str)
+            .map(|value| value.to_string()),
+        cloudflare_secret_store_name: metadata
+            .get("effective_store_name")
+            .and_then(Value::as_str)
+            .map(|value| value.to_string()),
+        ..AiProviderConfig::default()
+    };
+
+    if let Some(items) = metadata.get("secrets").and_then(Value::as_array) {
+        for item in items {
+            match item.get("name").and_then(Value::as_str).unwrap_or_default() {
+                "MAESTRO_OPENAI_API_KEY" => config.openai_api_key_remote = true,
+                "MAESTRO_ANTHROPIC_API_KEY" => config.anthropic_api_key_remote = true,
+                "MAESTRO_GEMINI_API_KEY" => config.gemini_api_key_remote = true,
+                "MAESTRO_DEEPSEEK_API_KEY" => config.deepseek_api_key_remote = true,
+                _ => {}
+            }
+        }
+    }
+
+    Ok(sanitize_ai_provider_config(config))
+}
+
+fn json_find_first_string(value: &Value, key: &str) -> Option<String> {
+    match value {
+        Value::Object(map) => map
+            .get(key)
+            .and_then(Value::as_str)
+            .map(|value| value.to_string())
+            .or_else(|| {
+                map.values()
+                    .find_map(|item| json_find_first_string(item, key))
+            }),
+        Value::Array(items) => items
+            .iter()
+            .find_map(|item| json_find_first_string(item, key)),
+        _ => None,
+    }
 }
 
 fn first_env_value(candidates: &[&str]) -> Option<(String, String, String)> {
@@ -1527,6 +1716,8 @@ fn run_editorial_session_core(
         .first()
         .map(|spec| spec.name)
         .unwrap_or("Claude");
+    let ai_provider_config =
+        read_ai_provider_config().unwrap_or_else(|_| AiProviderConfig::default());
 
     let session_dir = checked_data_child_path(&sessions_dir().join(&run_id))?;
     let agent_dir = checked_data_child_path(&session_dir.join("agent-runs"))?;
@@ -1615,16 +1806,15 @@ fn run_editorial_session_core(
 
         for spec in draft_specs {
             let output_path = agent_dir.join(format!("round-001-{}-draft.md", spec.key));
-            let draft_run = run_editorial_agent(
+            let draft_run = run_editorial_agent_for_spec(
                 log_session,
                 &run_id,
-                spec.name,
+                spec,
                 "draft",
-                spec.command,
-                (spec.args)(),
                 build_draft_prompt(request, &run_id),
                 &output_path,
                 None,
+                &ai_provider_config,
             );
             agents.push(draft_run.clone());
             let draft_artifact = read_text_file(&output_path).unwrap_or_default();
@@ -1681,46 +1871,26 @@ fn run_editorial_session_core(
 
     let final_path: PathBuf;
     loop {
-        let review_specs = vec![
-            (
-                "Claude",
-                "review",
-                "claude",
-                claude_args(),
-                agent_dir.join(format!("round-{round:03}-claude-review.md")),
-            ),
-            (
-                "Codex",
-                "review",
-                "codex",
-                codex_args(),
-                agent_dir.join(format!("round-{round:03}-codex-review.md")),
-            ),
-            (
-                "Gemini",
-                "review",
-                "gemini",
-                gemini_args(),
-                agent_dir.join(format!("round-{round:03}-gemini-review.md")),
-            ),
-        ];
+        let review_specs = editorial_agent_specs();
         let review_handles = review_specs
             .into_iter()
-            .map(|(name, role, command, args, output_path)| {
+            .map(|spec| {
                 let prompt = build_review_prompt(request, &run_id, &current_draft);
+                let output_path =
+                    agent_dir.join(format!("round-{round:03}-{}-review.md", spec.key));
                 let run_id = run_id.clone();
                 let log_session = log_session.clone();
+                let ai_provider_config = ai_provider_config.clone();
                 thread::spawn(move || {
-                    run_editorial_agent(
+                    run_editorial_agent_for_spec(
                         &log_session,
                         &run_id,
-                        name,
-                        role,
-                        command,
-                        args,
+                        spec,
+                        "review",
                         prompt,
                         &output_path,
                         None,
+                        &ai_provider_config,
                     )
                 })
             })
@@ -1798,16 +1968,15 @@ fn run_editorial_session_core(
         let mut revised = false;
         for spec in revision_specs {
             let output_path = agent_dir.join(format!("round-{round:03}-{}-revision.md", spec.key));
-            let revision_run = run_editorial_agent(
+            let revision_run = run_editorial_agent_for_spec(
                 log_session,
                 &run_id,
-                spec.name,
+                spec,
                 "revision",
-                spec.command,
-                (spec.args)(),
                 revision_prompt.clone(),
                 &output_path,
                 None,
+                &ai_provider_config,
             );
             agents.push(revision_run.clone());
             let artifact = read_text_file(&output_path).unwrap_or_default();
@@ -2062,7 +2231,7 @@ fn parse_agent_artifact_name(agent_dir: &Path, name: &str) -> Option<SessionArti
     let stem = rest.strip_suffix(".md")?;
     let (agent, role) = stem.rsplit_once('-')?;
     let agent = match agent {
-        "claude" | "codex" | "gemini" => agent,
+        "claude" | "codex" | "gemini" | "deepseek" => agent,
         _ => return None,
     };
     if !matches!(role, "draft" | "review" | "revision") {
@@ -2097,7 +2266,10 @@ fn parse_agent_artifact_result(artifact: &SessionArtifact) -> Option<EditorialAg
         extract_bullet_code_value(&text, "Exit code").and_then(|value| value.parse::<i32>().ok());
     let tone = if status == "READY" || status == "DRAFT_CREATED" {
         "ok"
-    } else if status == "CLI_NOT_FOUND" {
+    } else if status == "CLI_NOT_FOUND"
+        || status == "API_KEY_NOT_AVAILABLE"
+        || status == "REMOTE_SECRET_NOT_READABLE"
+    {
         "blocked"
     } else if status.starts_with("EXEC_ERROR")
         || status == "AGENT_FAILED_NO_OUTPUT"
@@ -2134,6 +2306,7 @@ fn humanize_agent_name(value: &str) -> String {
         "claude" => "Claude".to_string(),
         "codex" => "Codex".to_string(),
         "gemini" => "Gemini".to_string(),
+        "deepseek" => "DeepSeek".to_string(),
         other => other
             .replace('_', " ")
             .split_whitespace()
@@ -2344,6 +2517,10 @@ fn gemini_args() -> Vec<String> {
     ]
 }
 
+fn deepseek_args() -> Vec<String> {
+    Vec::new()
+}
+
 fn editorial_agent_specs() -> Vec<EditorialAgentSpec> {
     vec![
         EditorialAgentSpec {
@@ -2364,6 +2541,12 @@ fn editorial_agent_specs() -> Vec<EditorialAgentSpec> {
             command: "gemini",
             args: gemini_args,
         },
+        EditorialAgentSpec {
+            key: "deepseek",
+            name: "DeepSeek",
+            command: "deepseek-api",
+            args: deepseek_args,
+        },
     ]
 }
 
@@ -2376,6 +2559,7 @@ fn resolve_initial_agent_key(value: Option<&str>) -> (&'static str, Option<Strin
         "claude" | "anthropic" => ("claude", None),
         "codex" | "openai" | "chatgpt" => ("codex", None),
         "gemini" | "google" => ("gemini", None),
+        "deepseek" | "deepseek-api" => ("deepseek", None),
         "" => ("claude", None),
         _ => ("claude", Some(sanitize_text(value, 80))),
     }
@@ -2523,6 +2707,355 @@ Nao invente links. Se faltar evidencia, preserve marcador `[EVIDENCIA_PENDENTE]`
         draft,
         review_notes
     )
+}
+
+fn run_editorial_agent_for_spec(
+    log_session: &LogSession,
+    run_id: &str,
+    spec: EditorialAgentSpec,
+    role: &str,
+    stdin_text: String,
+    output_path: &Path,
+    timeout: Option<Duration>,
+    config: &AiProviderConfig,
+) -> EditorialAgentResult {
+    if spec.command == "deepseek-api" {
+        return run_deepseek_api_agent(log_session, run_id, role, stdin_text, output_path, config);
+    }
+
+    run_editorial_agent(
+        log_session,
+        run_id,
+        spec.name,
+        role,
+        spec.command,
+        (spec.args)(),
+        stdin_text,
+        output_path,
+        timeout,
+    )
+}
+
+fn run_deepseek_api_agent(
+    log_session: &LogSession,
+    run_id: &str,
+    role: &str,
+    prompt: String,
+    output_path: &Path,
+    config: &AiProviderConfig,
+) -> EditorialAgentResult {
+    let started = Instant::now();
+    let model_hint = deepseek_model();
+    let name = "DeepSeek";
+    let cli = "deepseek-api";
+
+    let Some((api_key, key_source)) = effective_provider_key(
+        config.deepseek_api_key.as_deref(),
+        &["MAESTRO_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY"],
+    ) else {
+        let status = if config.deepseek_api_key_remote {
+            "REMOTE_SECRET_NOT_READABLE"
+        } else {
+            "API_KEY_NOT_AVAILABLE"
+        };
+        let note = if config.deepseek_api_key_remote {
+            "A referencia do segredo existe no Cloudflare Secrets Store, mas a Cloudflare nao devolve o valor bruto ao app local. Informe MAESTRO_DEEPSEEK_API_KEY/DEEPSEEK_API_KEY ou configure um broker Cloudflare para consumir o segredo."
+        } else {
+            "DeepSeek precisa de MAESTRO_DEEPSEEK_API_KEY, DEEPSEEK_API_KEY ou chave informada na tela Ajustes > Agentes via API."
+        };
+        let _ = write_text_file(
+            output_path,
+            &format!(
+                "# {name} - {role}\n\n- CLI: `{cli}`\n- Status: `{status}`\n- Exit code: `unknown`\n- Duration ms: `{}`\n- Model: `{model}`\n\n{note}\n\n## Stdout\n\n```text\n\n```\n\n## Stderr\n\n```text\n{note}\n```\n",
+                started.elapsed().as_millis(),
+                model = model_hint
+            ),
+        );
+        let result = EditorialAgentResult {
+            name: name.to_string(),
+            role: role.to_string(),
+            cli: cli.to_string(),
+            tone: "blocked".to_string(),
+            status: status.to_string(),
+            duration_ms: started.elapsed().as_millis(),
+            exit_code: None,
+            output_path: output_path.to_string_lossy().to_string(),
+        };
+        log_editorial_agent_finished(
+            log_session,
+            run_id,
+            &result,
+            None,
+            Some(note.len()),
+            None,
+            false,
+        );
+        return result;
+    };
+
+    let client = match Client::builder()
+        .user_agent(format!(
+            "Maestro Editorial AI/{}",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
+            return write_deepseek_error_result(
+                log_session,
+                run_id,
+                role,
+                output_path,
+                &model_hint,
+                &status,
+                started.elapsed().as_millis(),
+            );
+        }
+    };
+
+    let model = resolve_deepseek_model(&client, &api_key);
+    let _ = write_log_record(
+        log_session,
+        LogEventInput {
+            level: "info".to_string(),
+            category: "session.agent.started".to_string(),
+            message: "editorial API peer request starting".to_string(),
+            context: Some(json!({
+                "run_id": sanitize_short(run_id, 120),
+                "agent": name,
+                "role": role,
+                "cli": cli,
+                "provider": "deepseek",
+                "model": model,
+                "prompt_chars": prompt.chars().count(),
+                "output_path": output_path.to_string_lossy().to_string(),
+                "timeout_policy": "none_editorial_session"
+            })),
+        },
+    );
+
+    let max_tokens = if role == "review" { 4096 } else { 20000 };
+    let response = client
+        .post("https://api.deepseek.com/chat/completions")
+        .bearer_auth(&api_key)
+        .json(&json!({
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Voce e o peer DeepSeek dentro do Maestro Editorial AI. Leia integralmente o pedido do usuario, o protocolo editorial e os artefatos fornecidos. Responda somente ao que foi solicitado. Em revisoes, a primeira linha precisa seguir exatamente o contrato MAESTRO_STATUS."
+                },
+                { "role": "user", "content": prompt }
+            ],
+            "stream": false,
+            "max_tokens": max_tokens
+        }))
+        .send();
+
+    match response {
+        Ok(response) => {
+            let http_status = response.status();
+            let body = response.text().unwrap_or_default();
+            if !http_status.is_success() {
+                let status = sanitize_text(
+                    &format!(
+                        "PROVIDER_ERROR_HTTP_{}: {}",
+                        http_status.as_u16(),
+                        api_error_message(&body)
+                    ),
+                    240,
+                );
+                return write_deepseek_error_result(
+                    log_session,
+                    run_id,
+                    role,
+                    output_path,
+                    &model,
+                    &status,
+                    started.elapsed().as_millis(),
+                );
+            }
+
+            let parsed: Value = serde_json::from_str(&body).unwrap_or_else(|_| json!({}));
+            let stdout = parsed
+                .pointer("/choices/0/message/content")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(body.trim())
+                .to_string();
+            let model_reported = parsed
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or(&model);
+            let status = if role == "review" {
+                extract_maestro_status(&stdout).unwrap_or("NOT_READY")
+            } else if stdout.trim().is_empty() {
+                "EMPTY_DRAFT"
+            } else {
+                "DRAFT_CREATED"
+            };
+            let tone = if status == "READY" || status == "DRAFT_CREATED" {
+                "ok"
+            } else if status == "EMPTY_DRAFT" {
+                "error"
+            } else {
+                "warn"
+            };
+            let artifact = format!(
+                "# {name} - {role}\n\n- CLI: `{cli}`\n- Provider: `deepseek`\n- Model: `{}`\n- Model reported: `{}`\n- Key source: `{}`\n- Status: `{status}`\n- Exit code: `0`\n- Duration ms: `{}`\n- Prompt chars: `{}`\n- Stdout chars: `{}`\n- Stderr chars: `0`\n\n## Stdout\n\n```text\n{}\n```\n\n## Stderr\n\n```text\n\n```\n",
+                model,
+                sanitize_text(model_reported, 120),
+                sanitize_text(&key_source, 120),
+                started.elapsed().as_millis(),
+                prompt.chars().count(),
+                stdout.chars().count(),
+                stdout
+            );
+            let _ = write_text_file(output_path, &artifact);
+            let result = EditorialAgentResult {
+                name: name.to_string(),
+                role: role.to_string(),
+                cli: cli.to_string(),
+                tone: tone.to_string(),
+                status: status.to_string(),
+                duration_ms: started.elapsed().as_millis(),
+                exit_code: Some(0),
+                output_path: output_path.to_string_lossy().to_string(),
+            };
+            log_editorial_agent_finished(
+                log_session,
+                run_id,
+                &result,
+                Some(stdout.chars().count()),
+                Some(0),
+                Some("https://api.deepseek.com/chat/completions".to_string()),
+                false,
+            );
+            result
+        }
+        Err(error) => {
+            let status = sanitize_text(&format!("PROVIDER_NETWORK_ERROR: {error}"), 240);
+            write_deepseek_error_result(
+                log_session,
+                run_id,
+                role,
+                output_path,
+                &model,
+                &status,
+                started.elapsed().as_millis(),
+            )
+        }
+    }
+}
+
+fn write_deepseek_error_result(
+    log_session: &LogSession,
+    run_id: &str,
+    role: &str,
+    output_path: &Path,
+    model: &str,
+    status: &str,
+    duration_ms: u128,
+) -> EditorialAgentResult {
+    let name = "DeepSeek";
+    let cli = "deepseek-api";
+    let safe_status = sanitize_text(status, 240);
+    let _ = write_text_file(
+        output_path,
+        &format!(
+            "# {name} - {role}\n\n- CLI: `{cli}`\n- Provider: `deepseek`\n- Model: `{}`\n- Status: `{}`\n- Exit code: `unknown`\n- Duration ms: `{duration_ms}`\n\n## Stdout\n\n```text\n\n```\n\n## Stderr\n\n```text\n{}\n```\n",
+            sanitize_text(model, 120),
+            safe_status,
+            safe_status
+        ),
+    );
+    let result = EditorialAgentResult {
+        name: name.to_string(),
+        role: role.to_string(),
+        cli: cli.to_string(),
+        tone: "error".to_string(),
+        status: safe_status,
+        duration_ms,
+        exit_code: None,
+        output_path: output_path.to_string_lossy().to_string(),
+    };
+    log_editorial_agent_finished(
+        log_session,
+        run_id,
+        &result,
+        None,
+        Some(status.len()),
+        None,
+        false,
+    );
+    result
+}
+
+fn deepseek_model() -> String {
+    first_env_value(&["MAESTRO_DEEPSEEK_MODEL", "CROSS_REVIEW_DEEPSEEK_MODEL"])
+        .map(|(_, _, value)| sanitize_short(&value, 120))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "deepseek-v4-pro".to_string())
+}
+
+fn resolve_deepseek_model(client: &Client, api_key: &str) -> String {
+    if let Some((_, _, value)) =
+        first_env_value(&["MAESTRO_DEEPSEEK_MODEL", "CROSS_REVIEW_DEEPSEEK_MODEL"])
+    {
+        let model = sanitize_short(&value, 120);
+        if !model.is_empty() {
+            return model;
+        }
+    }
+
+    let response = client
+        .get("https://api.deepseek.com/models")
+        .bearer_auth(api_key)
+        .send();
+    if let Ok(response) = response {
+        if response.status().is_success() {
+            let body = response.text().unwrap_or_default();
+            if let Ok(value) = serde_json::from_str::<Value>(&body) {
+                let models = deepseek_model_ids(&value);
+                for candidate in [
+                    "deepseek-v4-pro",
+                    "deepseek-reasoner",
+                    "deepseek-chat",
+                    "deepseek-v4-flash",
+                ] {
+                    if models.iter().any(|model| model == candidate) {
+                        return candidate.to_string();
+                    }
+                }
+                if let Some(first) = models.first() {
+                    return first.clone();
+                }
+            }
+        }
+    }
+
+    "deepseek-reasoner".to_string()
+}
+
+fn deepseek_model_ids(value: &Value) -> Vec<String> {
+    value
+        .get("data")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    item.get("id")
+                        .and_then(Value::as_str)
+                        .map(|id| sanitize_short(id, 120))
+                })
+                .filter(|id| !id.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 fn run_editorial_agent(
@@ -3014,7 +3547,7 @@ fn build_session_minutes(
         text.push_str("\n## Decisao\n\n");
         text.push_str(&build_blocked_minutes_decision(agents));
     } else {
-        text.push_str("\n## Decisao\n\nTexto final liberado por unanimidade trilateral.\n");
+        text.push_str("\n## Decisao\n\nTexto final liberado por unanimidade dos agentes.\n");
     }
 
     text
@@ -3221,49 +3754,100 @@ fn run_ai_provider_probe(config: &AiProviderConfig) -> AiProviderProbeResult {
 
     AiProviderProbeResult {
         rows: vec![
-            probe_openai_api(&client, config.openai_api_key.as_deref()),
-            probe_anthropic_api(&client, config.anthropic_api_key.as_deref()),
-            probe_gemini_api(&client, config.gemini_api_key.as_deref()),
+            probe_openai_api(&client, config),
+            probe_anthropic_api(&client, config),
+            probe_gemini_api(&client, config),
+            probe_deepseek_api(&client, config),
         ],
         checked_at: Utc::now().to_rfc3339(),
     }
 }
 
-fn probe_openai_api(client: &Client, key: Option<&str>) -> AiProviderProbeRow {
-    let Some(key) = key.filter(|value| !value.trim().is_empty()) else {
-        return ai_probe_row("OpenAI / Codex", "API key nao informada", "warn");
+fn probe_openai_api(client: &Client, config: &AiProviderConfig) -> AiProviderProbeRow {
+    let Some((key, _source)) = effective_provider_key(
+        config.openai_api_key.as_deref(),
+        &["MAESTRO_OPENAI_API_KEY", "OPENAI_API_KEY"],
+    ) else {
+        return missing_provider_key_row("OpenAI / Codex", config.openai_api_key_remote);
     };
 
     let response = client
         .get("https://api.openai.com/v1/models")
-        .bearer_auth(key)
+        .bearer_auth(&key)
         .send();
     summarize_ai_probe_response("OpenAI / Codex", response)
 }
 
-fn probe_anthropic_api(client: &Client, key: Option<&str>) -> AiProviderProbeRow {
-    let Some(key) = key.filter(|value| !value.trim().is_empty()) else {
-        return ai_probe_row("Anthropic / Claude", "API key nao informada", "warn");
+fn probe_anthropic_api(client: &Client, config: &AiProviderConfig) -> AiProviderProbeRow {
+    let Some((key, _source)) = effective_provider_key(
+        config.anthropic_api_key.as_deref(),
+        &["MAESTRO_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"],
+    ) else {
+        return missing_provider_key_row("Anthropic / Claude", config.anthropic_api_key_remote);
     };
 
     let response = client
         .get("https://api.anthropic.com/v1/models")
-        .header("x-api-key", key)
+        .header("x-api-key", &key)
         .header("anthropic-version", "2023-06-01")
         .send();
     summarize_ai_probe_response("Anthropic / Claude", response)
 }
 
-fn probe_gemini_api(client: &Client, key: Option<&str>) -> AiProviderProbeRow {
-    let Some(key) = key.filter(|value| !value.trim().is_empty()) else {
-        return ai_probe_row("Google / Gemini", "API key nao informada", "warn");
+fn probe_gemini_api(client: &Client, config: &AiProviderConfig) -> AiProviderProbeRow {
+    let Some((key, _source)) = effective_provider_key(
+        config.gemini_api_key.as_deref(),
+        &["MAESTRO_GEMINI_API_KEY", "GEMINI_API_KEY"],
+    ) else {
+        return missing_provider_key_row("Google / Gemini", config.gemini_api_key_remote);
     };
 
     let response = client
         .get("https://generativelanguage.googleapis.com/v1beta/models")
-        .query(&[("key", key)])
+        .query(&[("key", &key)])
         .send();
     summarize_ai_probe_response("Google / Gemini", response)
+}
+
+fn probe_deepseek_api(client: &Client, config: &AiProviderConfig) -> AiProviderProbeRow {
+    let Some((key, _source)) = effective_provider_key(
+        config.deepseek_api_key.as_deref(),
+        &["MAESTRO_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY"],
+    ) else {
+        return missing_provider_key_row("DeepSeek", config.deepseek_api_key_remote);
+    };
+
+    let response = client
+        .get("https://api.deepseek.com/models")
+        .bearer_auth(&key)
+        .send();
+    summarize_ai_probe_response("DeepSeek", response)
+}
+
+fn effective_provider_key(
+    config_value: Option<&str>,
+    env_candidates: &[&str],
+) -> Option<(String, String)> {
+    if let Some(value) = config_value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+    {
+        return Some((value, "config".to_string()));
+    }
+    first_env_value(env_candidates).map(|(name, scope, value)| (value, format!("{name}:{scope}")))
+}
+
+fn missing_provider_key_row(label: &str, remote_present: bool) -> AiProviderProbeRow {
+    if remote_present {
+        ai_probe_row(
+            label,
+            "segredo no Cloudflare; valor nao pode ser lido de volta neste app local",
+            "warn",
+        )
+    } else {
+        ai_probe_row(label, "API key nao informada", "warn")
+    }
 }
 
 fn summarize_ai_probe_response(
@@ -4253,6 +4837,9 @@ fn ai_provider_secret_values(config: &AiProviderConfig) -> BTreeMap<&'static str
     if let Some(value) = config.gemini_api_key.as_ref() {
         values.insert("MAESTRO_GEMINI_API_KEY", value.clone());
     }
+    if let Some(value) = config.deepseek_api_key.as_ref() {
+        values.insert("MAESTRO_DEEPSEEK_API_KEY", value.clone());
+    }
     values
 }
 
@@ -4962,6 +5549,7 @@ mod tests {
         assert_eq!(resolve_initial_agent_key(Some("chatgpt")).0, "codex");
         assert_eq!(resolve_initial_agent_key(Some("Google")).0, "gemini");
         assert_eq!(resolve_initial_agent_key(Some("Anthropic")).0, "claude");
+        assert_eq!(resolve_initial_agent_key(Some("DeepSeek")).0, "deepseek");
         let (fallback, invalid) = resolve_initial_agent_key(Some("unknown-peer"));
         assert_eq!(fallback, "claude");
         assert_eq!(invalid.as_deref(), Some("unknown-peer"));
@@ -4973,19 +5561,28 @@ mod tests {
             .into_iter()
             .map(|spec| spec.key)
             .collect::<Vec<_>>();
-        assert_eq!(claude_order, vec!["claude", "codex", "gemini"]);
+        assert_eq!(claude_order, vec!["claude", "codex", "gemini", "deepseek"]);
 
         let codex_order = ordered_editorial_agent_specs("codex")
             .into_iter()
             .map(|spec| spec.key)
             .collect::<Vec<_>>();
-        assert_eq!(codex_order, vec!["codex", "claude", "gemini"]);
+        assert_eq!(codex_order, vec!["codex", "claude", "gemini", "deepseek"]);
 
         let gemini_order = ordered_editorial_agent_specs("gemini")
             .into_iter()
             .map(|spec| spec.key)
             .collect::<Vec<_>>();
-        assert_eq!(gemini_order, vec!["gemini", "claude", "codex"]);
+        assert_eq!(gemini_order, vec!["gemini", "claude", "codex", "deepseek"]);
+
+        let deepseek_order = ordered_editorial_agent_specs("deepseek")
+            .into_iter()
+            .map(|spec| spec.key)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            deepseek_order,
+            vec!["deepseek", "claude", "codex", "gemini"]
+        );
     }
 
     #[test]
@@ -5037,6 +5634,13 @@ mod tests {
             openai_api_key: Some("  sk-test-value  ".to_string()),
             anthropic_api_key: Some("   ".to_string()),
             gemini_api_key: None,
+            deepseek_api_key: Some("  ds-test-value  ".to_string()),
+            openai_api_key_remote: false,
+            anthropic_api_key_remote: false,
+            gemini_api_key_remote: false,
+            deepseek_api_key_remote: false,
+            cloudflare_secret_store_id: None,
+            cloudflare_secret_store_name: None,
             updated_at: "old".to_string(),
         });
 
@@ -5046,6 +5650,7 @@ mod tests {
         assert_eq!(config.openai_api_key.as_deref(), Some("sk-test-value"));
         assert!(config.anthropic_api_key.is_none());
         assert!(config.gemini_api_key.is_none());
+        assert_eq!(config.deepseek_api_key.as_deref(), Some("ds-test-value"));
     }
 
     #[test]
@@ -5057,6 +5662,13 @@ mod tests {
             openai_api_key: Some("sk-test-value".to_string()),
             anthropic_api_key: Some("sk-ant-test-value".to_string()),
             gemini_api_key: Some("AIza-test-value".to_string()),
+            deepseek_api_key: Some("ds-test-value".to_string()),
+            openai_api_key_remote: false,
+            anthropic_api_key_remote: false,
+            gemini_api_key_remote: false,
+            deepseek_api_key_remote: false,
+            cloudflare_secret_store_id: None,
+            cloudflare_secret_store_name: None,
             updated_at: "old".to_string(),
         });
         let path = config_dir().join("ai-provider-cloudflare-marker-test.json");
@@ -5066,9 +5678,14 @@ mod tests {
 
         let text = fs::read_to_string(checked_data_child_path(&path).unwrap()).unwrap();
         assert!(text.contains("\"credential_storage_mode\": \"cloudflare\""));
+        assert!(text.contains("\"openai_api_key_remote\": true"));
+        assert!(text.contains("\"anthropic_api_key_remote\": true"));
+        assert!(text.contains("\"gemini_api_key_remote\": true"));
+        assert!(text.contains("\"deepseek_api_key_remote\": true"));
         assert!(!text.contains("sk-test-value"));
         assert!(!text.contains("sk-ant-test-value"));
         assert!(!text.contains("AIza-test-value"));
+        assert!(!text.contains("ds-test-value"));
         let _ = fs::remove_file(path);
     }
 
@@ -5081,15 +5698,42 @@ mod tests {
             openai_api_key: Some("sk-test-value".to_string()),
             anthropic_api_key: None,
             gemini_api_key: Some("AIza-test-value".to_string()),
+            deepseek_api_key: Some("ds-test-value".to_string()),
+            openai_api_key_remote: false,
+            anthropic_api_key_remote: false,
+            gemini_api_key_remote: false,
+            deepseek_api_key_remote: false,
+            cloudflare_secret_store_id: None,
+            cloudflare_secret_store_name: None,
             updated_at: "old".to_string(),
         });
 
         let values = ai_provider_secret_values(&config);
 
-        assert_eq!(values.len(), 2);
+        assert_eq!(values.len(), 3);
         assert!(values.contains_key("MAESTRO_OPENAI_API_KEY"));
         assert!(values.contains_key("MAESTRO_GEMINI_API_KEY"));
+        assert!(values.contains_key("MAESTRO_DEEPSEEK_API_KEY"));
         assert!(!values.contains_key("MAESTRO_ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn deepseek_model_ids_extract_current_api_shape() {
+        let value = json!({
+            "object": "list",
+            "data": [
+                { "id": "deepseek-v4-flash", "object": "model" },
+                { "id": "deepseek-v4-pro", "object": "model" }
+            ]
+        });
+
+        assert_eq!(
+            deepseek_model_ids(&value),
+            vec![
+                "deepseek-v4-flash".to_string(),
+                "deepseek-v4-pro".to_string()
+            ]
+        );
     }
 
     #[test]

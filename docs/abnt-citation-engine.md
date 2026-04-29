@@ -63,7 +63,7 @@ Maestro is not only an orchestrator. It acts as a deterministic fourth peer:
 
 - Claude, Codex, and Gemini produce editorial judgments.
 - Maestro independently checks protocol gates, citation shape, link evidence, source freshness, quarantine status, and export structure.
-- Final delivery requires AI trilateral unanimity and `MaestroPeer: READY`.
+- Final delivery requires unanimity across the active AI peers and `MaestroPeer: READY`.
 
 If Maestro finds a protocol/citation/evidence blocker, it must mark its own peer status as `NOT_READY` or `NEEDS_EVIDENCE` and create the next round even if all three AIs say `READY`.
 

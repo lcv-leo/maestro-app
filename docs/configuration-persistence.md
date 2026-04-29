@@ -39,6 +39,7 @@ Secret examples:
 - `MAESTRO_OPENAI_API_KEY`
 - `MAESTRO_ANTHROPIC_API_KEY`
 - `MAESTRO_GEMINI_API_KEY`
+- `MAESTRO_DEEPSEEK_API_KEY`
 
 JSON examples:
 
@@ -72,6 +73,8 @@ Cloudflare resources:
 - D1 database: `maestro_db`.
 - Secrets Store: `maestro` or another operator-approved store name.
 - Optional future Worker broker: `maestro-secrets-broker`, used only if Maestro needs Cloudflare-side operations that consume secrets without exposing them to the desktop app.
+
+Cloudflare Secrets Store values are write-only from the desktop app's perspective after creation. On startup, Maestro may recover `maestro_db` metadata and secret references such as `MAESTRO_OPENAI_API_KEY`, `MAESTRO_ANTHROPIC_API_KEY`, `MAESTRO_GEMINI_API_KEY`, and `MAESTRO_DEEPSEEK_API_KEY`, but the raw key material cannot be decrypted through the Cloudflare API. Direct local API calls therefore need a fresh operator-provided key, a Windows env var, or a future Cloudflare-side broker.
 
 Planned D1 tables:
 

@@ -32,6 +32,7 @@ Required for runtime:
 - Claude CLI.
 - Codex CLI.
 - Gemini CLI.
+- DeepSeek API credential when DeepSeek is enabled as an editorial peer.
 - Cloudflare API credential validation when D1 import/export is enabled.
 - Cloudflare Wrangler / Cloudflare CLI as D1 fallback tooling.
 
@@ -71,6 +72,7 @@ Maestro must be able to manage these CLIs:
 - `claude` / Claude CLI.
 - `codex` / Codex CLI.
 - `gemini` / Gemini CLI.
+- `MAESTRO_DEEPSEEK_API_KEY` or `DEEPSEEK_API_KEY` for DeepSeek API peer execution.
 - Cloudflare API credentials for primary D1 operations.
 - `wrangler` / Cloudflare CLI for D1 fallback and diagnostics.
 

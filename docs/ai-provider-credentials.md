@@ -1,7 +1,7 @@
 # AI Provider Credentials
 
-Status: implementation contract with v0.3.7 partial implementation.
-Date: 2026-04-26.
+Status: implementation contract with v0.3.11 DeepSeek API peer integration.
+Date: 2026-04-28.
 
 Maestro must keep CLI orchestration and official API/SDK orchestration as first-class options. The operator should be able to use a subscription-backed CLI when that is convenient, or provide API credentials and pay through provider credits when that is the better path.
 
@@ -11,7 +11,7 @@ Maestro must keep CLI orchestration and official API/SDK orchestration as first-
 - `api`: use official provider APIs/SDKs only.
 - `hybrid`: prefer API/SDK for agents with validated credentials and fall back to CLI only when explicitly allowed by policy.
 
-No mode changes the convergence rule. Claude, Codex/OpenAI, Gemini, and MaestroPeer still need unanimous `READY` in the same accepted round before final delivery.
+No mode changes the convergence rule. Claude, Codex/OpenAI, Gemini, DeepSeek, and MaestroPeer still need unanimous `READY` in the same accepted round before final delivery when those peers are active in the session.
 
 ## Settings Fields
 
@@ -20,6 +20,7 @@ The settings screen must provide secure credential fields for:
 - OpenAI / Codex: API key, optional organization ID, optional project ID, model pin, request budget, and SDK/API route.
 - Anthropic / Claude: API key, workspace label, API version pin, model pin, request budget, and direct/partner-platform route.
 - Google / Gemini: Gemini Developer API key, optional Vertex AI project/location, model pin, request budget, and backend selector.
+- DeepSeek: API key, model pin, request budget, and direct DeepSeek API route.
 
 The UI must also keep each provider's CLI path/version/auth status visible because CLI and API operation are independent readiness surfaces.
 
@@ -44,18 +45,21 @@ Validation statuses:
 - `rate_limited`
 - `ready`
 
-Implemented in v0.3.7:
+Implemented through v0.3.11:
 
 - The settings screen has explicit `Salvar APIs` and `Verificar APIs` actions.
 - Local JSON persistence writes `data/config/ai-providers.json`, which remains under ignored runtime data.
-- Verification calls official model-list endpoints for OpenAI, Anthropic, and Gemini and reports provider-level status without logging raw keys.
+- Verification calls official model-list endpoints for OpenAI, Anthropic, Gemini, and DeepSeek and reports provider-level status without logging raw keys.
 - Network-error rendering strips request URLs before messages reach the UI/logs, so query-string API keys are not echoed when a provider request fails before a response is received.
+- DeepSeek can generate drafts, review drafts, and produce revisions through the direct API path. At runtime, Maestro asks the authenticated `/models` endpoint which models are available and selects the strongest supported entry, preferring `deepseek-v4-pro` when exposed. The model can be overridden with `MAESTRO_DEEPSEEK_MODEL` or `CROSS_REVIEW_DEEPSEEK_MODEL`.
+- Windows env-var read is active for provider keys; write UX is still pending.
+- Cloudflare Secrets Store persistence writes provider keys and reloads secret references, but raw values remain non-readable from the desktop app by design.
 
 Still pending:
 
-- Windows env-var write/read UX for provider keys.
-- Cloudflare Secrets Store persistence for provider keys.
-- Full SDK/API orchestration as an alternative to CLI editorial sessions.
+- Windows env-var write UX for provider keys.
+- Cloudflare-side broker or AI Gateway integration for consuming Secrets Store values without exposing them back to the desktop app.
+- Full SDK/API orchestration for all peers as an alternative to CLI editorial sessions.
 
 If a provider credential is invalid or underfunded, Maestro must explain which provider path is blocked and whether the CLI path can still satisfy that peer.
 
@@ -87,6 +91,7 @@ Suggested user-scope Windows environment variable names:
 - `MAESTRO_OPENAI_PROJECT_ID`
 - `MAESTRO_ANTHROPIC_API_KEY`
 - `MAESTRO_GEMINI_API_KEY`
+- `MAESTRO_DEEPSEEK_API_KEY`
 - `MAESTRO_GOOGLE_VERTEX_PROJECT`
 - `MAESTRO_GOOGLE_VERTEX_LOCATION`
 
@@ -101,6 +106,7 @@ Current planning references:
 - OpenAI API keys use bearer authentication and may include organization/project headers for multi-project accounts.
 - Anthropic requests require `x-api-key`, `anthropic-version`, and JSON content headers; official SDKs manage those headers.
 - Gemini API requests use `x-goog-api-key` for the Gemini Developer API; the Google Gen AI SDK can target both Gemini Developer API and Vertex AI.
+- DeepSeek supports OpenAI-compatible authentication with bearer tokens at `https://api.deepseek.com`; the implemented direct peer uses `/models` for verification/model selection and `/chat/completions` for editorial calls. In the current authenticated probe, `/models` exposes `deepseek-v4-pro` and `deepseek-v4-flash`.
 
 Official documentation:
 
@@ -108,6 +114,8 @@ Official documentation:
 - Anthropic API authentication: https://docs.anthropic.com/en/api/getting-started
 - Gemini API keys: https://ai.google.dev/tutorials/setup
 - Google Gen AI SDK / Gemini Developer API and Vertex AI: https://ai.google.dev/gemini-api/docs/migrate-to-cloud
+- DeepSeek API quick start: https://api-docs.deepseek.com/
+- DeepSeek model list endpoint: https://api-docs.deepseek.com/api/list-models
 
 ## Cross-Review Use
 
@@ -117,7 +125,7 @@ Maestro must record which path produced each agent response:
 
 ```json
 {
-  "provider": "openai | anthropic | google",
+  "provider": "openai | anthropic | google | deepseek",
   "agent": "codex | claude | gemini",
   "transport": "cli | api_sdk",
   "model_pin": "provider-model-id",

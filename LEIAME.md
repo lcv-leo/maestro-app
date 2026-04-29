@@ -52,17 +52,19 @@ O botao `Verificar e preparar` valida o token e tenta preparar os recursos essen
 
 ## APIs dos agentes
 
-Em `Ajustes > Agentes via API`, informe as chaves e clique em `Salvar APIs` para gravar o estado local. O app mostra uma mensagem de status informando quando salvou. `Verificar APIs` salva antes de testar e consulta endpoints reais de listagem de modelos da OpenAI, Anthropic e Gemini. As chaves nao sao gravadas nos logs.
+Em `Ajustes > Agentes via API`, informe as chaves e clique em `Salvar APIs` para gravar o estado local. O app mostra uma mensagem de status informando quando salvou. `Verificar APIs` salva antes de testar e consulta endpoints reais de listagem de modelos da OpenAI, Anthropic, Gemini e DeepSeek. As chaves nao sao gravadas nos logs.
+
+DeepSeek usa API, nao CLI local. Para que ele opere sem digitar a chave a cada execucao, configure `MAESTRO_DEEPSEEK_API_KEY` ou `DEEPSEEK_API_KEY` no Windows, ou salve a chave pelo fluxo de APIs do app.
 
 ## Modos de persistencia
 
 - JSON local: configuracoes e segredos ficam em arquivos locais sob `data/`, com aviso de cuidado operacional.
 - Env var Windows: tokens e API keys ficam em env vars; demais configuracoes ficam no JSON local.
-- Cloudflare: configuracoes remotas ficam em D1 `maestro_db`; segredos de agentes ficam no Cloudflare Secrets Store. Ainda e necessario um segredo de bootstrap local ou digitado para entrar na Cloudflare.
+- Cloudflare: configuracoes remotas ficam em D1 `maestro_db`; segredos de agentes ficam no Cloudflare Secrets Store. Ainda e necessario um segredo de bootstrap local ou digitado para entrar na Cloudflare. A Cloudflare nao devolve o valor bruto de um segredo ja salvo no Secrets Store; ao reabrir, o Maestro recupera as referencias remotas e usa chaves locais/env vars quando precisar executar uma chamada diretamente do desktop.
 
 ## Estado deste build
 
-Este build executa sessao editorial real em background: Claude, Codex e Gemini podem gerar/revisar o texto contra o protocolo integral importado. Se um agente nao retornar aprovacao, a sessao nao deve ser tratada como finalizada; ela permanece sem entrega final e novas rodadas de revisao devem continuar ate unanimidade. A ata fica disponivel em `data/sessions/<run>/ata-da-sessao.md`.
+Este build executa sessao editorial real em background: Claude, Codex, Gemini e DeepSeek podem gerar/revisar o texto contra o protocolo integral importado. Se um agente nao retornar aprovacao, a sessao nao deve ser tratada como finalizada; ela permanece sem entrega final e novas rodadas de revisao devem continuar ate unanimidade. A ata fica disponivel em `data/sessions/<run>/ata-da-sessao.md`.
 
 As chamadas editoriais reais nao possuem timeout artificial, porque os modelos podem demorar bastante para cumprir o protocolo. A UI mostra andamento e tempo decorrido enquanto os agentes trabalham, e as CLIs devem rodar sem qualquer janela de terminal visivel.
 
@@ -70,4 +72,4 @@ Para retomar uma sessao interrompida, clique em `Retomar`. O Maestro le `data/se
 
 Os logs foram ampliados para diagnostico: eles registram contexto de UI, estado do runtime, caminhos resolvidos das CLIs, inicio/fim de cada agente, duracao, exit code, politica de timeout e caminho dos artefatos. O conteudo bruto dos agentes fica nos arquivos de sessao, nao embutido no NDJSON geral.
 
-Regra inviolavel: nenhum texto final deve ser entregue sem unanimidade trilateral real.
+Regra inviolavel: nenhum texto final deve ser entregue sem unanimidade real dos agentes ativos.

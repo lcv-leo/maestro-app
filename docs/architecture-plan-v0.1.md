@@ -47,7 +47,7 @@ Local prerequisite recheck observed 2026-04-26: Rust is installed through rustup
 ## 4. Core Modules
 
 - `agent-adapters`: Codex CLI, Claude CLI, Gemini CLI process adapters with model pins, timeout policy, redaction, stdout/stderr capture, JSON/JSONL parser hardening, auth probes, update probes, and no silent model downgrade. See `docs/cli-agent-audit.md`.
-- `ai-provider-adapters`: official API/SDK adapters for OpenAI/Codex, Anthropic/Claude, and Google/Gemini with model pins, request budgets, provider request IDs, and transport provenance.
+- `ai-provider-adapters`: official API/SDK adapters for OpenAI/Codex, Anthropic/Claude, Google/Gemini, and DeepSeek with model pins, request budgets, provider request IDs, and transport provenance.
 - `credential-manager`: local JSON persistence, Windows environment variable reader/writer for secret-only hybrid mode, Cloudflare D1/Secrets Store remote mode, redaction checks, and per-provider credential validation.
 - `runtime-bootstrapper`: first-run dependency inventory, install/update/configuration plan, operator authorization, background execution, CLI authentication flow, and final readiness report.
 - `capability-probe`: pre-session CLI availability/model probe with failure classes.
@@ -176,7 +176,7 @@ Because AI models will keep finding failures and improvements in the editorial r
 
 ## 7.1 Background Agent UX
 
-Claude CLI, Codex CLI, and Gemini CLI are runtime workers, not visible terminal sessions. The operator experience must keep them in background and translate their activity into clear UI states:
+Claude CLI, Codex CLI, and Gemini CLI are runtime workers, not visible terminal sessions. DeepSeek is an API peer. The operator experience must keep every peer in background and translate activity into clear UI states:
 
 - Current action, phase, progress, and blocker indicators.
 - Agent status cards using `READY`, `NOT_READY`, and `NEEDS_EVIDENCE`.
@@ -256,7 +256,7 @@ Each AI response must close with a structured status block:
 - First-run bootstrap failures block full operation until resolved, skipped, or explicitly deferred with a degraded-mode warning.
 - Pre-session probe detects missing CLI, auth failure, model rejection, timeout, rate limit, and prompt-safety rejection.
 - If all peers are unavailable, session aborts.
-- If one peer is unavailable, Maestro may run a degraded audit, but the result cannot be called full trilateral convergence.
+- If one peer is unavailable, Maestro may run a degraded audit, but the result cannot be called full unanimous convergence.
 - Mid-round transient failures retry once with backoff and record attempts.
 - Max rounds default: 8. Hitting the cap finalizes as `max-rounds`, not `publicavel`.
 - `max-rounds` is a pause/escalation state, not a final-delivery state. It may produce diagnostics or a non-publicable working draft, but it cannot produce `texto-final.md`.

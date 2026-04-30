@@ -1,5 +1,5 @@
 <p align="center">
-  <img src=".github/assets/lcv-ideas-software-logo.svg" alt="LCV Ideas &amp; Software" width="220">
+  <img src=".github/assets/lcv-ideas-software-logo.svg" alt="LCV Ideas &amp; Software" width="520" />
 </p>
 
 # Maestro Editorial AI
@@ -17,9 +17,18 @@ Portable Windows editorial workbench for protocol-driven AI drafting, source ver
 ![state](https://img.shields.io/badge/state-JSON%2FNDJSON-informational)
 ![license](https://img.shields.io/badge/license-AGPL--3.0-blue)
 
-Status: functional alpha with live bootstrap, diagnostics, navigation, Cloudflare credential provisioning, AI API credential checks, PostEditor parity, link auditing, and a real background Claude/Codex/Gemini/DeepSeek editorial session path.
+**Status.** Functional alpha with live bootstrap, diagnostics, navigation, Cloudflare credential provisioning, AI API credential checks, PostEditor parity, link auditing, and a real background Claude/Codex/Gemini/DeepSeek editorial session path.
 
-Current project version: `v0.3.11`.
+Current project version: `v0.3.12`.
+
+The version history at a glance:
+
+| Release | Scope |
+|---|---|
+| **`v0.3.12`** | **README organizational standardization.** Adopted the shared repository README opening pattern and added the top-level version-history table while keeping the Windows/Tauri operational details intact. |
+| **`v0.3.11`** | **DeepSeek real-peer integration.** Added DeepSeek as an API-backed editorial peer, real model-list verification, and stronger Cloudflare Secrets Store reload behavior. |
+| **`v0.3.10`** | **Long-run orchestration reliability.** Fixed broken paused-session rendering, improved visible logs, removed false blocked end states, and reduced very-large prompt pipe failures. |
+| **`v0.3.9`** | **Cloudflare persistence and settings maturation.** Continued the secrets/configuration persistence and operational readiness work that led into the current build. |
 
 Maestro is independent from `cross-review-mcp`; it incorporates the same strict convergence discipline in its own application logic. It is designed to run from a folder, keep runtime data out of Git, and store operator protocols, drafts, evidence, and sessions locally under ignored runtime paths.
 

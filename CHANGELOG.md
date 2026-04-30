@@ -4,6 +4,10 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.12] - 2026-04-30
+
+- `README.md` now follows the shared organizational opening pattern adopted across the public repositories, while preserving Maestro's Windows/Tauri, logging, and editorial-runtime specific documentation.
+
 ## [v0.3.11] - 2026-04-28
 
 - Added DeepSeek as a real API-backed editorial peer: it can be selected as draft lead, participates in review/revision rounds, writes normal session artifacts, and selects the best available authenticated DeepSeek `/models` entry, with `deepseek-v4-pro` preferred when exposed.

@@ -1,7 +1,7 @@
 # AI Provider Credentials
 
-Status: implementation contract with v0.3.11 DeepSeek API peer integration.
-Date: 2026-04-28.
+Status: implementation contract with v0.3.13 direct API peer execution and per-session cost controls.
+Date: 2026-05-01.
 
 Maestro must keep CLI orchestration and official API/SDK orchestration as first-class options. The operator should be able to use a subscription-backed CLI when that is convenient, or provide API credentials and pay through provider credits when that is the better path.
 
@@ -13,14 +13,18 @@ Maestro must keep CLI orchestration and official API/SDK orchestration as first-
 
 No mode changes the convergence rule. Claude, Codex/OpenAI, Gemini, DeepSeek, and MaestroPeer still need unanimous `READY` in the same accepted round before final delivery when those peers are active in the session.
 
+From `v0.3.13`, the operator can select 1 to 4 active AI peers per session. Unselected peers are not called and do not count toward that session's unanimity gate.
+
 ## Settings Fields
 
-The settings screen must provide secure credential fields for:
+The settings screen provides secure credential fields and UI-owned tariff rows for:
 
-- OpenAI / Codex: API key, optional organization ID, optional project ID, model pin, request budget, and SDK/API route.
-- Anthropic / Claude: API key, workspace label, API version pin, model pin, request budget, and direct/partner-platform route.
-- Google / Gemini: Gemini Developer API key, optional Vertex AI project/location, model pin, request budget, and backend selector.
-- DeepSeek: API key, model pin, request budget, and direct DeepSeek API route.
+- OpenAI / Codex: API key and input/output USD per 1M tokens.
+- Anthropic / Claude: API key and input/output USD per 1M tokens.
+- Google / Gemini: Gemini Developer API key and input/output USD per 1M tokens.
+- DeepSeek: API key and input/output USD per 1M tokens.
+
+Per-provider model pins and organization/project routing are future configuration fields; current execution resolves models dynamically from authenticated provider model-list endpoints.
 
 The UI must also keep each provider's CLI path/version/auth status visible because CLI and API operation are independent readiness surfaces.
 
@@ -45,13 +49,16 @@ Validation statuses:
 - `rate_limited`
 - `ready`
 
-Implemented through v0.3.11:
+Implemented through v0.3.13:
 
 - The settings screen has explicit `Salvar APIs` and `Verificar APIs` actions.
 - Local JSON persistence writes `data/config/ai-providers.json`, which remains under ignored runtime data.
 - Verification calls official model-list endpoints for OpenAI, Anthropic, Gemini, and DeepSeek and reports provider-level status without logging raw keys.
 - Network-error rendering strips request URLs before messages reach the UI/logs, so query-string API keys are not echoed when a provider request fails before a response is received.
-- DeepSeek can generate drafts, review drafts, and produce revisions through the direct API path. At runtime, Maestro asks the authenticated `/models` endpoint which models are available and selects the strongest supported entry, preferring `deepseek-v4-pro` when exposed. The model can be overridden with `MAESTRO_DEEPSEEK_MODEL` or `CROSS_REVIEW_DEEPSEEK_MODEL`.
+- DeepSeek, OpenAI/Codex, Anthropic/Claude, and Google/Gemini can generate drafts, review drafts, and produce revisions through direct provider APIs. At runtime, Maestro asks each authenticated model-list endpoint which models are available and selects the strongest supported entry for that provider. DeepSeek still honors `MAESTRO_DEEPSEEK_MODEL` or `CROSS_REVIEW_DEEPSEEK_MODEL` when set.
+- Optional per-session USD budgets are enforced against observed direct API usage. The limit remains one session-level value; Maestro never creates per-model budgets or silently drops a selected peer to stay under budget.
+- Provider tariffs are UI-owned configuration. The operator maintains input/output USD per 1M tokens in `Configuracoes > Agentes via API > Tabela de tarifas`; there is no env-var fallback for cost rates. Any peer that will run through a direct provider API is blocked with a friendly message until both tariff fields for that provider are configured.
+- CLI-backed peers expose no reliable per-call token usage to Maestro yet. Their cost is displayed as unknown/subscription and does not decrement the optional USD budget.
 - Windows env-var read is active for provider keys; write UX is still pending.
 - Cloudflare Secrets Store persistence writes provider keys and reloads secret references, but raw values remain non-readable from the desktop app by design.
 
@@ -59,7 +66,8 @@ Still pending:
 
 - Windows env-var write UX for provider keys.
 - Cloudflare-side broker or AI Gateway integration for consuming Secrets Store values without exposing them back to the desktop app.
-- Full SDK/API orchestration for all peers as an alternative to CLI editorial sessions.
+- Optional UI model pinning per provider. Current direct API execution resolves models dynamically from each provider's model-list endpoint, with conservative fallbacks.
+- Cloudflare-side broker or AI Gateway cost telemetry for hosted/remote execution paths.
 
 If a provider credential is invalid or underfunded, Maestro must explain which provider path is blocked and whether the CLI path can still satisfy that peer.
 
@@ -104,15 +112,22 @@ Implementation must re-check current provider documentation before coding each a
 Current planning references:
 
 - OpenAI API keys use bearer authentication and may include organization/project headers for multi-project accounts.
-- Anthropic requests require `x-api-key`, `anthropic-version`, and JSON content headers; official SDKs manage those headers.
-- Gemini API requests use `x-goog-api-key` for the Gemini Developer API; the Google Gen AI SDK can target both Gemini Developer API and Vertex AI.
+- OpenAI direct calls use the Responses API at `/v1/responses`, bearer auth, `input`, `instructions`, `max_output_tokens`, and response `usage.input_tokens`/`usage.output_tokens` for cost accounting.
+- Anthropic direct calls use Messages API at `/v1/messages` with `x-api-key`, `anthropic-version`, `model`, `max_tokens`, `system`, and `messages`; response `usage.input_tokens`/`usage.output_tokens` feeds the cost ledger.
+- Gemini direct calls use `models/{model}:generateContent` with API-key auth, `contents`, `systemInstruction`, and `generationConfig.maxOutputTokens`; response `usageMetadata.promptTokenCount`/`candidatesTokenCount` feeds the cost ledger.
+- Direct API attachments are provider-shaped instead of text-only: OpenAI receives supported images as `input_image` and supported documents as `input_file` with base64 data URLs; Anthropic receives supported images and PDFs as base64 content blocks; Gemini receives supported media/documents as `inline_data` parts.
+- Attachment types that are not natively supported by the selected provider, or that exceed the native API inline size cap, remain available through the session manifest and bounded text previews. Native attachment payload size is included in the conservative pre-call cost projection.
+- The session UI mirrors this as a pre-run per-provider prediction, so mixed support is visible before invocation instead of collapsed into a single native/manifest label.
 - DeepSeek supports OpenAI-compatible authentication with bearer tokens at `https://api.deepseek.com`; the implemented direct peer uses `/models` for verification/model selection and `/chat/completions` for editorial calls. In the current authenticated probe, `/models` exposes `deepseek-v4-pro` and `deepseek-v4-flash`.
 
 Official documentation:
 
 - OpenAI API authentication: https://platform.openai.com/docs/api-reference/authentication
+- OpenAI Responses API: https://platform.openai.com/docs/api-reference/responses/create
 - Anthropic API authentication: https://docs.anthropic.com/en/api/getting-started
+- Anthropic Messages API: https://docs.anthropic.com/en/api/messages
 - Gemini API keys: https://ai.google.dev/tutorials/setup
+- Gemini GenerateContent API: https://ai.google.dev/api/generate-content
 - Google Gen AI SDK / Gemini Developer API and Vertex AI: https://ai.google.dev/gemini-api/docs/migrate-to-cloud
 - DeepSeek API quick start: https://api-docs.deepseek.com/
 - DeepSeek model list endpoint: https://api-docs.deepseek.com/api/list-models

@@ -4,6 +4,8 @@ Status: planning baseline for the v0.4.x stabilization line.
 
 Maestro is now large enough that feature work in single files increases review cost and regression risk. The first split must be conservative: move code along existing responsibility boundaries, preserve behavior, and keep tests green after each small extraction.
 
+Progress on 2026-05-01: the first split batch extracted `human_logs.rs` and `session_controls.rs` from the native `lib.rs`, then moved the Tiptap-heavy PostEditor parity surface behind a `React.lazy` boundary that is rendered only after the operator clicks `Criar Post`. The production entry chunk dropped from about 1.30 MB to about 272 KB minified; the remaining large PostEditor chunk is intentionally isolated for on-demand loading.
+
 ## Current Pressure Points
 
 - `src-tauri/src/lib.rs` mixes Tauri command registration, runtime bootstrap, logging, Cloudflare provisioning, credential persistence, AI provider probes, editorial orchestration, link audit, session resume, artifact parsing, and tests.
@@ -89,6 +91,12 @@ src/
 5. Extract editorial orchestration and artifacts.
 6. Split React settings/setup screens into feature components.
 7. Add focused unit tests around each extracted module before changing behavior again.
+
+## Completed Split Batches
+
+- 2026-05-01: extracted native human-log projection helpers into `src-tauri/src/human_logs.rs`.
+- 2026-05-01: extracted selected-peer, optional limit, and provider cost helpers into `src-tauri/src/session_controls.rs`.
+- 2026-05-01: converted the MainSite-compatible PostEditor parity surface from a static `App.tsx` import into an on-demand lazy import opened by `Criar Post`, matching the admin-app loading pattern.
 
 ## Rules
 

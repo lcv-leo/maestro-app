@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use regex::Regex;
 use reqwest::{blocking::Client, redirect::Policy, Url};
 use serde::{Deserialize, Serialize};
@@ -19,8 +19,29 @@ use std::{
 };
 use tauri::Manager;
 
+mod human_logs;
+mod session_controls;
+mod session_evidence;
+
+#[cfg(test)]
+use human_logs::should_collapse_human_log_event;
+use human_logs::{human_log_summary, severity_number_for, write_human_log_projection};
+use session_controls::{
+    all_agent_keys, api_role_max_tokens, effective_draft_lead, estimate_provider_cost,
+    estimate_provider_cost_from_input_chars, normalize_active_agents, provider_cost,
+    provider_cost_guard_for, sanitize_optional_positive_f64, sanitize_optional_positive_u64,
+    selected_editorial_agent_specs, usage_tokens, ProviderCostGuard, ProviderCostRates,
+};
+use session_evidence::{
+    attachment_base64, attachment_data_url, attachment_payload_base64_chars, is_audio_attachment,
+    is_image_attachment, is_known_document_attachment, is_pdf_attachment, is_text_like_attachment,
+    is_video_attachment, normalized_attachment_media_type, process_session_evidence,
+    AttachmentManifestEntry, PromptAttachmentRequest,
+};
+
 static NATIVE_LOG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static APP_ROOT: OnceLock<PathBuf> = OnceLock::new();
+const API_NATIVE_ATTACHMENT_MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
 
 #[derive(Clone)]
 struct LogSession {
@@ -63,6 +84,22 @@ struct AiProviderConfig {
     gemini_api_key_remote: bool,
     #[serde(default)]
     deepseek_api_key_remote: bool,
+    #[serde(default)]
+    openai_input_usd_per_million: Option<f64>,
+    #[serde(default)]
+    openai_output_usd_per_million: Option<f64>,
+    #[serde(default)]
+    anthropic_input_usd_per_million: Option<f64>,
+    #[serde(default)]
+    anthropic_output_usd_per_million: Option<f64>,
+    #[serde(default)]
+    gemini_input_usd_per_million: Option<f64>,
+    #[serde(default)]
+    gemini_output_usd_per_million: Option<f64>,
+    #[serde(default)]
+    deepseek_input_usd_per_million: Option<f64>,
+    #[serde(default)]
+    deepseek_output_usd_per_million: Option<f64>,
     #[serde(default)]
     cloudflare_secret_store_id: Option<String>,
     #[serde(default)]
@@ -181,6 +218,11 @@ struct EditorialSessionRequest {
     protocol_text: String,
     protocol_hash: String,
     initial_agent: Option<String>,
+    active_agents: Option<Vec<String>>,
+    max_session_cost_usd: Option<f64>,
+    max_session_minutes: Option<u64>,
+    attachments: Option<Vec<PromptAttachmentRequest>>,
+    links: Option<Vec<String>>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -190,6 +232,11 @@ struct ResumeSessionRequest {
     protocol_text: Option<String>,
     protocol_hash: Option<String>,
     initial_agent: Option<String>,
+    active_agents: Option<Vec<String>>,
+    max_session_cost_usd: Option<f64>,
+    max_session_minutes: Option<u64>,
+    attachments: Option<Vec<PromptAttachmentRequest>>,
+    links: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -204,6 +251,13 @@ struct EditorialSessionResult {
     agents: Vec<EditorialAgentResult>,
     consensus_ready: bool,
     status: String,
+    active_agents: Vec<String>,
+    max_session_cost_usd: Option<f64>,
+    max_session_minutes: Option<u64>,
+    observed_cost_usd: Option<f64>,
+    links_path: Option<String>,
+    attachments_manifest_path: Option<String>,
+    human_log_path: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -216,6 +270,10 @@ struct EditorialAgentResult {
     duration_ms: u128,
     exit_code: Option<i32>,
     output_path: String,
+    usage_input_tokens: Option<u64>,
+    usage_output_tokens: Option<u64>,
+    cost_usd: Option<f64>,
+    cost_estimated: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -256,11 +314,46 @@ struct ResumeSessionState {
 }
 
 #[derive(Clone, Copy)]
-struct EditorialAgentSpec {
-    key: &'static str,
+pub(crate) struct EditorialAgentSpec {
+    pub(crate) key: &'static str,
     name: &'static str,
     command: &'static str,
     args: fn() -> Vec<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct SessionContract {
+    schema_version: u8,
+    run_id: String,
+    session_name: String,
+    created_at: String,
+    active_agents: Vec<String>,
+    initial_agent: String,
+    max_session_cost_usd: Option<f64>,
+    max_session_minutes: Option<u64>,
+    pub(crate) links: Vec<String>,
+    pub(crate) attachments: Vec<AttachmentManifestEntry>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct CostLedger {
+    schema_version: u8,
+    run_id: String,
+    pub(crate) total_observed_cost_usd: f64,
+    entries: Vec<CostLedgerEntry>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct CostLedgerEntry {
+    at: String,
+    provider: String,
+    agent: String,
+    role: String,
+    model: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    cost_usd: f64,
+    estimated: bool,
 }
 
 #[derive(Clone)]
@@ -308,6 +401,14 @@ impl Default for AiProviderConfig {
             anthropic_api_key_remote: false,
             gemini_api_key_remote: false,
             deepseek_api_key_remote: false,
+            openai_input_usd_per_million: None,
+            openai_output_usd_per_million: None,
+            anthropic_input_usd_per_million: None,
+            anthropic_output_usd_per_million: None,
+            gemini_input_usd_per_million: None,
+            gemini_output_usd_per_million: None,
+            deepseek_input_usd_per_million: None,
+            deepseek_output_usd_per_million: None,
             cloudflare_secret_store_id: None,
             cloudflare_secret_store_name: None,
             updated_at: Utc::now().to_rfc3339(),
@@ -322,6 +423,7 @@ struct RuntimeProfile {
     target_platform: &'static str,
     log_dir: String,
     log_file: String,
+    human_log_file: String,
     log_session_id: String,
 }
 
@@ -347,6 +449,9 @@ fn runtime_profile(log_session: tauri::State<LogSession>) -> RuntimeProfile {
         target_platform: "Windows 11+",
         log_dir: logs_dir().to_string_lossy().to_string(),
         log_file: log_session.path.to_string_lossy().to_string(),
+        human_log_file: human_log_path_for(&log_session.path)
+            .to_string_lossy()
+            .to_string(),
         log_session_id: log_session.id.clone(),
     }
 }
@@ -372,14 +477,23 @@ fn write_log_record(
     let sequence = NATIVE_LOG_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
     let log_path = checked_data_child_path(&log_session.path)?;
 
+    let timestamp = Utc::now().to_rfc3339();
+    let context = sanitize_value(event.context.unwrap_or(Value::Null), 8);
+    let human_summary = human_log_summary(&event.category, &event.message, &context);
+    let level = sanitize_short(&event.level, 16);
+    let severity_number = severity_number_for(&level);
     let record = json!({
-        "schema_version": 1,
-        "timestamp": Utc::now().to_rfc3339(),
+        "schema_version": 2,
+        "timestamp": timestamp,
         "native_log_sequence": sequence,
-        "level": sanitize_short(&event.level, 16),
+        "level": level,
+        "severity_text": level.to_ascii_uppercase(),
+        "severity_number": severity_number,
         "category": sanitize_short(&event.category, 80),
+        "event_name": sanitize_short(&event.category, 80),
         "message": sanitize_text(&event.message, 500),
-        "context": sanitize_value(event.context.unwrap_or(Value::Null), 8),
+        "human_summary": human_summary,
+        "context": context,
         "app": {
             "name": "Maestro Editorial AI",
             "version": env!("CARGO_PKG_VERSION"),
@@ -403,6 +517,7 @@ fn write_log_record(
         .open(&log_path)
         .map_err(|error| format!("failed to open log file: {error}"))?;
     writeln!(file, "{record}").map_err(|error| format!("failed to write log record: {error}"))?;
+    let _ = write_human_log_projection(&log_session.path, &record);
 
     Ok(LogWriteResult {
         path: log_path.to_string_lossy().to_string(),
@@ -441,9 +556,10 @@ fn diagnostics_snapshot(log_session: tauri::State<LogSession>) -> Value {
     json!({
         "log_dir": dir.to_string_lossy(),
         "active_log_file": log_session.path.to_string_lossy(),
+        "active_human_log_file": human_log_path_for(&log_session.path).to_string_lossy(),
         "log_session_id": log_session.id.clone(),
         "files": files,
-        "hint": "Attach the newest per-run data/logs/maestro-*.ndjson file when asking Codex to diagnose a Maestro issue."
+        "hint": "Attach the newest data/logs/maestro-*.ndjson file for machine diagnosis; use data/logs/human/*.log for quick human reading."
     })
 }
 
@@ -835,7 +951,11 @@ fn run_editorial_session_blocking(
                 "protocol_lines": request.protocol_text.lines().count(),
                 "protocol_hash_prefix": sanitize_short(&request.protocol_hash, 16),
                 "initial_agent": resolve_initial_agent_key(request.initial_agent.as_deref()).0,
-                "agents": ["claude", "codex", "gemini", "deepseek"],
+                "active_agents_requested": request.active_agents.clone(),
+                "max_session_cost_usd": request.max_session_cost_usd,
+                "max_session_minutes": request.max_session_minutes,
+                "attachment_count": request.attachments.as_ref().map(|items| items.len()).unwrap_or_default(),
+                "link_count": request.links.as_ref().map(|items| items.len()).unwrap_or_default(),
                 "artifact_policy": "raw agent outputs are written under data/sessions, not embedded in NDJSON"
             })),
         },
@@ -878,6 +998,9 @@ fn run_editorial_session_blocking(
                 "run_id": result.run_id,
                 "status": result.status,
                 "consensus_ready": result.consensus_ready,
+                "active_agents": result.active_agents.clone(),
+                "observed_cost_usd": result.observed_cost_usd,
+                "human_log_path": result.human_log_path.clone(),
                 "session_dir": result.session_dir,
                 "final_markdown_path": result.final_markdown_path,
                 "session_minutes_path": result.session_minutes_path,
@@ -923,6 +1046,7 @@ fn resume_editorial_session_blocking(
 
     let session_name =
         extract_saved_session_name(&saved_prompt).unwrap_or_else(|| format!("Sessao {run_id}"));
+    let saved_contract = load_session_contract(&session_dir);
     let saved_initial_agent = extract_saved_initial_agent(&saved_prompt);
     let requested_initial_agent = request.initial_agent.clone();
     let effective_initial_agent = saved_initial_agent
@@ -1008,6 +1132,27 @@ fn resume_editorial_session_blocking(
         protocol_text,
         protocol_hash,
         initial_agent: effective_initial_agent,
+        active_agents: request.active_agents.clone().or_else(|| {
+            saved_contract
+                .as_ref()
+                .map(|contract| contract.active_agents.clone())
+        }),
+        max_session_cost_usd: request.max_session_cost_usd.or_else(|| {
+            saved_contract
+                .as_ref()
+                .and_then(|contract| contract.max_session_cost_usd)
+        }),
+        max_session_minutes: request.max_session_minutes.or_else(|| {
+            saved_contract
+                .as_ref()
+                .and_then(|contract| contract.max_session_minutes)
+        }),
+        attachments: request.attachments.clone(),
+        links: request.links.clone().or_else(|| {
+            saved_contract
+                .as_ref()
+                .map(|contract| contract.links.clone())
+        }),
     };
 
     let result = match run_editorial_session_core(&request, &log_session, Some(resume_state)) {
@@ -1044,6 +1189,9 @@ fn resume_editorial_session_blocking(
                 "run_id": result.run_id,
                 "status": result.status,
                 "consensus_ready": result.consensus_ready,
+                "active_agents": result.active_agents.clone(),
+                "observed_cost_usd": result.observed_cost_usd,
+                "human_log_path": result.human_log_path.clone(),
                 "session_dir": result.session_dir,
                 "final_markdown_path": result.final_markdown_path,
                 "session_minutes_path": result.session_minutes_path
@@ -1231,6 +1379,18 @@ fn logs_dir() -> PathBuf {
     data_dir().join("logs")
 }
 
+fn human_logs_dir() -> PathBuf {
+    logs_dir().join("human")
+}
+
+fn human_log_path_for(raw_log_path: &Path) -> PathBuf {
+    let stem = raw_log_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("maestro-log");
+    human_logs_dir().join(format!("{stem}.log"))
+}
+
 fn config_dir() -> PathBuf {
     data_dir().join("config")
 }
@@ -1243,11 +1403,11 @@ fn ai_provider_config_path() -> PathBuf {
     config_dir().join("ai-providers.json")
 }
 
-fn sessions_dir() -> PathBuf {
+pub(crate) fn sessions_dir() -> PathBuf {
     data_dir().join("sessions")
 }
 
-fn checked_data_child_path(path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn checked_data_child_path(path: &Path) -> Result<PathBuf, String> {
     if !path.is_absolute() {
         return Err("internal data path must be absolute".to_string());
     }
@@ -1296,7 +1456,7 @@ fn safe_run_id_from_entry(entry: &fs::DirEntry) -> Option<String> {
     }
 }
 
-fn sanitize_path_segment(value: &str, max_len: usize) -> String {
+pub(crate) fn sanitize_path_segment(value: &str, max_len: usize) -> String {
     value
         .chars()
         .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
@@ -1372,6 +1532,14 @@ fn persist_ai_provider_cloudflare_marker(
         gemini_api_key_remote: config.gemini_api_key.is_some() || config.gemini_api_key_remote,
         deepseek_api_key_remote: config.deepseek_api_key.is_some()
             || config.deepseek_api_key_remote,
+        openai_input_usd_per_million: config.openai_input_usd_per_million,
+        openai_output_usd_per_million: config.openai_output_usd_per_million,
+        anthropic_input_usd_per_million: config.anthropic_input_usd_per_million,
+        anthropic_output_usd_per_million: config.anthropic_output_usd_per_million,
+        gemini_input_usd_per_million: config.gemini_input_usd_per_million,
+        gemini_output_usd_per_million: config.gemini_output_usd_per_million,
+        deepseek_input_usd_per_million: config.deepseek_input_usd_per_million,
+        deepseek_output_usd_per_million: config.deepseek_output_usd_per_million,
         cloudflare_secret_store_id: config.cloudflare_secret_store_id.clone(),
         cloudflare_secret_store_name: config.cloudflare_secret_store_name.clone(),
         updated_at: config.updated_at.clone(),
@@ -1464,6 +1632,30 @@ fn sanitize_ai_provider_config(config: AiProviderConfig) -> AiProviderConfig {
         anthropic_api_key_remote: config.anthropic_api_key_remote,
         gemini_api_key_remote: config.gemini_api_key_remote,
         deepseek_api_key_remote: config.deepseek_api_key_remote,
+        openai_input_usd_per_million: sanitize_optional_cost_rate(
+            config.openai_input_usd_per_million,
+        ),
+        openai_output_usd_per_million: sanitize_optional_cost_rate(
+            config.openai_output_usd_per_million,
+        ),
+        anthropic_input_usd_per_million: sanitize_optional_cost_rate(
+            config.anthropic_input_usd_per_million,
+        ),
+        anthropic_output_usd_per_million: sanitize_optional_cost_rate(
+            config.anthropic_output_usd_per_million,
+        ),
+        gemini_input_usd_per_million: sanitize_optional_cost_rate(
+            config.gemini_input_usd_per_million,
+        ),
+        gemini_output_usd_per_million: sanitize_optional_cost_rate(
+            config.gemini_output_usd_per_million,
+        ),
+        deepseek_input_usd_per_million: sanitize_optional_cost_rate(
+            config.deepseek_input_usd_per_million,
+        ),
+        deepseek_output_usd_per_million: sanitize_optional_cost_rate(
+            config.deepseek_output_usd_per_million,
+        ),
         cloudflare_secret_store_id: config
             .cloudflare_secret_store_id
             .map(|value| sanitize_short(&value, 80))
@@ -1473,6 +1665,135 @@ fn sanitize_ai_provider_config(config: AiProviderConfig) -> AiProviderConfig {
             .map(|value| sanitize_short(&value, 80))
             .filter(|value| !value.is_empty()),
         updated_at: Utc::now().to_rfc3339(),
+    }
+}
+
+fn sanitize_optional_cost_rate(value: Option<f64>) -> Option<f64> {
+    value.filter(|value| value.is_finite() && *value > 0.0 && *value <= 10_000.0)
+}
+
+fn provider_cost_rates_from_config(
+    agent_key: &str,
+    config: &AiProviderConfig,
+) -> Result<ProviderCostRates, String> {
+    let (label, input, output) = match agent_key {
+        "claude" => (
+            "Anthropic / Claude",
+            config.anthropic_input_usd_per_million,
+            config.anthropic_output_usd_per_million,
+        ),
+        "codex" => (
+            "OpenAI / Codex",
+            config.openai_input_usd_per_million,
+            config.openai_output_usd_per_million,
+        ),
+        "gemini" => (
+            "Google / Gemini",
+            config.gemini_input_usd_per_million,
+            config.gemini_output_usd_per_million,
+        ),
+        "deepseek" => (
+            "DeepSeek",
+            config.deepseek_input_usd_per_million,
+            config.deepseek_output_usd_per_million,
+        ),
+        _ => {
+            return Err(format!(
+                "Peer editorial sem provedor de tarifa conhecido: {}.",
+                sanitize_text(agent_key, 80)
+            ))
+        }
+    };
+    let input = input.ok_or_else(|| {
+        format!(
+            "Configure a tarifa de entrada do provedor {label} em Configuracoes > Agentes via API > Tabela de tarifas."
+        )
+    })?;
+    let output = output.ok_or_else(|| {
+        format!(
+            "Configure a tarifa de saida do provedor {label} em Configuracoes > Agentes via API > Tabela de tarifas."
+        )
+    })?;
+    Ok(ProviderCostRates {
+        input_usd_per_million: input,
+        output_usd_per_million: output,
+    })
+}
+
+fn api_provider_for_agent(agent_key: &str) -> Option<&'static str> {
+    match agent_key {
+        "claude" => Some("anthropic"),
+        "codex" => Some("openai"),
+        "gemini" => Some("gemini"),
+        "deepseek" => Some("deepseek"),
+        _ => None,
+    }
+}
+
+fn api_cli_for_agent(agent_key: &str) -> &'static str {
+    match agent_key {
+        "claude" => "anthropic-api",
+        "codex" => "openai-api",
+        "gemini" => "gemini-api",
+        "deepseek" => "deepseek-api",
+        _ => "provider-api",
+    }
+}
+
+fn provider_label_for_agent(agent_key: &str) -> &'static str {
+    match agent_key {
+        "claude" => "Anthropic / Claude",
+        "codex" => "OpenAI / Codex",
+        "gemini" => "Google / Gemini",
+        "deepseek" => "DeepSeek",
+        _ => "Provedor API",
+    }
+}
+
+fn provider_remote_present(config: &AiProviderConfig, agent_key: &str) -> bool {
+    match agent_key {
+        "claude" => config.anthropic_api_key_remote,
+        "codex" => config.openai_api_key_remote,
+        "gemini" => config.gemini_api_key_remote,
+        "deepseek" => config.deepseek_api_key_remote,
+        _ => false,
+    }
+}
+
+fn provider_key_for_agent(config: &AiProviderConfig, agent_key: &str) -> Option<(String, String)> {
+    match agent_key {
+        "claude" => effective_provider_key(
+            config.anthropic_api_key.as_deref(),
+            &["MAESTRO_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"],
+        ),
+        "codex" => effective_provider_key(
+            config.openai_api_key.as_deref(),
+            &["MAESTRO_OPENAI_API_KEY", "OPENAI_API_KEY"],
+        ),
+        "gemini" => effective_provider_key(
+            config.gemini_api_key.as_deref(),
+            &["MAESTRO_GEMINI_API_KEY", "GEMINI_API_KEY"],
+        ),
+        "deepseek" => effective_provider_key(
+            config.deepseek_api_key.as_deref(),
+            &["MAESTRO_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY"],
+        ),
+        _ => None,
+    }
+}
+
+fn should_run_agent_via_api(agent_key: &str, config: &AiProviderConfig) -> bool {
+    if api_provider_for_agent(agent_key).is_none() {
+        return false;
+    }
+    let mode = normalize_provider_mode(&config.provider_mode);
+    if agent_key == "deepseek" {
+        return true;
+    }
+    match mode {
+        "api" => true,
+        "cli" => false,
+        _ => provider_key_for_agent(config, agent_key).is_some(),
     }
 }
 
@@ -1585,6 +1906,30 @@ fn read_ai_provider_cloudflare_metadata(
             .get("effective_store_name")
             .and_then(Value::as_str)
             .map(|value| value.to_string()),
+        openai_input_usd_per_million: metadata
+            .get("openai_input_usd_per_million")
+            .and_then(Value::as_f64),
+        openai_output_usd_per_million: metadata
+            .get("openai_output_usd_per_million")
+            .and_then(Value::as_f64),
+        anthropic_input_usd_per_million: metadata
+            .get("anthropic_input_usd_per_million")
+            .and_then(Value::as_f64),
+        anthropic_output_usd_per_million: metadata
+            .get("anthropic_output_usd_per_million")
+            .and_then(Value::as_f64),
+        gemini_input_usd_per_million: metadata
+            .get("gemini_input_usd_per_million")
+            .and_then(Value::as_f64),
+        gemini_output_usd_per_million: metadata
+            .get("gemini_output_usd_per_million")
+            .and_then(Value::as_f64),
+        deepseek_input_usd_per_million: metadata
+            .get("deepseek_input_usd_per_million")
+            .and_then(Value::as_f64),
+        deepseek_output_usd_per_million: metadata
+            .get("deepseek_output_usd_per_million")
+            .and_then(Value::as_f64),
         ..AiProviderConfig::default()
     };
 
@@ -1710,19 +2055,137 @@ fn run_editorial_session_core(
     if request.protocol_text.trim().len() < 100 {
         return Err("protocolo editorial integral nao foi carregado".to_string());
     }
-    let (draft_lead_key, invalid_initial_agent) =
-        resolve_initial_agent_key(request.initial_agent.as_deref());
-    let draft_lead_name = ordered_editorial_agent_specs(draft_lead_key)
-        .first()
-        .map(|spec| spec.name)
-        .unwrap_or("Claude");
-    let ai_provider_config =
-        read_ai_provider_config().unwrap_or_else(|_| AiProviderConfig::default());
-
     let session_dir = checked_data_child_path(&sessions_dir().join(&run_id))?;
     let agent_dir = checked_data_child_path(&session_dir.join("agent-runs"))?;
     fs::create_dir_all(&agent_dir)
         .map_err(|error| format!("failed to create session dir: {error}"))?;
+
+    let saved_contract = load_session_contract(&session_dir);
+    let active_agent_keys = if request.active_agents.is_some() {
+        normalize_active_agents(request.active_agents.as_ref())?
+    } else if let Some(contract) = saved_contract.as_ref() {
+        normalize_active_agents(Some(&contract.active_agents))?
+    } else {
+        normalize_active_agents(None)?
+    };
+    let (draft_lead_key, invalid_initial_agent) =
+        effective_draft_lead(request.initial_agent.as_deref(), &active_agent_keys);
+    let draft_lead_name = selected_editorial_agent_specs(draft_lead_key, &active_agent_keys)
+        .first()
+        .map(|spec| spec.name)
+        .unwrap_or("Claude");
+    let max_session_cost_usd =
+        sanitize_optional_positive_f64(request.max_session_cost_usd.or_else(|| {
+            saved_contract
+                .as_ref()
+                .and_then(|contract| contract.max_session_cost_usd)
+        }));
+    let max_session_minutes =
+        sanitize_optional_positive_u64(request.max_session_minutes.or_else(|| {
+            saved_contract
+                .as_ref()
+                .and_then(|contract| contract.max_session_minutes)
+        }));
+    let created_at = saved_contract
+        .as_ref()
+        .map(|contract| parse_created_at(&contract.created_at))
+        .unwrap_or_else(Utc::now);
+    let ai_provider_config =
+        read_ai_provider_config().unwrap_or_else(|_| AiProviderConfig::default());
+    let mut cost_ledger = load_cost_ledger(&session_dir, &run_id);
+    let api_agent_keys = active_agent_keys
+        .iter()
+        .filter(|key| should_run_agent_via_api(key, &ai_provider_config))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut provider_cost_rates = BTreeMap::new();
+    for agent_key in &api_agent_keys {
+        match provider_cost_rates_from_config(agent_key, &ai_provider_config) {
+            Ok(rates) => {
+                provider_cost_rates.insert(agent_key.clone(), rates);
+            }
+            Err(error) => {
+                let _ = write_log_record(
+                    log_session,
+                    LogEventInput {
+                        level: "error".to_string(),
+                        category: "session.cost.config_missing".to_string(),
+                        message: "API usage requires UI provider tariff configuration".to_string(),
+                        context: Some(json!({
+                            "run_id": &run_id,
+                            "error": sanitize_text(&error, 500),
+                            "agent": agent_key,
+                            "provider": api_provider_for_agent(agent_key).unwrap_or("unknown"),
+                            "active_agents": active_agent_keys.clone()
+                        })),
+                    },
+                );
+                let prompt_path = session_dir.join("prompt.md");
+                let protocol_path = session_dir.join("protocolo.md");
+                let _ = write_text_file(
+                        &prompt_path,
+                        &format!(
+                            "# Prompt da Sessao\n\nSessao: {}\nRun: `{}`\nAgente redator inicial: `{}`\n\n{}",
+                            sanitize_text(&request.session_name, 200),
+                            run_id,
+                            draft_lead_key,
+                            prompt
+                        ),
+                    );
+                let _ = write_text_file(&protocol_path, &request.protocol_text);
+                let minutes_path = session_dir.join("ata-da-sessao.md");
+                write_text_file(
+                    &minutes_path,
+                    &build_session_minutes(request, &run_id, &[], false, None),
+                )?;
+                return Ok(EditorialSessionResult {
+                    run_id,
+                    session_dir: session_dir.to_string_lossy().to_string(),
+                    final_markdown_path: None,
+                    session_minutes_path: minutes_path.to_string_lossy().to_string(),
+                    prompt_path: session_dir.join("prompt.md").to_string_lossy().to_string(),
+                    protocol_path: session_dir
+                        .join("protocolo.md")
+                        .to_string_lossy()
+                        .to_string(),
+                    draft_path: None,
+                    agents: Vec::new(),
+                    consensus_ready: false,
+                    status: "PAUSED_COST_RATES_MISSING".to_string(),
+                    active_agents: active_agent_keys,
+                    max_session_cost_usd,
+                    max_session_minutes,
+                    observed_cost_usd: Some(cost_ledger.total_observed_cost_usd),
+                    links_path: None,
+                    attachments_manifest_path: None,
+                    human_log_path: Some(
+                        human_log_path_for(&log_session.path)
+                            .to_string_lossy()
+                            .to_string(),
+                    ),
+                });
+            }
+        }
+    }
+    let evidence = process_session_evidence(
+        &session_dir,
+        request.links.as_ref(),
+        request.attachments.as_ref(),
+        saved_contract.as_ref(),
+    )?;
+    let contract = SessionContract {
+        schema_version: 1,
+        run_id: run_id.clone(),
+        session_name: sanitize_text(&request.session_name, 200),
+        created_at: created_at.to_rfc3339(),
+        active_agents: active_agent_keys.clone(),
+        initial_agent: draft_lead_key.to_string(),
+        max_session_cost_usd,
+        max_session_minutes,
+        links: evidence.links.clone(),
+        attachments: evidence.attachments.clone(),
+    };
+    write_session_contract(&session_dir, &contract)?;
 
     let prompt_path = session_dir.join("prompt.md");
     let protocol_path = session_dir.join("protocolo.md");
@@ -1737,6 +2200,7 @@ fn run_editorial_session_core(
         ),
     )?;
     write_text_file(&protocol_path, &request.protocol_text)?;
+    let human_log_path = human_log_path_for(&log_session.path);
 
     let mut agents = Vec::new();
     let mut current_draft = String::new();
@@ -1754,7 +2218,7 @@ fn run_editorial_session_core(
                 context: Some(json!({
                     "run_id": &run_id,
                     "requested_initial_agent": invalid_initial_agent,
-                    "fallback_initial_agent": "claude"
+                    "fallback_initial_agent": draft_lead_key
                 })),
             },
         );
@@ -1771,7 +2235,8 @@ fn run_editorial_session_core(
                 "run_id": &run_id,
                 "initial_agent": draft_lead_key,
                 "initial_agent_name": draft_lead_name,
-                "agent_order": ordered_editorial_agent_specs(draft_lead_key)
+                "active_agents": active_agent_keys.clone(),
+                "agent_order": selected_editorial_agent_specs(draft_lead_key, &active_agent_keys)
                     .iter()
                     .map(|spec| spec.key)
                     .collect::<Vec<_>>()
@@ -1802,21 +2267,94 @@ fn run_editorial_session_core(
     }
 
     if current_draft.trim().is_empty() {
-        let draft_specs = ordered_editorial_agent_specs(draft_lead_key);
+        let draft_specs = selected_editorial_agent_specs(draft_lead_key, &active_agent_keys);
 
         for spec in draft_specs {
+            if session_time_exhausted(created_at, max_session_minutes) {
+                let minutes_path = session_dir.join("ata-da-sessao.md");
+                write_text_file(
+                    &minutes_path,
+                    &build_session_minutes(request, &run_id, &agents, false, None),
+                )?;
+                let context = SessionResultContext {
+                    run_id: &run_id,
+                    session_dir: &session_dir,
+                    prompt_path: &prompt_path,
+                    protocol_path: &protocol_path,
+                    active_agents: &active_agent_keys,
+                    max_session_cost_usd,
+                    max_session_minutes,
+                    observed_cost_usd: cost_ledger.total_observed_cost_usd,
+                    links_path: evidence.links_path.as_ref(),
+                    attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
+                    human_log_path: &human_log_path,
+                };
+                return Ok(editorial_session_result(
+                    &context,
+                    None,
+                    &minutes_path,
+                    current_draft_path,
+                    agents,
+                    false,
+                    "TIME_LIMIT_REACHED",
+                ));
+            }
             let output_path = agent_dir.join(format!("round-001-{}-draft.md", spec.key));
+            let timeout = remaining_session_duration(created_at, max_session_minutes);
+            let use_api_agent = api_agent_keys.contains(spec.key);
+            let cost_guard = if use_api_agent {
+                provider_cost_guard_for(
+                    max_session_cost_usd,
+                    provider_cost_rates.get(spec.key).copied(),
+                    &cost_ledger,
+                )
+            } else {
+                None
+            };
             let draft_run = run_editorial_agent_for_spec(
                 log_session,
                 &run_id,
                 spec,
                 "draft",
-                build_draft_prompt(request, &run_id),
+                build_draft_prompt(request, &run_id, &evidence.block),
+                &evidence.attachments,
                 &output_path,
-                None,
+                timeout,
                 &ai_provider_config,
+                cost_guard,
+                use_api_agent,
             );
             agents.push(draft_run.clone());
+            append_agent_cost_to_ledger(&session_dir, &mut cost_ledger, &draft_run)?;
+            if draft_run.status == "COST_LIMIT_REACHED" {
+                let minutes_path = session_dir.join("ata-da-sessao.md");
+                write_text_file(
+                    &minutes_path,
+                    &build_session_minutes(request, &run_id, &agents, false, None),
+                )?;
+                let context = SessionResultContext {
+                    run_id: &run_id,
+                    session_dir: &session_dir,
+                    prompt_path: &prompt_path,
+                    protocol_path: &protocol_path,
+                    active_agents: &active_agent_keys,
+                    max_session_cost_usd,
+                    max_session_minutes,
+                    observed_cost_usd: cost_ledger.total_observed_cost_usd,
+                    links_path: evidence.links_path.as_ref(),
+                    attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
+                    human_log_path: &human_log_path,
+                };
+                return Ok(editorial_session_result(
+                    &context,
+                    None,
+                    &minutes_path,
+                    current_draft_path,
+                    agents,
+                    false,
+                    "COST_LIMIT_REACHED",
+                ));
+            }
             let draft_artifact = read_text_file(&output_path).unwrap_or_default();
             let draft_text =
                 extract_stdout_block(&draft_artifact).unwrap_or(draft_artifact.as_str());
@@ -1855,61 +2393,197 @@ fn run_editorial_session_core(
             &build_session_minutes(request, &run_id, &agents, false, None),
         )?;
 
-        return Ok(EditorialSessionResult {
-            run_id,
-            session_dir: session_dir.to_string_lossy().to_string(),
-            final_markdown_path: None,
-            session_minutes_path: minutes_path.to_string_lossy().to_string(),
-            prompt_path: prompt_path.to_string_lossy().to_string(),
-            protocol_path: protocol_path.to_string_lossy().to_string(),
-            draft_path: current_draft_path.map(|path| path.to_string_lossy().to_string()),
+        let context = SessionResultContext {
+            run_id: &run_id,
+            session_dir: &session_dir,
+            prompt_path: &prompt_path,
+            protocol_path: &protocol_path,
+            active_agents: &active_agent_keys,
+            max_session_cost_usd,
+            max_session_minutes,
+            observed_cost_usd: cost_ledger.total_observed_cost_usd,
+            links_path: evidence.links_path.as_ref(),
+            attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
+            human_log_path: &human_log_path,
+        };
+        return Ok(editorial_session_result(
+            &context,
+            None,
+            &minutes_path,
+            current_draft_path,
             agents,
-            consensus_ready: false,
-            status: "PAUSED_DRAFT_UNAVAILABLE".to_string(),
-        });
+            false,
+            "PAUSED_DRAFT_UNAVAILABLE",
+        ));
     }
 
     let final_path: PathBuf;
     loop {
-        let review_specs = editorial_agent_specs();
-        let review_handles = review_specs
-            .into_iter()
-            .map(|spec| {
-                let prompt = build_review_prompt(request, &run_id, &current_draft);
+        if session_time_exhausted(created_at, max_session_minutes) {
+            let minutes_path = session_dir.join("ata-da-sessao.md");
+            write_text_file(
+                &minutes_path,
+                &build_session_minutes(request, &run_id, &agents, false, None),
+            )?;
+            let context = SessionResultContext {
+                run_id: &run_id,
+                session_dir: &session_dir,
+                prompt_path: &prompt_path,
+                protocol_path: &protocol_path,
+                active_agents: &active_agent_keys,
+                max_session_cost_usd,
+                max_session_minutes,
+                observed_cost_usd: cost_ledger.total_observed_cost_usd,
+                links_path: evidence.links_path.as_ref(),
+                attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
+                human_log_path: &human_log_path,
+            };
+            return Ok(editorial_session_result(
+                &context,
+                None,
+                &minutes_path,
+                current_draft_path,
+                agents,
+                false,
+                "TIME_LIMIT_REACHED",
+            ));
+        }
+        let review_specs = selected_editorial_agent_specs(draft_lead_key, &active_agent_keys);
+        let enforce_sequential_budget = max_session_cost_usd.is_some()
+            && review_specs
+                .iter()
+                .any(|spec| api_agent_keys.contains(spec.key));
+        let mut round_results = Vec::new();
+        if enforce_sequential_budget {
+            for spec in review_specs {
+                let prompt = build_review_prompt(request, &run_id, &current_draft, &evidence.block);
                 let output_path =
                     agent_dir.join(format!("round-{round:03}-{}-review.md", spec.key));
-                let run_id = run_id.clone();
-                let log_session = log_session.clone();
-                let ai_provider_config = ai_provider_config.clone();
-                thread::spawn(move || {
-                    run_editorial_agent_for_spec(
-                        &log_session,
-                        &run_id,
-                        spec,
-                        "review",
-                        prompt,
-                        &output_path,
-                        None,
-                        &ai_provider_config,
+                let timeout = remaining_session_duration(created_at, max_session_minutes);
+                let use_api_agent = api_agent_keys.contains(spec.key);
+                let cost_guard = if use_api_agent {
+                    provider_cost_guard_for(
+                        max_session_cost_usd,
+                        provider_cost_rates.get(spec.key).copied(),
+                        &cost_ledger,
                     )
+                } else {
+                    None
+                };
+                let result = run_editorial_agent_for_spec(
+                    log_session,
+                    &run_id,
+                    spec,
+                    "review",
+                    prompt,
+                    &evidence.attachments,
+                    &output_path,
+                    timeout,
+                    &ai_provider_config,
+                    cost_guard,
+                    use_api_agent,
+                );
+                let cost_limit_reached = result.status == "COST_LIMIT_REACHED";
+                round_results.push(result.clone());
+                append_agent_cost_to_ledger(&session_dir, &mut cost_ledger, &result)?;
+                agents.push(result);
+                if cost_limit_reached {
+                    break;
+                }
+            }
+        } else {
+            let review_handles = review_specs
+                .into_iter()
+                .map(|spec| {
+                    let prompt =
+                        build_review_prompt(request, &run_id, &current_draft, &evidence.block);
+                    let attachments = evidence.attachments.clone();
+                    let output_path =
+                        agent_dir.join(format!("round-{round:03}-{}-review.md", spec.key));
+                    let run_id = run_id.clone();
+                    let log_session = log_session.clone();
+                    let ai_provider_config = ai_provider_config.clone();
+                    let timeout = remaining_session_duration(created_at, max_session_minutes);
+                    let use_api_agent = api_agent_keys.contains(spec.key);
+                    let cost_guard = if use_api_agent {
+                        provider_cost_guard_for(
+                            max_session_cost_usd,
+                            provider_cost_rates.get(spec.key).copied(),
+                            &cost_ledger,
+                        )
+                    } else {
+                        None
+                    };
+                    thread::spawn(move || {
+                        run_editorial_agent_for_spec(
+                            &log_session,
+                            &run_id,
+                            spec,
+                            "review",
+                            prompt,
+                            &attachments,
+                            &output_path,
+                            timeout,
+                            &ai_provider_config,
+                            cost_guard,
+                            use_api_agent,
+                        )
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
+                .collect::<Vec<_>>();
 
-        let mut round_results = Vec::new();
-        for handle in review_handles {
-            let result = handle.join().unwrap_or_else(|_| EditorialAgentResult {
-                name: "Unknown".to_string(),
-                role: "review".to_string(),
-                cli: "unknown".to_string(),
-                tone: "error".to_string(),
-                status: "thread de revisao falhou".to_string(),
-                duration_ms: 0,
-                exit_code: None,
-                output_path: String::new(),
-            });
-            round_results.push(result.clone());
-            agents.push(result);
+            for handle in review_handles {
+                let result = handle.join().unwrap_or_else(|_| EditorialAgentResult {
+                    name: "Unknown".to_string(),
+                    role: "review".to_string(),
+                    cli: "unknown".to_string(),
+                    tone: "error".to_string(),
+                    status: "thread de revisao falhou".to_string(),
+                    duration_ms: 0,
+                    exit_code: None,
+                    output_path: String::new(),
+                    usage_input_tokens: None,
+                    usage_output_tokens: None,
+                    cost_usd: None,
+                    cost_estimated: None,
+                });
+                round_results.push(result.clone());
+                append_agent_cost_to_ledger(&session_dir, &mut cost_ledger, &result)?;
+                agents.push(result);
+            }
+        }
+
+        if round_results
+            .iter()
+            .any(|agent| agent.status == "COST_LIMIT_REACHED")
+        {
+            let minutes_path = session_dir.join("ata-da-sessao.md");
+            write_text_file(
+                &minutes_path,
+                &build_session_minutes(request, &run_id, &agents, false, None),
+            )?;
+            let context = SessionResultContext {
+                run_id: &run_id,
+                session_dir: &session_dir,
+                prompt_path: &prompt_path,
+                protocol_path: &protocol_path,
+                active_agents: &active_agent_keys,
+                max_session_cost_usd,
+                max_session_minutes,
+                observed_cost_usd: cost_ledger.total_observed_cost_usd,
+                links_path: evidence.links_path.as_ref(),
+                attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
+                human_log_path: &human_log_path,
+            };
+            return Ok(editorial_session_result(
+                &context,
+                None,
+                &minutes_path,
+                current_draft_path,
+                agents,
+                false,
+                "COST_LIMIT_REACHED",
+            ));
         }
 
         let consensus_ready = round_results
@@ -1962,23 +2636,102 @@ fn run_editorial_session_core(
         );
 
         round += 1;
-        let revision_prompt =
-            build_revision_prompt(request, &run_id, round, &current_draft, &round_results);
-        let revision_specs = ordered_editorial_agent_specs(draft_lead_key);
+        let revision_prompt = build_revision_prompt(
+            request,
+            &run_id,
+            round,
+            &current_draft,
+            &round_results,
+            &evidence.block,
+        );
+        let revision_specs = selected_editorial_agent_specs(draft_lead_key, &active_agent_keys);
         let mut revised = false;
         for spec in revision_specs {
+            if session_time_exhausted(created_at, max_session_minutes) {
+                let minutes_path = session_dir.join("ata-da-sessao.md");
+                write_text_file(
+                    &minutes_path,
+                    &build_session_minutes(request, &run_id, &agents, false, None),
+                )?;
+                let context = SessionResultContext {
+                    run_id: &run_id,
+                    session_dir: &session_dir,
+                    prompt_path: &prompt_path,
+                    protocol_path: &protocol_path,
+                    active_agents: &active_agent_keys,
+                    max_session_cost_usd,
+                    max_session_minutes,
+                    observed_cost_usd: cost_ledger.total_observed_cost_usd,
+                    links_path: evidence.links_path.as_ref(),
+                    attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
+                    human_log_path: &human_log_path,
+                };
+                return Ok(editorial_session_result(
+                    &context,
+                    None,
+                    &minutes_path,
+                    current_draft_path,
+                    agents,
+                    false,
+                    "TIME_LIMIT_REACHED",
+                ));
+            }
             let output_path = agent_dir.join(format!("round-{round:03}-{}-revision.md", spec.key));
+            let timeout = remaining_session_duration(created_at, max_session_minutes);
+            let use_api_agent = api_agent_keys.contains(spec.key);
+            let cost_guard = if use_api_agent {
+                provider_cost_guard_for(
+                    max_session_cost_usd,
+                    provider_cost_rates.get(spec.key).copied(),
+                    &cost_ledger,
+                )
+            } else {
+                None
+            };
             let revision_run = run_editorial_agent_for_spec(
                 log_session,
                 &run_id,
                 spec,
                 "revision",
                 revision_prompt.clone(),
+                &evidence.attachments,
                 &output_path,
-                None,
+                timeout,
                 &ai_provider_config,
+                cost_guard,
+                use_api_agent,
             );
             agents.push(revision_run.clone());
+            append_agent_cost_to_ledger(&session_dir, &mut cost_ledger, &revision_run)?;
+            if revision_run.status == "COST_LIMIT_REACHED" {
+                let minutes_path = session_dir.join("ata-da-sessao.md");
+                write_text_file(
+                    &minutes_path,
+                    &build_session_minutes(request, &run_id, &agents, false, None),
+                )?;
+                let context = SessionResultContext {
+                    run_id: &run_id,
+                    session_dir: &session_dir,
+                    prompt_path: &prompt_path,
+                    protocol_path: &protocol_path,
+                    active_agents: &active_agent_keys,
+                    max_session_cost_usd,
+                    max_session_minutes,
+                    observed_cost_usd: cost_ledger.total_observed_cost_usd,
+                    links_path: evidence.links_path.as_ref(),
+                    attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
+                    human_log_path: &human_log_path,
+                };
+                return Ok(editorial_session_result(
+                    &context,
+                    None,
+                    &minutes_path,
+                    current_draft_path,
+                    agents,
+                    false,
+                    "COST_LIMIT_REACHED",
+                ));
+            }
             let artifact = read_text_file(&output_path).unwrap_or_default();
             let revised_text = extract_stdout_block(&artifact).unwrap_or(artifact.as_str());
             if revision_run.tone != "error"
@@ -2017,21 +2770,31 @@ fn run_editorial_session_core(
         &build_session_minutes(request, &run_id, &agents, true, Some(&final_path)),
     )?;
 
-    Ok(EditorialSessionResult {
-        run_id,
-        session_dir: session_dir.to_string_lossy().to_string(),
-        final_markdown_path: Some(final_path.to_string_lossy().to_string()),
-        session_minutes_path: minutes_path.to_string_lossy().to_string(),
-        prompt_path: prompt_path.to_string_lossy().to_string(),
-        protocol_path: protocol_path.to_string_lossy().to_string(),
-        draft_path: current_draft_path.map(|path| path.to_string_lossy().to_string()),
+    let context = SessionResultContext {
+        run_id: &run_id,
+        session_dir: &session_dir,
+        prompt_path: &prompt_path,
+        protocol_path: &protocol_path,
+        active_agents: &active_agent_keys,
+        max_session_cost_usd,
+        max_session_minutes,
+        observed_cost_usd: cost_ledger.total_observed_cost_usd,
+        links_path: evidence.links_path.as_ref(),
+        attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
+        human_log_path: &human_log_path,
+    };
+    Ok(editorial_session_result(
+        &context,
+        Some(&final_path),
+        &minutes_path,
+        current_draft_path,
         agents,
-        consensus_ready: true,
-        status: "READY_UNANIMOUS".to_string(),
-    })
+        true,
+        "READY_UNANIMOUS",
+    ))
 }
 
-fn write_text_file(path: &Path, text: &str) -> Result<(), String> {
+pub(crate) fn write_text_file(path: &Path, text: &str) -> Result<(), String> {
     let path = checked_data_child_path(path)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -2043,6 +2806,159 @@ fn write_text_file(path: &Path, text: &str) -> Result<(), String> {
 fn read_text_file(path: &Path) -> Result<String, String> {
     let path = checked_data_child_path(path)?;
     fs::read_to_string(&path).map_err(|error| format!("failed to read artifact: {error}"))
+}
+
+struct SessionResultContext<'a> {
+    run_id: &'a str,
+    session_dir: &'a Path,
+    prompt_path: &'a Path,
+    protocol_path: &'a Path,
+    active_agents: &'a [String],
+    max_session_cost_usd: Option<f64>,
+    max_session_minutes: Option<u64>,
+    observed_cost_usd: f64,
+    links_path: Option<&'a PathBuf>,
+    attachments_manifest_path: Option<&'a PathBuf>,
+    human_log_path: &'a Path,
+}
+
+fn editorial_session_result(
+    context: &SessionResultContext<'_>,
+    final_path: Option<&PathBuf>,
+    minutes_path: &Path,
+    draft_path: Option<PathBuf>,
+    agents: Vec<EditorialAgentResult>,
+    consensus_ready: bool,
+    status: &str,
+) -> EditorialSessionResult {
+    EditorialSessionResult {
+        run_id: context.run_id.to_string(),
+        session_dir: context.session_dir.to_string_lossy().to_string(),
+        final_markdown_path: final_path.map(|path| path.to_string_lossy().to_string()),
+        session_minutes_path: minutes_path.to_string_lossy().to_string(),
+        prompt_path: context.prompt_path.to_string_lossy().to_string(),
+        protocol_path: context.protocol_path.to_string_lossy().to_string(),
+        draft_path: draft_path.map(|path| path.to_string_lossy().to_string()),
+        agents,
+        consensus_ready,
+        status: status.to_string(),
+        active_agents: context.active_agents.to_vec(),
+        max_session_cost_usd: context.max_session_cost_usd,
+        max_session_minutes: context.max_session_minutes,
+        observed_cost_usd: Some(context.observed_cost_usd),
+        links_path: context
+            .links_path
+            .map(|path| path.to_string_lossy().to_string()),
+        attachments_manifest_path: context
+            .attachments_manifest_path
+            .map(|path| path.to_string_lossy().to_string()),
+        human_log_path: Some(context.human_log_path.to_string_lossy().to_string()),
+    }
+}
+
+fn session_contract_path(session_dir: &Path) -> PathBuf {
+    session_dir.join("session-contract.json")
+}
+
+fn cost_ledger_path(session_dir: &Path) -> PathBuf {
+    session_dir.join("cost-ledger.json")
+}
+
+fn load_session_contract(session_dir: &Path) -> Option<SessionContract> {
+    let path = session_contract_path(session_dir);
+    let text = read_text_file(&path).ok()?;
+    serde_json::from_str::<SessionContract>(&text).ok()
+}
+
+fn write_session_contract(session_dir: &Path, contract: &SessionContract) -> Result<(), String> {
+    let bytes = serde_json::to_string_pretty(contract)
+        .map_err(|error| format!("failed to serialize session contract: {error}"))?;
+    write_text_file(&session_contract_path(session_dir), &bytes)
+}
+
+fn load_cost_ledger(session_dir: &Path, run_id: &str) -> CostLedger {
+    let path = cost_ledger_path(session_dir);
+    read_text_file(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<CostLedger>(&text).ok())
+        .unwrap_or_else(|| CostLedger {
+            schema_version: 1,
+            run_id: run_id.to_string(),
+            total_observed_cost_usd: 0.0,
+            entries: Vec::new(),
+        })
+}
+
+fn write_cost_ledger(session_dir: &Path, ledger: &CostLedger) -> Result<(), String> {
+    let bytes = serde_json::to_string_pretty(ledger)
+        .map_err(|error| format!("failed to serialize cost ledger: {error}"))?;
+    write_text_file(&cost_ledger_path(session_dir), &bytes)
+}
+
+fn append_agent_cost_to_ledger(
+    session_dir: &Path,
+    ledger: &mut CostLedger,
+    agent: &EditorialAgentResult,
+) -> Result<(), String> {
+    let Some(cost_usd) = agent.cost_usd else {
+        return Ok(());
+    };
+    let input_tokens = agent.usage_input_tokens.unwrap_or_default();
+    let output_tokens = agent.usage_output_tokens.unwrap_or_default();
+    let provider = api_provider_from_cli(&agent.cli).unwrap_or("cli");
+    ledger.entries.push(CostLedgerEntry {
+        at: Utc::now().to_rfc3339(),
+        provider: provider.to_string(),
+        agent: agent.name.clone(),
+        role: agent.role.clone(),
+        model: provider.to_string(),
+        input_tokens,
+        output_tokens,
+        cost_usd,
+        estimated: agent.cost_estimated.unwrap_or(true),
+    });
+    ledger.total_observed_cost_usd = ledger
+        .entries
+        .iter()
+        .map(|entry| entry.cost_usd)
+        .sum::<f64>();
+    write_cost_ledger(session_dir, ledger)
+}
+
+fn api_provider_from_cli(cli: &str) -> Option<&'static str> {
+    match cli {
+        "anthropic-api" => Some("anthropic"),
+        "openai-api" => Some("openai"),
+        "gemini-api" => Some("gemini"),
+        "deepseek-api" => Some("deepseek"),
+        _ => None,
+    }
+}
+
+fn parse_created_at(value: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|value| value.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now())
+}
+
+fn remaining_session_duration(
+    created_at: DateTime<Utc>,
+    max_session_minutes: Option<u64>,
+) -> Option<Duration> {
+    let minutes = max_session_minutes?;
+    let deadline = created_at + chrono::Duration::minutes(minutes as i64);
+    let remaining = deadline - Utc::now();
+    if remaining.num_milliseconds() <= 0 {
+        Some(Duration::from_secs(0))
+    } else {
+        Some(Duration::from_millis(remaining.num_milliseconds() as u64))
+    }
+}
+
+fn session_time_exhausted(created_at: DateTime<Utc>, max_session_minutes: Option<u64>) -> bool {
+    remaining_session_duration(created_at, max_session_minutes)
+        .map(|duration| duration.as_secs() < 2)
+        .unwrap_or(false)
 }
 
 fn inspect_resumable_session_dir(path: &Path) -> Result<Option<ResumableSessionInfo>, String> {
@@ -2264,6 +3180,12 @@ fn parse_agent_artifact_result(artifact: &SessionArtifact) -> Option<EditorialAg
         .unwrap_or(0);
     let exit_code =
         extract_bullet_code_value(&text, "Exit code").and_then(|value| value.parse::<i32>().ok());
+    let usage_input_tokens = extract_bullet_code_value(&text, "Usage input tokens")
+        .and_then(|value| value.parse::<u64>().ok());
+    let usage_output_tokens = extract_bullet_code_value(&text, "Usage output tokens")
+        .and_then(|value| value.parse::<u64>().ok());
+    let cost_usd =
+        extract_bullet_code_value(&text, "Cost USD").and_then(|value| value.parse::<f64>().ok());
     let tone = if status == "READY" || status == "DRAFT_CREATED" {
         "ok"
     } else if status == "CLI_NOT_FOUND"
@@ -2289,6 +3211,10 @@ fn parse_agent_artifact_result(artifact: &SessionArtifact) -> Option<EditorialAg
         duration_ms,
         exit_code,
         output_path: artifact.path.to_string_lossy().to_string(),
+        usage_input_tokens,
+        usage_output_tokens,
+        cost_usd,
+        cost_estimated: cost_usd.map(|_| true),
     })
 }
 
@@ -2576,7 +3502,11 @@ fn ordered_editorial_agent_specs(first_key: &str) -> Vec<EditorialAgentSpec> {
     ordered
 }
 
-fn build_draft_prompt(request: &EditorialSessionRequest, run_id: &str) -> String {
+fn build_draft_prompt(
+    request: &EditorialSessionRequest,
+    run_id: &str,
+    evidence_block: &str,
+) -> String {
     format!(
         r#"# Maestro Editorial AI - Geracao Real
 
@@ -2597,14 +3527,21 @@ Nao invente links. Se faltar evidencia, marque explicitamente `[EVIDENCIA_PENDEN
 ```markdown
 {}
 ```
+{}
 "#,
         sanitize_text(&request.session_name, 200),
         request.prompt,
-        request.protocol_text
+        request.protocol_text,
+        evidence_block
     )
 }
 
-fn build_review_prompt(request: &EditorialSessionRequest, run_id: &str, draft: &str) -> String {
+fn build_review_prompt(
+    request: &EditorialSessionRequest,
+    run_id: &str,
+    draft: &str,
+    evidence_block: &str,
+) -> String {
     format!(
         r#"# Maestro Editorial AI - Revisao Real
 
@@ -2635,11 +3572,13 @@ Obrigatorio:
 ```markdown
 {}
 ```
+{}
 "#,
         sanitize_text(&request.session_name, 200),
         request.prompt,
         request.protocol_text,
-        draft
+        draft,
+        evidence_block
     )
 }
 
@@ -2649,6 +3588,7 @@ fn build_revision_prompt(
     round: usize,
     draft: &str,
     review_agents: &[EditorialAgentResult],
+    evidence_block: &str,
 ) -> String {
     let mut review_notes = String::new();
     for agent in review_agents {
@@ -2700,12 +3640,14 @@ Nao invente links. Se faltar evidencia, preserve marcador `[EVIDENCIA_PENDENTE]`
 ## Manifestacoes dos peers
 
 {}
+{}
 "#,
         sanitize_text(&request.session_name, 200),
         request.prompt,
         request.protocol_text,
         draft,
-        review_notes
+        review_notes,
+        evidence_block
     )
 }
 
@@ -2715,12 +3657,26 @@ fn run_editorial_agent_for_spec(
     spec: EditorialAgentSpec,
     role: &str,
     stdin_text: String,
+    attachments: &[AttachmentManifestEntry],
     output_path: &Path,
     timeout: Option<Duration>,
     config: &AiProviderConfig,
+    cost_guard: Option<ProviderCostGuard>,
+    use_api_agent: bool,
 ) -> EditorialAgentResult {
-    if spec.command == "deepseek-api" {
-        return run_deepseek_api_agent(log_session, run_id, role, stdin_text, output_path, config);
+    if use_api_agent {
+        return run_provider_api_agent(
+            log_session,
+            run_id,
+            spec,
+            role,
+            stdin_text,
+            attachments,
+            output_path,
+            timeout,
+            config,
+            cost_guard,
+        );
     }
 
     run_editorial_agent(
@@ -2736,13 +3692,228 @@ fn run_editorial_agent_for_spec(
     )
 }
 
+fn run_provider_api_agent(
+    log_session: &LogSession,
+    run_id: &str,
+    spec: EditorialAgentSpec,
+    role: &str,
+    prompt: String,
+    attachments: &[AttachmentManifestEntry],
+    output_path: &Path,
+    timeout: Option<Duration>,
+    config: &AiProviderConfig,
+    cost_guard: Option<ProviderCostGuard>,
+) -> EditorialAgentResult {
+    match spec.key {
+        "claude" => run_anthropic_api_agent(
+            log_session,
+            run_id,
+            role,
+            prompt,
+            attachments,
+            output_path,
+            timeout,
+            config,
+            cost_guard,
+        ),
+        "codex" => run_openai_api_agent(
+            log_session,
+            run_id,
+            role,
+            prompt,
+            attachments,
+            output_path,
+            timeout,
+            config,
+            cost_guard,
+        ),
+        "gemini" => run_gemini_api_agent(
+            log_session,
+            run_id,
+            role,
+            prompt,
+            attachments,
+            output_path,
+            timeout,
+            config,
+            cost_guard,
+        ),
+        "deepseek" => run_deepseek_api_agent(
+            log_session,
+            run_id,
+            role,
+            prompt,
+            output_path,
+            timeout,
+            config,
+            cost_guard,
+        ),
+        _ => write_provider_error_result(
+            log_session,
+            run_id,
+            spec.name,
+            api_cli_for_agent(spec.key),
+            "unknown",
+            role,
+            output_path,
+            "unknown",
+            "API_PROVIDER_NOT_SUPPORTED",
+            0,
+        ),
+    }
+}
+
+fn api_input_estimate_chars(
+    prompt: &str,
+    attachments: &[AttachmentManifestEntry],
+    provider: &str,
+) -> usize {
+    let attachment_chars = attachments
+        .iter()
+        .filter(|entry| provider_supports_native_attachment(provider, entry))
+        .map(|entry| {
+            attachment_payload_base64_chars(entry)
+                + entry.file_name.chars().count()
+                + normalized_attachment_media_type(entry).chars().count()
+                + 96
+        })
+        .sum::<usize>();
+    prompt.chars().count().saturating_add(attachment_chars)
+}
+
+fn provider_supports_native_attachment(provider: &str, entry: &AttachmentManifestEntry) -> bool {
+    match provider {
+        "openai" => openai_api_attachment_supported(entry),
+        "anthropic" => anthropic_api_attachment_supported(entry),
+        "gemini" => gemini_api_attachment_supported(entry),
+        _ => false,
+    }
+}
+
+fn openai_api_attachment_supported(entry: &AttachmentManifestEntry) -> bool {
+    if !attachment_within_native_payload_cap(entry) {
+        return false;
+    }
+    is_image_attachment(entry) || openai_api_file_attachment_supported(entry)
+}
+
+fn openai_api_file_attachment_supported(entry: &AttachmentManifestEntry) -> bool {
+    is_known_document_attachment(entry)
+}
+
+fn anthropic_api_attachment_supported(entry: &AttachmentManifestEntry) -> bool {
+    if !attachment_within_native_payload_cap(entry) {
+        return false;
+    }
+    is_image_attachment(entry) || is_pdf_attachment(entry)
+}
+
+fn gemini_api_attachment_supported(entry: &AttachmentManifestEntry) -> bool {
+    if !attachment_within_native_payload_cap(entry) {
+        return false;
+    }
+    is_image_attachment(entry)
+        || is_audio_attachment(entry)
+        || is_video_attachment(entry)
+        || is_pdf_attachment(entry)
+        || is_text_like_attachment(entry)
+        || is_known_document_attachment(entry)
+}
+
+fn attachment_within_native_payload_cap(entry: &AttachmentManifestEntry) -> bool {
+    entry.size_bytes <= API_NATIVE_ATTACHMENT_MAX_FILE_BYTES
+}
+
+fn openai_api_input(
+    prompt: &str,
+    attachments: &[AttachmentManifestEntry],
+) -> Result<Value, String> {
+    let mut content = vec![json!({ "type": "input_text", "text": prompt })];
+    for entry in attachments {
+        if !attachment_within_native_payload_cap(entry) {
+            continue;
+        }
+        if is_image_attachment(entry) {
+            content.push(json!({
+                "type": "input_image",
+                "image_url": attachment_data_url(entry)?
+            }));
+        } else if openai_api_file_attachment_supported(entry) {
+            content.push(json!({
+                "type": "input_file",
+                "filename": entry.file_name.as_str(),
+                "file_data": attachment_data_url(entry)?
+            }));
+        }
+    }
+    Ok(json!([
+        {
+            "role": "user",
+            "content": content
+        }
+    ]))
+}
+
+fn anthropic_api_user_content(
+    prompt: &str,
+    attachments: &[AttachmentManifestEntry],
+) -> Result<Value, String> {
+    let mut content = vec![json!({ "type": "text", "text": prompt })];
+    for entry in attachments {
+        if !attachment_within_native_payload_cap(entry) {
+            continue;
+        }
+        if is_image_attachment(entry) {
+            content.push(json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": normalized_attachment_media_type(entry),
+                    "data": attachment_base64(entry)?
+                }
+            }));
+        } else if is_pdf_attachment(entry) {
+            content.push(json!({
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": attachment_base64(entry)?
+                },
+                "title": entry.file_name.as_str()
+            }));
+        }
+    }
+    Ok(Value::Array(content))
+}
+
+fn gemini_api_user_parts(
+    prompt: &str,
+    attachments: &[AttachmentManifestEntry],
+) -> Result<Vec<Value>, String> {
+    let mut parts = vec![json!({ "text": prompt })];
+    for entry in attachments {
+        if gemini_api_attachment_supported(entry) {
+            parts.push(json!({
+                "inline_data": {
+                    "mime_type": normalized_attachment_media_type(entry),
+                    "data": attachment_base64(entry)?
+                }
+            }));
+        }
+    }
+    Ok(parts)
+}
+
 fn run_deepseek_api_agent(
     log_session: &LogSession,
     run_id: &str,
     role: &str,
     prompt: String,
     output_path: &Path,
+    timeout: Option<Duration>,
     config: &AiProviderConfig,
+    cost_guard: Option<ProviderCostGuard>,
 ) -> EditorialAgentResult {
     let started = Instant::now();
     let model_hint = deepseek_model();
@@ -2780,6 +3951,10 @@ fn run_deepseek_api_agent(
             duration_ms: started.elapsed().as_millis(),
             exit_code: None,
             output_path: output_path.to_string_lossy().to_string(),
+            usage_input_tokens: None,
+            usage_output_tokens: None,
+            cost_usd: None,
+            cost_estimated: None,
         };
         log_editorial_agent_finished(
             log_session,
@@ -2793,13 +3968,61 @@ fn run_deepseek_api_agent(
         return result;
     };
 
-    let client = match Client::builder()
-        .user_agent(format!(
-            "Maestro Editorial AI/{}",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .build()
-    {
+    let max_tokens = api_role_max_tokens(role);
+    if let Some(guard) = cost_guard.as_ref() {
+        let estimated_cost = estimate_provider_cost(&prompt, max_tokens, guard.rates);
+        if let Some(max_session_cost_usd) = guard.max_session_cost_usd {
+            if guard.observed_cost_usd + estimated_cost > max_session_cost_usd {
+                let status = "COST_LIMIT_REACHED";
+                let note = format!(
+                "DeepSeek nao foi chamado: custo projetado ${:.6} somado ao observado ${:.6} excede o limite ${:.6}.",
+                estimated_cost, guard.observed_cost_usd, max_session_cost_usd
+            );
+                let _ = write_text_file(
+                output_path,
+                &format!(
+                    "# {name} - {role}\n\n- CLI: `{cli}`\n- Provider: `deepseek`\n- Status: `{status}`\n- Exit code: `unknown`\n- Duration ms: `{}`\n- Cost projected USD: `{:.6}`\n\n## Stdout\n\n```text\n\n```\n\n## Stderr\n\n```text\n{}\n```\n",
+                    started.elapsed().as_millis(),
+                    estimated_cost,
+                    note
+                ),
+            );
+                let result = EditorialAgentResult {
+                    name: name.to_string(),
+                    role: role.to_string(),
+                    cli: cli.to_string(),
+                    tone: "blocked".to_string(),
+                    status: status.to_string(),
+                    duration_ms: started.elapsed().as_millis(),
+                    exit_code: None,
+                    output_path: output_path.to_string_lossy().to_string(),
+                    usage_input_tokens: None,
+                    usage_output_tokens: None,
+                    cost_usd: None,
+                    cost_estimated: None,
+                };
+                log_editorial_agent_finished(
+                    log_session,
+                    run_id,
+                    &result,
+                    None,
+                    Some(note.len()),
+                    None,
+                    false,
+                );
+                return result;
+            }
+        }
+    }
+
+    let mut client_builder = Client::builder().user_agent(format!(
+        "Maestro Editorial AI/{}",
+        env!("CARGO_PKG_VERSION")
+    ));
+    if let Some(timeout) = timeout {
+        client_builder = client_builder.timeout(timeout);
+    }
+    let client = match client_builder.build() {
         Ok(client) => client,
         Err(error) => {
             let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
@@ -2831,12 +4054,14 @@ fn run_deepseek_api_agent(
                 "model": model,
                 "prompt_chars": prompt.chars().count(),
                 "output_path": output_path.to_string_lossy().to_string(),
-                "timeout_policy": "none_editorial_session"
+                "timeout_seconds": timeout.map(|value| value.as_secs()),
+                "timeout_policy": if timeout.is_some() { "session_deadline" } else { "none_editorial_session" },
+                "cost_limit_usd": cost_guard.as_ref().and_then(|guard| guard.max_session_cost_usd),
+                "observed_cost_usd": cost_guard.as_ref().map(|guard| guard.observed_cost_usd)
             })),
         },
     );
 
-    let max_tokens = if role == "review" { 4096 } else { 20000 };
     let response = client
         .post("https://api.deepseek.com/chat/completions")
         .bearer_auth(&api_key)
@@ -2879,6 +4104,12 @@ fn run_deepseek_api_agent(
             }
 
             let parsed: Value = serde_json::from_str(&body).unwrap_or_else(|_| json!({}));
+            let (usage_input_tokens, usage_output_tokens) = usage_tokens(&parsed);
+            let cost_usd = cost_guard.as_ref().and_then(|guard| {
+                usage_input_tokens
+                    .zip(usage_output_tokens)
+                    .map(|(input, output)| provider_cost(input, output, guard.rates))
+            });
             let stdout = parsed
                 .pointer("/choices/0/message/content")
                 .and_then(Value::as_str)
@@ -2905,13 +4136,22 @@ fn run_deepseek_api_agent(
                 "warn"
             };
             let artifact = format!(
-                "# {name} - {role}\n\n- CLI: `{cli}`\n- Provider: `deepseek`\n- Model: `{}`\n- Model reported: `{}`\n- Key source: `{}`\n- Status: `{status}`\n- Exit code: `0`\n- Duration ms: `{}`\n- Prompt chars: `{}`\n- Stdout chars: `{}`\n- Stderr chars: `0`\n\n## Stdout\n\n```text\n{}\n```\n\n## Stderr\n\n```text\n\n```\n",
+                "# {name} - {role}\n\n- CLI: `{cli}`\n- Provider: `deepseek`\n- Model: `{}`\n- Model reported: `{}`\n- Key source: `{}`\n- Status: `{status}`\n- Exit code: `0`\n- Duration ms: `{}`\n- Prompt chars: `{}`\n- Stdout chars: `{}`\n- Usage input tokens: `{}`\n- Usage output tokens: `{}`\n- Cost USD: `{}`\n- Stderr chars: `0`\n\n## Stdout\n\n```text\n{}\n```\n\n## Stderr\n\n```text\n\n```\n",
                 model,
                 sanitize_text(model_reported, 120),
                 sanitize_text(&key_source, 120),
                 started.elapsed().as_millis(),
                 prompt.chars().count(),
                 stdout.chars().count(),
+                usage_input_tokens
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                usage_output_tokens
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                cost_usd
+                    .map(|value| format!("{value:.8}"))
+                    .unwrap_or_else(|| "unknown".to_string()),
                 stdout
             );
             let _ = write_text_file(output_path, &artifact);
@@ -2924,6 +4164,10 @@ fn run_deepseek_api_agent(
                 duration_ms: started.elapsed().as_millis(),
                 exit_code: Some(0),
                 output_path: output_path.to_string_lossy().to_string(),
+                usage_input_tokens,
+                usage_output_tokens,
+                cost_usd,
+                cost_estimated: cost_usd.map(|_| true),
             };
             log_editorial_agent_finished(
                 log_session,
@@ -2941,6 +4185,586 @@ fn run_deepseek_api_agent(
             write_deepseek_error_result(
                 log_session,
                 run_id,
+                role,
+                output_path,
+                &model,
+                &status,
+                started.elapsed().as_millis(),
+            )
+        }
+    }
+}
+
+fn run_openai_api_agent(
+    log_session: &LogSession,
+    run_id: &str,
+    role: &str,
+    prompt: String,
+    attachments: &[AttachmentManifestEntry],
+    output_path: &Path,
+    timeout: Option<Duration>,
+    config: &AiProviderConfig,
+    cost_guard: Option<ProviderCostGuard>,
+) -> EditorialAgentResult {
+    let started = Instant::now();
+    let name = "Codex";
+    let cli = "openai-api";
+    let provider = "openai";
+    let model_hint = "gpt-5.4";
+    let Some((api_key, key_source)) = provider_key_for_agent(config, "codex") else {
+        return write_provider_missing_key_result(
+            log_session,
+            run_id,
+            name,
+            cli,
+            provider,
+            role,
+            output_path,
+            model_hint,
+            provider_remote_present(config, "codex"),
+        );
+    };
+
+    let max_tokens = api_role_max_tokens(role);
+    let input_estimate_chars = api_input_estimate_chars(&prompt, attachments, provider);
+    if let Some(result) = api_cost_preflight_result(
+        log_session,
+        run_id,
+        name,
+        cli,
+        provider,
+        role,
+        input_estimate_chars,
+        output_path,
+        max_tokens,
+        cost_guard.as_ref(),
+        started.elapsed().as_millis(),
+    ) {
+        return result;
+    }
+
+    let client = match build_api_client(timeout) {
+        Ok(client) => client,
+        Err(error) => {
+            let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
+            return write_provider_error_result(
+                log_session,
+                run_id,
+                name,
+                cli,
+                provider,
+                role,
+                output_path,
+                model_hint,
+                &status,
+                started.elapsed().as_millis(),
+            );
+        }
+    };
+    let model = resolve_openai_model(&client, &api_key);
+    let input = match openai_api_input(&prompt, attachments) {
+        Ok(input) => input,
+        Err(error) => {
+            let status = sanitize_text(&format!("ATTACHMENT_ERROR: {error}"), 240);
+            return write_provider_error_result(
+                log_session,
+                run_id,
+                name,
+                cli,
+                provider,
+                role,
+                output_path,
+                &model,
+                &status,
+                started.elapsed().as_millis(),
+            );
+        }
+    };
+    log_provider_api_started(
+        log_session,
+        run_id,
+        name,
+        cli,
+        provider,
+        role,
+        &model,
+        prompt.chars().count(),
+        output_path,
+        timeout,
+        cost_guard.as_ref(),
+    );
+
+    let response = client
+        .post("https://api.openai.com/v1/responses")
+        .bearer_auth(&api_key)
+        .json(&json!({
+            "model": model,
+            "instructions": editorial_api_system_prompt(name),
+            "input": input,
+            "max_output_tokens": max_tokens,
+            "store": false
+        }))
+        .send();
+    match response {
+        Ok(response) => {
+            let endpoint = "https://api.openai.com/v1/responses";
+            let http_status = response.status();
+            let body = response.text().unwrap_or_default();
+            if !http_status.is_success() {
+                let status = sanitize_text(
+                    &format!(
+                        "PROVIDER_ERROR_HTTP_{}: {}",
+                        http_status.as_u16(),
+                        api_error_message(&body)
+                    ),
+                    240,
+                );
+                return write_provider_error_result(
+                    log_session,
+                    run_id,
+                    name,
+                    cli,
+                    provider,
+                    role,
+                    output_path,
+                    &model,
+                    &status,
+                    started.elapsed().as_millis(),
+                );
+            }
+
+            let parsed: Value = serde_json::from_str(&body).unwrap_or_else(|_| json!({}));
+            let stdout = openai_response_text(&parsed)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| body.trim().to_string());
+            let (usage_input_tokens, usage_output_tokens) = usage_tokens(&parsed);
+            let cost_usd = cost_guard.as_ref().and_then(|guard| {
+                usage_input_tokens
+                    .zip(usage_output_tokens)
+                    .map(|(input, output)| provider_cost(input, output, guard.rates))
+            });
+            let model_reported = parsed
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or(&model);
+            write_provider_success_result(
+                log_session,
+                run_id,
+                name,
+                cli,
+                provider,
+                role,
+                output_path,
+                &model,
+                model_reported,
+                &key_source,
+                &stdout,
+                usage_input_tokens,
+                usage_output_tokens,
+                cost_usd,
+                started.elapsed().as_millis(),
+                prompt.chars().count(),
+                endpoint,
+            )
+        }
+        Err(error) => {
+            let status = sanitize_text(&format!("PROVIDER_NETWORK_ERROR: {error}"), 240);
+            write_provider_error_result(
+                log_session,
+                run_id,
+                name,
+                cli,
+                provider,
+                role,
+                output_path,
+                &model,
+                &status,
+                started.elapsed().as_millis(),
+            )
+        }
+    }
+}
+
+fn run_anthropic_api_agent(
+    log_session: &LogSession,
+    run_id: &str,
+    role: &str,
+    prompt: String,
+    attachments: &[AttachmentManifestEntry],
+    output_path: &Path,
+    timeout: Option<Duration>,
+    config: &AiProviderConfig,
+    cost_guard: Option<ProviderCostGuard>,
+) -> EditorialAgentResult {
+    let started = Instant::now();
+    let name = "Claude";
+    let cli = "anthropic-api";
+    let provider = "anthropic";
+    let model_hint = "claude-opus-4-1-20250805";
+    let Some((api_key, key_source)) = provider_key_for_agent(config, "claude") else {
+        return write_provider_missing_key_result(
+            log_session,
+            run_id,
+            name,
+            cli,
+            provider,
+            role,
+            output_path,
+            model_hint,
+            provider_remote_present(config, "claude"),
+        );
+    };
+
+    let max_tokens = api_role_max_tokens(role);
+    let input_estimate_chars = api_input_estimate_chars(&prompt, attachments, provider);
+    if let Some(result) = api_cost_preflight_result(
+        log_session,
+        run_id,
+        name,
+        cli,
+        provider,
+        role,
+        input_estimate_chars,
+        output_path,
+        max_tokens,
+        cost_guard.as_ref(),
+        started.elapsed().as_millis(),
+    ) {
+        return result;
+    }
+
+    let client = match build_api_client(timeout) {
+        Ok(client) => client,
+        Err(error) => {
+            let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
+            return write_provider_error_result(
+                log_session,
+                run_id,
+                name,
+                cli,
+                provider,
+                role,
+                output_path,
+                model_hint,
+                &status,
+                started.elapsed().as_millis(),
+            );
+        }
+    };
+    let model = resolve_anthropic_model(&client, &api_key);
+    let content = match anthropic_api_user_content(&prompt, attachments) {
+        Ok(content) => content,
+        Err(error) => {
+            let status = sanitize_text(&format!("ATTACHMENT_ERROR: {error}"), 240);
+            return write_provider_error_result(
+                log_session,
+                run_id,
+                name,
+                cli,
+                provider,
+                role,
+                output_path,
+                &model,
+                &status,
+                started.elapsed().as_millis(),
+            );
+        }
+    };
+    log_provider_api_started(
+        log_session,
+        run_id,
+        name,
+        cli,
+        provider,
+        role,
+        &model,
+        prompt.chars().count(),
+        output_path,
+        timeout,
+        cost_guard.as_ref(),
+    );
+
+    let response = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", &api_key)
+        .header("anthropic-version", "2023-06-01")
+        .json(&json!({
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": editorial_api_system_prompt(name),
+            "messages": [
+                { "role": "user", "content": content }
+            ]
+        }))
+        .send();
+    match response {
+        Ok(response) => {
+            let endpoint = "https://api.anthropic.com/v1/messages";
+            let http_status = response.status();
+            let body = response.text().unwrap_or_default();
+            if !http_status.is_success() {
+                let status = sanitize_text(
+                    &format!(
+                        "PROVIDER_ERROR_HTTP_{}: {}",
+                        http_status.as_u16(),
+                        api_error_message(&body)
+                    ),
+                    240,
+                );
+                return write_provider_error_result(
+                    log_session,
+                    run_id,
+                    name,
+                    cli,
+                    provider,
+                    role,
+                    output_path,
+                    &model,
+                    &status,
+                    started.elapsed().as_millis(),
+                );
+            }
+
+            let parsed: Value = serde_json::from_str(&body).unwrap_or_else(|_| json!({}));
+            let stdout = anthropic_response_text(&parsed)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| body.trim().to_string());
+            let (usage_input_tokens, usage_output_tokens) = usage_tokens(&parsed);
+            let cost_usd = cost_guard.as_ref().and_then(|guard| {
+                usage_input_tokens
+                    .zip(usage_output_tokens)
+                    .map(|(input, output)| provider_cost(input, output, guard.rates))
+            });
+            let model_reported = parsed
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or(&model);
+            write_provider_success_result(
+                log_session,
+                run_id,
+                name,
+                cli,
+                provider,
+                role,
+                output_path,
+                &model,
+                model_reported,
+                &key_source,
+                &stdout,
+                usage_input_tokens,
+                usage_output_tokens,
+                cost_usd,
+                started.elapsed().as_millis(),
+                prompt.chars().count(),
+                endpoint,
+            )
+        }
+        Err(error) => {
+            let status = sanitize_text(&format!("PROVIDER_NETWORK_ERROR: {error}"), 240);
+            write_provider_error_result(
+                log_session,
+                run_id,
+                name,
+                cli,
+                provider,
+                role,
+                output_path,
+                &model,
+                &status,
+                started.elapsed().as_millis(),
+            )
+        }
+    }
+}
+
+fn run_gemini_api_agent(
+    log_session: &LogSession,
+    run_id: &str,
+    role: &str,
+    prompt: String,
+    attachments: &[AttachmentManifestEntry],
+    output_path: &Path,
+    timeout: Option<Duration>,
+    config: &AiProviderConfig,
+    cost_guard: Option<ProviderCostGuard>,
+) -> EditorialAgentResult {
+    let started = Instant::now();
+    let name = "Gemini";
+    let cli = "gemini-api";
+    let provider = "gemini";
+    let model_hint = "gemini-2.5-pro";
+    let Some((api_key, key_source)) = provider_key_for_agent(config, "gemini") else {
+        return write_provider_missing_key_result(
+            log_session,
+            run_id,
+            name,
+            cli,
+            provider,
+            role,
+            output_path,
+            model_hint,
+            provider_remote_present(config, "gemini"),
+        );
+    };
+
+    let max_tokens = api_role_max_tokens(role);
+    let input_estimate_chars = api_input_estimate_chars(&prompt, attachments, provider);
+    if let Some(result) = api_cost_preflight_result(
+        log_session,
+        run_id,
+        name,
+        cli,
+        provider,
+        role,
+        input_estimate_chars,
+        output_path,
+        max_tokens,
+        cost_guard.as_ref(),
+        started.elapsed().as_millis(),
+    ) {
+        return result;
+    }
+
+    let client = match build_api_client(timeout) {
+        Ok(client) => client,
+        Err(error) => {
+            let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
+            return write_provider_error_result(
+                log_session,
+                run_id,
+                name,
+                cli,
+                provider,
+                role,
+                output_path,
+                model_hint,
+                &status,
+                started.elapsed().as_millis(),
+            );
+        }
+    };
+    let model = resolve_gemini_model(&client, &api_key);
+    let parts = match gemini_api_user_parts(&prompt, attachments) {
+        Ok(parts) => parts,
+        Err(error) => {
+            let status = sanitize_text(&format!("ATTACHMENT_ERROR: {error}"), 240);
+            return write_provider_error_result(
+                log_session,
+                run_id,
+                name,
+                cli,
+                provider,
+                role,
+                output_path,
+                &model,
+                &status,
+                started.elapsed().as_millis(),
+            );
+        }
+    };
+    log_provider_api_started(
+        log_session,
+        run_id,
+        name,
+        cli,
+        provider,
+        role,
+        &model,
+        prompt.chars().count(),
+        output_path,
+        timeout,
+        cost_guard.as_ref(),
+    );
+
+    let endpoint =
+        format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent");
+    let response = client
+        .post(&endpoint)
+        .query(&[("key", &api_key)])
+        .json(&json!({
+            "systemInstruction": {
+                "parts": [{ "text": editorial_api_system_prompt(name) }]
+            },
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": parts
+                }
+            ],
+            "generationConfig": {
+                "maxOutputTokens": max_tokens
+            }
+        }))
+        .send();
+    match response {
+        Ok(response) => {
+            let http_status = response.status();
+            let body = response.text().unwrap_or_default();
+            if !http_status.is_success() {
+                let status = sanitize_text(
+                    &format!(
+                        "PROVIDER_ERROR_HTTP_{}: {}",
+                        http_status.as_u16(),
+                        api_error_message(&body)
+                    ),
+                    240,
+                );
+                return write_provider_error_result(
+                    log_session,
+                    run_id,
+                    name,
+                    cli,
+                    provider,
+                    role,
+                    output_path,
+                    &model,
+                    &status,
+                    started.elapsed().as_millis(),
+                );
+            }
+
+            let parsed: Value = serde_json::from_str(&body).unwrap_or_else(|_| json!({}));
+            let stdout = gemini_response_text(&parsed)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| body.trim().to_string());
+            let (usage_input_tokens, usage_output_tokens) = gemini_usage_tokens(&parsed);
+            let cost_usd = cost_guard.as_ref().and_then(|guard| {
+                usage_input_tokens
+                    .zip(usage_output_tokens)
+                    .map(|(input, output)| provider_cost(input, output, guard.rates))
+            });
+            let model_reported = parsed
+                .pointer("/modelVersion")
+                .and_then(Value::as_str)
+                .unwrap_or(&model);
+            write_provider_success_result(
+                log_session,
+                run_id,
+                name,
+                cli,
+                provider,
+                role,
+                output_path,
+                &model,
+                model_reported,
+                &key_source,
+                &stdout,
+                usage_input_tokens,
+                usage_output_tokens,
+                cost_usd,
+                started.elapsed().as_millis(),
+                prompt.chars().count(),
+                &endpoint,
+            )
+        }
+        Err(error) => {
+            let status = sanitize_text(&format!("PROVIDER_NETWORK_ERROR: {error}"), 240);
+            write_provider_error_result(
+                log_session,
+                run_id,
+                name,
+                cli,
+                provider,
                 role,
                 output_path,
                 &model,
@@ -2981,6 +4805,10 @@ fn write_deepseek_error_result(
         duration_ms,
         exit_code: None,
         output_path: output_path.to_string_lossy().to_string(),
+        usage_input_tokens: None,
+        usage_output_tokens: None,
+        cost_usd: None,
+        cost_estimated: None,
     };
     log_editorial_agent_finished(
         log_session,
@@ -2992,6 +4820,322 @@ fn write_deepseek_error_result(
         false,
     );
     result
+}
+
+fn build_api_client(timeout: Option<Duration>) -> Result<Client, reqwest::Error> {
+    let mut client_builder = Client::builder().user_agent(format!(
+        "Maestro Editorial AI/{}",
+        env!("CARGO_PKG_VERSION")
+    ));
+    if let Some(timeout) = timeout {
+        client_builder = client_builder.timeout(timeout);
+    }
+    client_builder.build()
+}
+
+fn editorial_api_system_prompt(agent_name: &str) -> String {
+    format!(
+        "Voce e o peer {agent_name} dentro do Maestro Editorial AI. Leia integralmente o pedido do usuario, o protocolo editorial e os artefatos fornecidos. Responda somente ao que foi solicitado. Em revisoes, a primeira linha precisa seguir exatamente o contrato MAESTRO_STATUS."
+    )
+}
+
+fn api_cost_preflight_result(
+    log_session: &LogSession,
+    run_id: &str,
+    name: &str,
+    cli: &str,
+    provider: &str,
+    role: &str,
+    input_estimate_chars: usize,
+    output_path: &Path,
+    max_tokens: u64,
+    cost_guard: Option<&ProviderCostGuard>,
+    duration_ms: u128,
+) -> Option<EditorialAgentResult> {
+    let guard = cost_guard?;
+    let max_session_cost_usd = guard.max_session_cost_usd?;
+    let estimated_cost =
+        estimate_provider_cost_from_input_chars(input_estimate_chars, max_tokens, guard.rates);
+    if guard.observed_cost_usd + estimated_cost <= max_session_cost_usd {
+        return None;
+    }
+    let note = format!(
+        "{} nao foi chamado: custo projetado ${:.6} somado ao observado ${:.6} excede o limite ${:.6}.",
+        provider_label_for_agent(match provider {
+            "anthropic" => "claude",
+            "openai" => "codex",
+            "gemini" => "gemini",
+            "deepseek" => "deepseek",
+            _ => provider,
+        }),
+        estimated_cost,
+        guard.observed_cost_usd,
+        max_session_cost_usd
+    );
+    Some(write_provider_failure_result(
+        log_session,
+        run_id,
+        name,
+        cli,
+        provider,
+        role,
+        output_path,
+        "unknown",
+        "COST_LIMIT_REACHED",
+        "blocked",
+        &note,
+        duration_ms,
+        Some(estimated_cost),
+    ))
+}
+
+fn write_provider_missing_key_result(
+    log_session: &LogSession,
+    run_id: &str,
+    name: &str,
+    cli: &str,
+    provider: &str,
+    role: &str,
+    output_path: &Path,
+    model: &str,
+    remote_present: bool,
+) -> EditorialAgentResult {
+    let status = if remote_present {
+        "REMOTE_SECRET_NOT_READABLE"
+    } else {
+        "API_KEY_NOT_AVAILABLE"
+    };
+    let note = if remote_present {
+        format!(
+            "A referencia do segredo de {name} existe no Cloudflare Secrets Store, mas a Cloudflare nao devolve o valor bruto ao app local. Informe a chave na tela Ajustes > Agentes via API ou use a variavel de API correspondente."
+        )
+    } else {
+        format!(
+            "{name} precisa de chave informada na tela Ajustes > Agentes via API para executar no modo API."
+        )
+    };
+    write_provider_failure_result(
+        log_session,
+        run_id,
+        name,
+        cli,
+        provider,
+        role,
+        output_path,
+        model,
+        status,
+        "blocked",
+        &note,
+        0,
+        None,
+    )
+}
+
+fn write_provider_error_result(
+    log_session: &LogSession,
+    run_id: &str,
+    name: &str,
+    cli: &str,
+    provider: &str,
+    role: &str,
+    output_path: &Path,
+    model: &str,
+    status: &str,
+    duration_ms: u128,
+) -> EditorialAgentResult {
+    write_provider_failure_result(
+        log_session,
+        run_id,
+        name,
+        cli,
+        provider,
+        role,
+        output_path,
+        model,
+        status,
+        "error",
+        status,
+        duration_ms,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_provider_failure_result(
+    log_session: &LogSession,
+    run_id: &str,
+    name: &str,
+    cli: &str,
+    provider: &str,
+    role: &str,
+    output_path: &Path,
+    model: &str,
+    status: &str,
+    tone: &str,
+    note: &str,
+    duration_ms: u128,
+    projected_cost_usd: Option<f64>,
+) -> EditorialAgentResult {
+    let safe_status = sanitize_text(status, 240);
+    let safe_note = sanitize_text(note, 2000);
+    let projected_line = projected_cost_usd
+        .map(|value| format!("- Cost projected USD: `{value:.6}`\n"))
+        .unwrap_or_default();
+    let _ = write_text_file(
+        output_path,
+        &format!(
+            "# {name} - {role}\n\n- CLI: `{cli}`\n- Provider: `{provider}`\n- Model: `{}`\n- Status: `{}`\n- Exit code: `unknown`\n- Duration ms: `{duration_ms}`\n{}{}\n## Stdout\n\n```text\n\n```\n\n## Stderr\n\n```text\n{}\n```\n",
+            sanitize_text(model, 120),
+            safe_status,
+            projected_line,
+            if safe_note.is_empty() {
+                String::new()
+            } else {
+                format!("\n{safe_note}\n")
+            },
+            safe_note
+        ),
+    );
+    let result = EditorialAgentResult {
+        name: name.to_string(),
+        role: role.to_string(),
+        cli: cli.to_string(),
+        tone: tone.to_string(),
+        status: safe_status,
+        duration_ms,
+        exit_code: None,
+        output_path: output_path.to_string_lossy().to_string(),
+        usage_input_tokens: None,
+        usage_output_tokens: None,
+        cost_usd: None,
+        cost_estimated: None,
+    };
+    log_editorial_agent_finished(
+        log_session,
+        run_id,
+        &result,
+        None,
+        Some(safe_note.len()),
+        None,
+        false,
+    );
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_provider_success_result(
+    log_session: &LogSession,
+    run_id: &str,
+    name: &str,
+    cli: &str,
+    provider: &str,
+    role: &str,
+    output_path: &Path,
+    model: &str,
+    model_reported: &str,
+    key_source: &str,
+    stdout: &str,
+    usage_input_tokens: Option<u64>,
+    usage_output_tokens: Option<u64>,
+    cost_usd: Option<f64>,
+    duration_ms: u128,
+    prompt_chars: usize,
+    endpoint: &str,
+) -> EditorialAgentResult {
+    let status = if role == "review" {
+        extract_maestro_status(stdout).unwrap_or("NOT_READY")
+    } else if stdout.trim().is_empty() {
+        "EMPTY_DRAFT"
+    } else {
+        "DRAFT_CREATED"
+    };
+    let tone = if status == "READY" || status == "DRAFT_CREATED" {
+        "ok"
+    } else if status == "EMPTY_DRAFT" {
+        "error"
+    } else {
+        "warn"
+    };
+    let artifact = format!(
+        "# {name} - {role}\n\n- CLI: `{cli}`\n- Provider: `{provider}`\n- Model: `{}`\n- Model reported: `{}`\n- Key source: `{}`\n- Status: `{status}`\n- Exit code: `0`\n- Duration ms: `{duration_ms}`\n- Prompt chars: `{prompt_chars}`\n- Stdout chars: `{}`\n- Usage input tokens: `{}`\n- Usage output tokens: `{}`\n- Cost USD: `{}`\n- Stderr chars: `0`\n\n## Stdout\n\n```text\n{}\n```\n\n## Stderr\n\n```text\n\n```\n",
+        sanitize_text(model, 120),
+        sanitize_text(model_reported, 120),
+        sanitize_text(key_source, 120),
+        stdout.chars().count(),
+        usage_input_tokens
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        usage_output_tokens
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        cost_usd
+            .map(|value| format!("{value:.8}"))
+            .unwrap_or_else(|| "unknown".to_string()),
+        stdout
+    );
+    let _ = write_text_file(output_path, &artifact);
+    let result = EditorialAgentResult {
+        name: name.to_string(),
+        role: role.to_string(),
+        cli: cli.to_string(),
+        tone: tone.to_string(),
+        status: status.to_string(),
+        duration_ms,
+        exit_code: Some(0),
+        output_path: output_path.to_string_lossy().to_string(),
+        usage_input_tokens,
+        usage_output_tokens,
+        cost_usd,
+        cost_estimated: cost_usd.map(|_| true),
+    };
+    log_editorial_agent_finished(
+        log_session,
+        run_id,
+        &result,
+        Some(stdout.chars().count()),
+        Some(0),
+        Some(endpoint.to_string()),
+        false,
+    );
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn log_provider_api_started(
+    log_session: &LogSession,
+    run_id: &str,
+    name: &str,
+    cli: &str,
+    provider: &str,
+    role: &str,
+    model: &str,
+    prompt_chars: usize,
+    output_path: &Path,
+    timeout: Option<Duration>,
+    cost_guard: Option<&ProviderCostGuard>,
+) {
+    let _ = write_log_record(
+        log_session,
+        LogEventInput {
+            level: "info".to_string(),
+            category: "session.agent.started".to_string(),
+            message: "editorial API peer request starting".to_string(),
+            context: Some(json!({
+                "run_id": sanitize_short(run_id, 120),
+                "agent": name,
+                "role": role,
+                "cli": cli,
+                "provider": provider,
+                "model": model,
+                "prompt_chars": prompt_chars,
+                "output_path": output_path.to_string_lossy().to_string(),
+                "timeout_seconds": timeout.map(|value| value.as_secs()),
+                "timeout_policy": if timeout.is_some() { "session_deadline" } else { "none_editorial_session" },
+                "cost_limit_usd": cost_guard.and_then(|guard| guard.max_session_cost_usd),
+                "observed_cost_usd": cost_guard.map(|guard| guard.observed_cost_usd)
+            })),
+        },
+    );
 }
 
 fn deepseek_model() -> String {
@@ -3058,6 +5202,227 @@ fn deepseek_model_ids(value: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn resolve_openai_model(client: &Client, api_key: &str) -> String {
+    let response = client
+        .get("https://api.openai.com/v1/models")
+        .bearer_auth(api_key)
+        .send();
+    if let Ok(response) = response {
+        if response.status().is_success() {
+            let body = response.text().unwrap_or_default();
+            if let Ok(value) = serde_json::from_str::<Value>(&body) {
+                return choose_preferred_model(
+                    &api_model_ids(&value),
+                    &[
+                        "gpt-5.5", "gpt-5.4", "gpt-5.3", "gpt-5.2", "gpt-5", "gpt-4.1",
+                    ],
+                    "gpt-5.4",
+                );
+            }
+        }
+    }
+    "gpt-5.4".to_string()
+}
+
+fn resolve_anthropic_model(client: &Client, api_key: &str) -> String {
+    let response = client
+        .get("https://api.anthropic.com/v1/models")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .send();
+    if let Ok(response) = response {
+        if response.status().is_success() {
+            let body = response.text().unwrap_or_default();
+            if let Ok(value) = serde_json::from_str::<Value>(&body) {
+                return choose_preferred_model(
+                    &api_model_ids(&value),
+                    &[
+                        "claude-opus-4-7",
+                        "claude-opus-4-1-20250805",
+                        "claude-opus-4-20250514",
+                        "claude-sonnet-4-20250514",
+                        "claude-3-7-sonnet-latest",
+                    ],
+                    "claude-opus-4-1-20250805",
+                );
+            }
+        }
+    }
+    "claude-opus-4-1-20250805".to_string()
+}
+
+fn resolve_gemini_model(client: &Client, api_key: &str) -> String {
+    let response = client
+        .get("https://generativelanguage.googleapis.com/v1beta/models")
+        .query(&[("key", api_key)])
+        .send();
+    if let Ok(response) = response {
+        if response.status().is_success() {
+            let body = response.text().unwrap_or_default();
+            if let Ok(value) = serde_json::from_str::<Value>(&body) {
+                return choose_preferred_model(
+                    &gemini_model_ids(&value),
+                    &[
+                        "gemini-3.1-pro-preview",
+                        "gemini-3-pro-preview",
+                        "gemini-2.5-pro",
+                        "gemini-2.5-flash",
+                        "gemini-1.5-pro",
+                    ],
+                    "gemini-2.5-pro",
+                );
+            }
+        }
+    }
+    "gemini-2.5-pro".to_string()
+}
+
+fn choose_preferred_model(models: &[String], candidates: &[&str], fallback: &str) -> String {
+    for candidate in candidates {
+        if models.iter().any(|model| model == candidate) {
+            return (*candidate).to_string();
+        }
+    }
+    models
+        .first()
+        .cloned()
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn api_model_ids(value: &Value) -> Vec<String> {
+    value
+        .get("data")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    item.get("id")
+                        .and_then(Value::as_str)
+                        .map(|id| sanitize_short(id, 120))
+                })
+                .filter(|id| !id.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn gemini_model_ids(value: &Value) -> Vec<String> {
+    value
+        .get("models")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let methods = item
+                        .get("supportedGenerationMethods")
+                        .and_then(Value::as_array);
+                    if let Some(methods) = methods {
+                        let supports_generate_content = methods.iter().any(|method| {
+                            method
+                                .as_str()
+                                .map(|value| value == "generateContent")
+                                .unwrap_or(false)
+                        });
+                        if !supports_generate_content {
+                            return None;
+                        }
+                    }
+                    item.get("name").and_then(Value::as_str).map(|name| {
+                        sanitize_short(name.strip_prefix("models/").unwrap_or(name), 120)
+                    })
+                })
+                .filter(|id| !id.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn openai_response_text(value: &Value) -> Option<String> {
+    let items = value.get("output")?.as_array()?;
+    let mut text = String::new();
+    for item in items {
+        if let Some(content) = item.get("content").and_then(Value::as_array) {
+            for part in content {
+                if part
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .map(|kind| kind == "output_text" || kind == "text")
+                    .unwrap_or(false)
+                {
+                    if let Some(piece) = part.get("text").and_then(Value::as_str) {
+                        text.push_str(piece);
+                    }
+                }
+            }
+        }
+    }
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn anthropic_response_text(value: &Value) -> Option<String> {
+    let parts = value.get("content")?.as_array()?;
+    let mut text = String::new();
+    for part in parts {
+        if part
+            .get("type")
+            .and_then(Value::as_str)
+            .map(|kind| kind == "text")
+            .unwrap_or(false)
+        {
+            if let Some(piece) = part.get("text").and_then(Value::as_str) {
+                text.push_str(piece);
+            }
+        }
+    }
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn gemini_response_text(value: &Value) -> Option<String> {
+    let candidates = value.get("candidates")?.as_array()?;
+    let mut text = String::new();
+    for candidate in candidates {
+        if let Some(parts) = candidate
+            .pointer("/content/parts")
+            .and_then(Value::as_array)
+        {
+            for part in parts {
+                if let Some(piece) = part.get("text").and_then(Value::as_str) {
+                    text.push_str(piece);
+                }
+            }
+        }
+    }
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn gemini_usage_tokens(value: &Value) -> (Option<u64>, Option<u64>) {
+    let input = value
+        .pointer("/usageMetadata/promptTokenCount")
+        .and_then(Value::as_u64);
+    let output = value
+        .pointer("/usageMetadata/candidatesTokenCount")
+        .or_else(|| value.pointer("/usageMetadata/outputTokenCount"))
+        .and_then(Value::as_u64);
+    (input, output)
+}
+
 fn run_editorial_agent(
     log_session: &LogSession,
     run_id: &str,
@@ -3115,6 +5480,10 @@ fn run_editorial_agent(
             duration_ms: started.elapsed().as_millis(),
             exit_code: None,
             output_path: output_path.to_string_lossy().to_string(),
+            usage_input_tokens: None,
+            usage_output_tokens: None,
+            cost_usd: None,
+            cost_estimated: None,
         };
         log_editorial_agent_finished(log_session, run_id, &result, None, None, None, false);
         return result;
@@ -3212,6 +5581,10 @@ fn run_editorial_agent(
                 duration_ms: result.duration_ms,
                 exit_code,
                 output_path: output_path.to_string_lossy().to_string(),
+                usage_input_tokens: None,
+                usage_output_tokens: None,
+                cost_usd: None,
+                cost_estimated: None,
             };
             log_editorial_agent_finished(
                 log_session,
@@ -3248,6 +5621,10 @@ fn run_editorial_agent(
                 duration_ms: started.elapsed().as_millis(),
                 exit_code: None,
                 output_path: output_path.to_string_lossy().to_string(),
+                usage_input_tokens: None,
+                usage_output_tokens: None,
+                cost_usd: None,
+                cost_estimated: None,
             };
             log_editorial_agent_finished(
                 log_session,
@@ -3428,6 +5805,10 @@ fn log_editorial_agent_finished(
                 "resolved_path": resolved_path,
                 "stdout_chars": stdout_chars,
                 "stderr_chars": stderr_chars,
+                "usage_input_tokens": result.usage_input_tokens,
+                "usage_output_tokens": result.usage_output_tokens,
+                "cost_usd": result.cost_usd,
+                "cost_estimated": result.cost_estimated,
                 "output_path": result.output_path
             })),
         },
@@ -3525,7 +5906,7 @@ fn build_session_minutes(
     final_path: Option<&PathBuf>,
 ) -> String {
     let mut text = format!(
-        "# Ata da Sessao Maestro\n\n- Run: `{run_id}`\n- Sessao: {}\n- Protocolo: `{}`\n- Hash do protocolo: `{}`\n- Consenso unanime: `{}`\n- Texto final: `{}`\n\n## Solicitacao\n\n{}\n\n## Rodada 001\n\n",
+        "# Ata da Sessao Maestro\n\n- Run: `{run_id}`\n- Sessao: {}\n- Protocolo: `{}`\n- Hash do protocolo: `{}`\n- Consenso unanime: `{}`\n- Texto final: `{}`\n- Peers ativos: `{}`\n- Limite de custo: `{}`\n- Limite de tempo: `{}`\n\n## Solicitacao\n\n{}\n\n## Rodada 001\n\n",
         sanitize_text(&request.session_name, 200),
         sanitize_text(&request.protocol_name, 200),
         sanitize_short(&request.protocol_hash, 80),
@@ -3533,6 +5914,19 @@ fn build_session_minutes(
         final_path
             .map(|path| path.to_string_lossy().to_string())
             .unwrap_or_else(|| "bloqueado".to_string()),
+        request
+            .active_agents
+            .clone()
+            .unwrap_or_else(all_agent_keys)
+            .join(", "),
+        request
+            .max_session_cost_usd
+            .map(|value| format!("US$ {value:.4}"))
+            .unwrap_or_else(|| "ignorado".to_string()),
+        request
+            .max_session_minutes
+            .map(|value| format!("{value} min"))
+            .unwrap_or_else(|| "ignorado".to_string()),
         request.prompt
     );
 
@@ -4005,7 +6399,7 @@ fn extract_public_urls(text: &str) -> Vec<String> {
     urls.into_iter().collect()
 }
 
-fn is_public_http_url(value: &str) -> bool {
+pub(crate) fn is_public_http_url(value: &str) -> bool {
     let Ok(url) = Url::parse(value) else {
         return false;
     };
@@ -4968,6 +7362,14 @@ fn write_ai_provider_metadata_to_cloudflare(
         "schema_version": 1,
         "provider_mode": config.provider_mode,
         "credential_storage_mode": "cloudflare",
+        "openai_input_usd_per_million": config.openai_input_usd_per_million,
+        "openai_output_usd_per_million": config.openai_output_usd_per_million,
+        "anthropic_input_usd_per_million": config.anthropic_input_usd_per_million,
+        "anthropic_output_usd_per_million": config.anthropic_output_usd_per_million,
+        "gemini_input_usd_per_million": config.gemini_input_usd_per_million,
+        "gemini_output_usd_per_million": config.gemini_output_usd_per_million,
+        "deepseek_input_usd_per_million": config.deepseek_input_usd_per_million,
+        "deepseek_output_usd_per_million": config.deepseek_output_usd_per_million,
         "requested_store_name": requested_store_name,
         "effective_store_name": store.name,
         "effective_store_id": store.id,
@@ -5406,7 +7808,7 @@ fn sanitize_short(value: &str, max_len: usize) -> String {
         .collect::<String>()
 }
 
-fn sanitize_text(value: &str, max_len: usize) -> String {
+pub(crate) fn sanitize_text(value: &str, max_len: usize) -> String {
     let redacted = redact_secrets(value);
     redacted.chars().take(max_len).collect()
 }
@@ -5510,6 +7912,26 @@ fn secret_value_regex() -> &'static Regex {
 mod tests {
     use super::*;
 
+    fn test_manifest_attachment(
+        session_dir: &Path,
+        file_name: &str,
+        media_type: &str,
+        data: &[u8],
+    ) -> AttachmentManifestEntry {
+        let path = session_dir.join(file_name);
+        fs::write(&path, data).unwrap();
+        AttachmentManifestEntry {
+            original_name: file_name.to_string(),
+            file_name: file_name.to_string(),
+            media_type: media_type.to_string(),
+            size_bytes: data.len() as u64,
+            sha256: "test".to_string(),
+            path: path.to_string_lossy().to_string(),
+            inline_preview_chars: 0,
+            inline_preview_truncated: false,
+        }
+    }
+
     #[test]
     fn routes_account_owned_tokens_to_account_verify_endpoint() {
         assert_eq!(
@@ -5553,6 +7975,129 @@ mod tests {
         let (fallback, invalid) = resolve_initial_agent_key(Some("unknown-peer"));
         assert_eq!(fallback, "claude");
         assert_eq!(invalid.as_deref(), Some("unknown-peer"));
+    }
+
+    #[test]
+    fn normalizes_active_agents_and_rejects_unknown_peer() {
+        let selected = normalize_active_agents(Some(&vec![
+            "Codex".to_string(),
+            "openai".to_string(),
+            "DeepSeek".to_string(),
+        ]))
+        .unwrap();
+        assert_eq!(selected, vec!["codex".to_string(), "deepseek".to_string()]);
+        assert!(normalize_active_agents(Some(&vec!["unknown".to_string()])).is_err());
+    }
+
+    #[test]
+    fn provider_cost_uses_configured_rates() {
+        let rates = ProviderCostRates {
+            input_usd_per_million: 1.0,
+            output_usd_per_million: 2.0,
+        };
+        let cost = provider_cost(1_000, 2_000, rates);
+        assert!((cost - 0.005).abs() < 1e-12);
+    }
+
+    #[test]
+    fn api_payloads_embed_provider_supported_attachments() {
+        let session_dir = sessions_dir().join("run-api-attachment-payload-test");
+        let _ = fs::remove_dir_all(&session_dir);
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let image = test_manifest_attachment(&session_dir, "image.png", "image/png", b"png");
+        let pdf = test_manifest_attachment(&session_dir, "brief.pdf", "application/pdf", b"%PDF");
+        let unknown = test_manifest_attachment(
+            &session_dir,
+            "archive.bin",
+            "application/octet-stream",
+            b"bin",
+        );
+        let mut oversized_pdf =
+            test_manifest_attachment(&session_dir, "huge.pdf", "application/pdf", b"%PDF");
+        oversized_pdf.size_bytes = API_NATIVE_ATTACHMENT_MAX_FILE_BYTES + 1;
+
+        let openai = openai_api_input(
+            "prompt",
+            &[
+                image.clone(),
+                pdf.clone(),
+                unknown.clone(),
+                oversized_pdf.clone(),
+            ],
+        )
+        .expect("openai payload should build");
+        let openai_text = serde_json::to_string(&openai).unwrap();
+        assert!(openai_text.contains("\"input_image\""));
+        assert!(openai_text.contains("\"input_file\""));
+        assert!(openai_text.contains("data:image/png;base64,"));
+        assert!(openai_text.contains("data:application/pdf;base64,"));
+        assert!(!openai_text.contains("archive.bin"));
+        assert!(!openai_text.contains("huge.pdf"));
+
+        let anthropic = anthropic_api_user_content("prompt", &[image.clone(), pdf.clone()])
+            .expect("anthropic payload should build");
+        let anthropic_text = serde_json::to_string(&anthropic).unwrap();
+        assert!(anthropic_text.contains("\"image\""));
+        assert!(anthropic_text.contains("\"document\""));
+
+        let gemini = gemini_api_user_parts(
+            "prompt",
+            &[image.clone(), pdf.clone(), unknown, oversized_pdf],
+        )
+        .expect("gemini payload should build");
+        let gemini_text = serde_json::to_string(&gemini).unwrap();
+        assert!(gemini_text.contains("\"inline_data\""));
+        assert!(gemini_text.contains("\"mime_type\":\"image/png\""));
+        assert!(gemini_text.contains("\"mime_type\":\"application/pdf\""));
+        assert!(!gemini_text.contains("archive.bin"));
+        assert!(!gemini_text.contains("huge.pdf"));
+
+        let _ = fs::remove_dir_all(&session_dir);
+    }
+
+    #[test]
+    fn api_cost_projection_counts_native_attachment_payloads() {
+        let session_dir = sessions_dir().join("run-api-attachment-cost-test");
+        let _ = fs::remove_dir_all(&session_dir);
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let pdf = test_manifest_attachment(&session_dir, "brief.pdf", "application/pdf", b"%PDF");
+        let unknown = test_manifest_attachment(
+            &session_dir,
+            "archive.bin",
+            "application/octet-stream",
+            b"bin",
+        );
+
+        let prompt_chars = "abcd".chars().count();
+        assert_eq!(
+            api_input_estimate_chars("abcd", &[pdf.clone(), unknown.clone()], "deepseek"),
+            prompt_chars
+        );
+        assert!(
+            api_input_estimate_chars("abcd", &[pdf.clone(), unknown.clone()], "openai")
+                > prompt_chars
+        );
+        assert!(api_input_estimate_chars("abcd", &[pdf, unknown], "gemini") > prompt_chars);
+
+        let _ = fs::remove_dir_all(&session_dir);
+    }
+
+    #[test]
+    fn human_log_projection_collapses_heartbeat_spam() {
+        assert!(should_collapse_human_log_event(
+            "session.editorial.heartbeat",
+            &json!({ "elapsed_seconds": 60 })
+        ));
+        assert!(!should_collapse_human_log_event(
+            "session.editorial.heartbeat",
+            &json!({ "elapsed_seconds": 300 })
+        ));
+        assert!(!should_collapse_human_log_event(
+            "session.agent.finished",
+            &json!({})
+        ));
     }
 
     #[test]
@@ -5639,6 +8184,14 @@ mod tests {
             anthropic_api_key_remote: false,
             gemini_api_key_remote: false,
             deepseek_api_key_remote: false,
+            openai_input_usd_per_million: Some(2.50),
+            openai_output_usd_per_million: Some(10.0),
+            anthropic_input_usd_per_million: Some(3.0),
+            anthropic_output_usd_per_million: Some(15.0),
+            gemini_input_usd_per_million: Some(1.25),
+            gemini_output_usd_per_million: Some(5.0),
+            deepseek_input_usd_per_million: Some(0.55),
+            deepseek_output_usd_per_million: Some(2.19),
             cloudflare_secret_store_id: None,
             cloudflare_secret_store_name: None,
             updated_at: "old".to_string(),
@@ -5667,6 +8220,14 @@ mod tests {
             anthropic_api_key_remote: false,
             gemini_api_key_remote: false,
             deepseek_api_key_remote: false,
+            openai_input_usd_per_million: Some(2.50),
+            openai_output_usd_per_million: Some(10.0),
+            anthropic_input_usd_per_million: Some(3.0),
+            anthropic_output_usd_per_million: Some(15.0),
+            gemini_input_usd_per_million: Some(1.25),
+            gemini_output_usd_per_million: Some(5.0),
+            deepseek_input_usd_per_million: Some(0.55),
+            deepseek_output_usd_per_million: Some(2.19),
             cloudflare_secret_store_id: None,
             cloudflare_secret_store_name: None,
             updated_at: "old".to_string(),
@@ -5703,6 +8264,14 @@ mod tests {
             anthropic_api_key_remote: false,
             gemini_api_key_remote: false,
             deepseek_api_key_remote: false,
+            openai_input_usd_per_million: Some(2.50),
+            openai_output_usd_per_million: Some(10.0),
+            anthropic_input_usd_per_million: Some(3.0),
+            anthropic_output_usd_per_million: Some(15.0),
+            gemini_input_usd_per_million: Some(1.25),
+            gemini_output_usd_per_million: Some(5.0),
+            deepseek_input_usd_per_million: Some(0.55),
+            deepseek_output_usd_per_million: Some(2.19),
             cloudflare_secret_store_id: None,
             cloudflare_secret_store_name: None,
             updated_at: "old".to_string(),
@@ -5770,6 +8339,10 @@ mod tests {
                 duration_ms: 42,
                 exit_code: Some(1),
                 output_path: "agent-runs/round-001-claude-review.md".to_string(),
+                usage_input_tokens: None,
+                usage_output_tokens: None,
+                cost_usd: None,
+                cost_estimated: None,
             },
             EditorialAgentResult {
                 name: "Gemini".to_string(),
@@ -5780,6 +8353,10 @@ mod tests {
                 duration_ms: 84,
                 exit_code: Some(0),
                 output_path: "agent-runs/round-001-gemini-review.md".to_string(),
+                usage_input_tokens: None,
+                usage_output_tokens: None,
+                cost_usd: None,
+                cost_estimated: None,
             },
         ];
 

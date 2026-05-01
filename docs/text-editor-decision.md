@@ -18,6 +18,8 @@ This is not a generic TipTap implementation. The accepted target is functional a
 
 The compatibility copy lives in `src/editor/posteditor/`.
 
+For runtime weight, Maestro must follow the admin-app pattern: the PostEditor parity module is lazy-loaded and rendered only after the operator clicks `Criar Post`. The session dashboard must not import or mount the Tiptap-heavy editor on initial load.
+
 ## Why TipTap/ProseMirror
 
 TipTap OSS is MIT-licensed and free. Its React integration officially uses `@tiptap/react`, `@tiptap/pm`, and `@tiptap/starter-kit`. ProseMirror gives schema-level control over documents, which matters because Maestro must emit controlled MainSite HTML rather than arbitrary browser DOM.

@@ -4,6 +4,17 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+- Added per-session editorial controls: selectable active peers (1-4), optional time limits, optional direct-API cost limits, prompt attachments, and public source links.
+- Added real direct-API editorial runners for OpenAI/Codex, Anthropic/Claude, Google/Gemini, and DeepSeek, with API-only mode no longer falling back to CLIs for non-DeepSeek peers.
+- Added a UI-managed provider tariff table for per-million token rates. The session still has one optional USD cost limit; provider tariffs calculate/audit observed API usage and any API peer is blocked with a friendly message until its provider input/output rates are configured.
+- Added native attachment delivery for supported direct-API providers: OpenAI receives `input_image`/`input_file`, Anthropic receives image/document content blocks, and Gemini receives `inline_data` parts. Unsupported or native-size-exceeding attachment types remain available through manifest and bounded text previews.
+- Added pre-run attachment delivery hints in the session UI, showing per active provider whether each file is expected to be sent natively to OpenAI/Anthropic/Gemini or kept as manifest/previews only.
+- Added a human-readable log projection under `data/logs/human/` with additive NDJSON fields, concise summaries, and heartbeat collapse so raw structured logs remain machine-readable without forcing operators to read giant JSON lines.
+- Persisted session contracts, attachment manifests, link artifacts, and cost ledgers under each ignored `data/sessions/<run>/` folder.
+- Started the conservative code-splitting pass: moved human-log and session-control helpers out of `src-tauri/src/lib.rs`, and changed the Tiptap-heavy PostEditor parity surface to load only after `Criar Post`, reducing the production entry chunk from about 1.30 MB to about 272 KB minified.
+- Cross-review for the native attachment continuation converged in `cross-review-v2` session `00b642c0-9f7a-4b85-a1cb-f04384548d61` after round 3 with Claude, Gemini, and DeepSeek READY.
+- Cross-review for the per-provider attachment delivery UI follow-up converged in `cross-review-v2` session `121cbad3-81fd-4c84-928f-7e30bfdd5d88` after round 2 with Claude, Gemini, and DeepSeek READY.
+
 ## [v0.3.12] - 2026-04-30
 
 - `README.md` now follows the shared organizational opening pattern adopted across the public repositories, while preserving Maestro's Windows/Tauri, logging, and editorial-runtime specific documentation.

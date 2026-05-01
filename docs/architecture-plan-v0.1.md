@@ -83,6 +83,8 @@ Required parity surface:
 
 The current compatibility module lives in `src/editor/posteditor/`. Future changes in `admin-app/MainSite/PostEditor` require equivalent Maestro review.
 
+Runtime loading rule: this parity module stays behind the `Criar Post` action and must not be part of the initial dashboard bundle. The intended behavior matches `admin-app/MainSite/PostEditor`: open action first, then lazy-load the TipTap editor surface.
+
 ## 5. JSON Store Design
 
 SQLite is rejected for v1 because the operator requirement is JSON files.

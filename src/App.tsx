@@ -8,6 +8,7 @@ import {
   Eye,
   EyeOff,
   FileText,
+  FilePlus2,
   GitBranch,
   HardDriveDownload,
   KeyRound,
@@ -23,10 +24,11 @@ import {
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import type { ChangeEvent, ComponentType } from 'react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import packageJson from '../package.json';
 import { logEvent } from './diagnostics';
-import PostEditor from './editor/posteditor/PostEditor';
+
+const PostEditor = lazy(() => import('./editor/posteditor/PostEditor'));
 
 const APP_VERSION = `v${packageJson.version}`;
 
@@ -43,11 +45,15 @@ type PhaseState = 'done' | 'active' | 'waiting';
 type ProviderMode = 'cli' | 'api' | 'hybrid';
 type AiCredentialKey = 'openai' | 'anthropic' | 'gemini' | 'deepseek';
 type InitialAgentKey = 'claude' | 'codex' | 'gemini' | 'deepseek';
+type ProviderRateKey = AiCredentialKey;
+type NativeAttachmentProvider = Exclude<AiCredentialKey, 'deepseek'>;
 type CredentialStorageMode = 'local_json' | 'windows_env' | 'cloudflare';
 type CloudflareTokenSource = 'prompt_each_launch' | 'windows_env' | 'local_encrypted';
 type ActiveSection = 'session' | 'protocols' | 'evidence' | 'agents' | 'settings' | 'setup';
+type SettingsTab = 'providers' | 'cloudflare';
 type RunStatus = 'idle' | 'preparing' | 'running' | 'paused' | 'blocked' | 'completed';
 type ActivityLevel = 'summary' | 'detail' | 'diagnostic';
+type NavItem = { section: ActiveSection; label: string; icon: ComponentType<{ size?: number }> };
 
 type OperationSnapshot = {
   title: string;
@@ -150,6 +156,14 @@ type AiProviderConfig = {
   anthropic_api_key_remote: boolean;
   gemini_api_key_remote: boolean;
   deepseek_api_key_remote: boolean;
+  openai_input_usd_per_million: number | null;
+  openai_output_usd_per_million: number | null;
+  anthropic_input_usd_per_million: number | null;
+  anthropic_output_usd_per_million: number | null;
+  gemini_input_usd_per_million: number | null;
+  gemini_output_usd_per_million: number | null;
+  deepseek_input_usd_per_million: number | null;
+  deepseek_output_usd_per_million: number | null;
   cloudflare_secret_store_id: string | null;
   cloudflare_secret_store_name: string | null;
   updated_at: string;
@@ -189,6 +203,10 @@ type EditorialAgentResult = {
   exit_code: number | null;
   role: string;
   output_path: string;
+  usage_input_tokens?: number | null;
+  usage_output_tokens?: number | null;
+  cost_usd?: number | null;
+  cost_estimated?: boolean | null;
 };
 
 type EditorialSessionResult = {
@@ -202,6 +220,35 @@ type EditorialSessionResult = {
   agents: EditorialAgentResult[];
   consensus_ready: boolean;
   status: string;
+  active_agents: InitialAgentKey[];
+  max_session_cost_usd: number | null;
+  max_session_minutes: number | null;
+  observed_cost_usd: number | null;
+  links_path: string | null;
+  attachments_manifest_path: string | null;
+  human_log_path: string | null;
+};
+
+type PromptAttachmentPayload = {
+  name: string;
+  media_type: string | null;
+  size_bytes: number;
+  data_base64: string;
+};
+
+type AttachmentDeliveryPlan = {
+  attachment: PromptAttachmentPayload;
+  nativeProviders: NativeAttachmentProvider[];
+  manifestProviders: AiCredentialKey[];
+  fallbackReason: string | null;
+};
+
+type SessionRunOptions = {
+  activeAgents: InitialAgentKey[];
+  maxSessionCostUsd: number | null;
+  maxSessionMinutes: number | null;
+  attachments: PromptAttachmentPayload[];
+  links: string[];
 };
 
 type ResumableSessionInfo = {
@@ -358,6 +405,29 @@ const aiProviderRows = [
   meta: string;
 }>;
 
+const providerRateRows = [
+  {
+    key: 'openai',
+    name: 'OpenAI / Codex',
+    hint: 'Usado quando o peer operar por API com uso observado.',
+  },
+  {
+    key: 'anthropic',
+    name: 'Anthropic / Claude',
+    hint: 'Usado quando o peer operar por API com uso observado.',
+  },
+  {
+    key: 'gemini',
+    name: 'Google / Gemini',
+    hint: 'Usado quando o peer operar por API com uso observado.',
+  },
+  {
+    key: 'deepseek',
+    name: 'DeepSeek',
+    hint: 'Obrigatorio para sessoes com DeepSeek via API.',
+  },
+] satisfies Array<{ key: ProviderRateKey; name: string; hint: string }>;
+
 const initialAgentOptions = [
   { key: 'claude', label: 'Claude', detail: 'primeira versao e revisoes' },
   { key: 'codex', label: 'Codex', detail: 'primeira versao e revisoes' },
@@ -365,20 +435,55 @@ const initialAgentOptions = [
   { key: 'deepseek', label: 'DeepSeek', detail: 'primeira versao e revisoes via API' },
 ] satisfies Array<{ key: InitialAgentKey; label: string; detail: string }>;
 
+const defaultActiveAgents = initialAgentOptions.map((option) => option.key);
+const attachmentLimits = {
+  maxFiles: 8,
+  maxFileBytes: 25 * 1024 * 1024,
+  maxTotalBytes: 75 * 1024 * 1024,
+  maxNativeApiBytes: 20 * 1024 * 1024,
+};
+
 const verbosityOptions = [
   { mode: 'resumo', label: 'Resumo', icon: EyeOff },
   { mode: 'detalhado', label: 'Detalhado', icon: Eye },
   { mode: 'diagnostico', label: 'Diagnostico', icon: ListChecks },
 ] satisfies Array<{ mode: VerbosityMode; label: string; icon: ComponentType<{ size?: number }> }>;
 
-const navItems = [
-  { section: 'session', label: 'Sessao', icon: GitBranch },
-  { section: 'protocols', label: 'Protocolos', icon: FileText },
-  { section: 'evidence', label: 'Evidencias', icon: Globe2 },
-  { section: 'agents', label: 'Agentes', icon: Bot },
-  { section: 'settings', label: 'Ajustes', icon: Settings },
-  { section: 'setup', label: 'Setup', icon: HardDriveDownload },
-] satisfies Array<{ section: ActiveSection; label: string; icon: ComponentType<{ size?: number }> }>;
+const navGroups: Array<{ label: string; items: NavItem[] }> = [
+  {
+    label: 'Fluxo editorial',
+    items: [
+      { section: 'session', label: 'Sessao', icon: GitBranch },
+      { section: 'protocols', label: 'Protocolos', icon: FileText },
+      { section: 'evidence', label: 'Evidencias', icon: Globe2 },
+    ],
+  },
+  {
+    label: 'Operacao',
+    items: [
+      { section: 'agents', label: 'Agentes', icon: Bot },
+      { section: 'settings', label: 'Ajustes', icon: Settings },
+      { section: 'setup', label: 'Setup', icon: HardDriveDownload },
+    ],
+  },
+];
+
+const navItems: NavItem[] = navGroups.flatMap((group) => group.items);
+
+const settingsTabs = [
+  {
+    tab: 'providers',
+    label: 'Agentes via API',
+    detail: 'Chaves, modo e tabela de tarifas',
+    icon: KeyRound,
+  },
+  {
+    tab: 'cloudflare',
+    label: 'Cloudflare',
+    detail: 'Bootstrap, D1 e Secrets Store',
+    icon: Database,
+  },
+] satisfies Array<{ tab: SettingsTab; label: string; detail: string; icon: ComponentType<{ size?: number }> }>;
 
 const idleOperation: OperationSnapshot = {
   title: 'Aguardando sessao editorial',
@@ -438,6 +543,141 @@ function formatElapsedTime(totalSeconds: number) {
   return [hours, minutes, seconds].map((value) => value.toString().padStart(2, '0')).join(':');
 }
 
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes.toLocaleString('pt-BR')} B`;
+  const kib = bytes / 1024;
+  if (kib < 1024) return `${kib.toLocaleString('pt-BR', { maximumFractionDigits: 1 })} KiB`;
+  const mib = kib / 1024;
+  return `${mib.toLocaleString('pt-BR', { maximumFractionDigits: 1 })} MiB`;
+}
+
+function normalizedAttachmentMediaType(attachment: PromptAttachmentPayload) {
+  const media = attachment.media_type?.trim().toLowerCase();
+  if (!media) return 'application/octet-stream';
+  if (media === 'image/jpg') return 'image/jpeg';
+  return media;
+}
+
+function attachmentExtension(name: string) {
+  const lastSegment = name.split(/[\\/]/).pop() ?? name;
+  const index = lastSegment.lastIndexOf('.');
+  if (index < 0 || index === lastSegment.length - 1) return '';
+  return lastSegment.slice(index + 1).toLowerCase();
+}
+
+function isTextLikeAttachment(attachment: PromptAttachmentPayload) {
+  const media = normalizedAttachmentMediaType(attachment);
+  if (
+    media.startsWith('text/') ||
+    media.includes('json') ||
+    media.includes('xml') ||
+    media.includes('markdown') ||
+    media.includes('csv') ||
+    media.includes('yaml')
+  ) {
+    return true;
+  }
+  return ['txt', 'md', 'markdown', 'json', 'csv', 'tsv', 'html', 'htm', 'xml', 'yaml', 'yml', 'log'].includes(
+    attachmentExtension(attachment.name),
+  );
+}
+
+function isImageAttachment(attachment: PromptAttachmentPayload) {
+  return ['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(normalizedAttachmentMediaType(attachment));
+}
+
+function isPdfAttachment(attachment: PromptAttachmentPayload) {
+  return normalizedAttachmentMediaType(attachment) === 'application/pdf' || attachmentExtension(attachment.name) === 'pdf';
+}
+
+function isKnownDocumentAttachment(attachment: PromptAttachmentPayload) {
+  if (isTextLikeAttachment(attachment) || isPdfAttachment(attachment)) return true;
+  const media = normalizedAttachmentMediaType(attachment);
+  if (
+    [
+      'application/msword',
+      'application/rtf',
+      'application/vnd.ms-excel',
+      'application/vnd.ms-powerpoint',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      'application/vnd.oasis.opendocument.text',
+      'application/vnd.oasis.opendocument.spreadsheet',
+      'application/vnd.oasis.opendocument.presentation',
+    ].includes(media)
+  ) {
+    return true;
+  }
+  return ['doc', 'docx', 'rtf', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'odp'].includes(
+    attachmentExtension(attachment.name),
+  );
+}
+
+// Keep this predictor aligned with src-tauri/src/lib.rs provider_supports_native_attachment.
+function providerSupportsNativeAttachment(provider: NativeAttachmentProvider, attachment: PromptAttachmentPayload) {
+  if (attachment.size_bytes > attachmentLimits.maxNativeApiBytes) return false;
+  if (provider === 'openai') return isImageAttachment(attachment) || isKnownDocumentAttachment(attachment);
+  if (provider === 'anthropic') return isImageAttachment(attachment) || isPdfAttachment(attachment);
+  return (
+    isImageAttachment(attachment) ||
+    normalizedAttachmentMediaType(attachment).startsWith('audio/') ||
+    normalizedAttachmentMediaType(attachment).startsWith('video/') ||
+    isPdfAttachment(attachment) ||
+    isTextLikeAttachment(attachment) ||
+    isKnownDocumentAttachment(attachment)
+  );
+}
+
+function attachmentDeliveryPlan(
+  attachment: PromptAttachmentPayload,
+  activeApiProviders: AiCredentialKey[],
+): AttachmentDeliveryPlan {
+  const nativeProviders = activeApiProviders.filter(
+    (provider): provider is NativeAttachmentProvider =>
+      provider !== 'deepseek' && providerSupportsNativeAttachment(provider, attachment),
+  );
+  const manifestProviders = activeApiProviders.filter(
+    (provider) => provider === 'deepseek' || !nativeProviders.includes(provider as NativeAttachmentProvider),
+  );
+  let fallbackReason: string | null = null;
+  if (manifestProviders.length > 0 || nativeProviders.length === 0) {
+    fallbackReason =
+      attachment.size_bytes > attachmentLimits.maxNativeApiBytes
+        ? `excede envio nativo (${formatBytes(attachmentLimits.maxNativeApiBytes)})`
+        : activeApiProviders.length === 0
+          ? 'peers ativos usam CLI'
+          : manifestProviders.length > 0 && manifestProviders.every((provider) => provider === 'deepseek')
+            ? 'API text-only'
+            : nativeProviders.length > 0
+              ? 'sem suporte nativo nesses peers'
+              : 'tipo sem suporte nativo nos peers API ativos';
+  }
+  return { attachment, nativeProviders, manifestProviders, fallbackReason };
+}
+
+function providerShortLabel(provider: AiCredentialKey) {
+  if (provider === 'openai') return 'OpenAI';
+  if (provider === 'anthropic') return 'Anthropic';
+  if (provider === 'gemini') return 'Gemini';
+  return 'DeepSeek';
+}
+
+function attachmentDeliveryHint(plan: AttachmentDeliveryPlan) {
+  const parts: string[] = [];
+  if (plan.nativeProviders.length > 0) {
+    parts.push(`Nativo previsto: ${plan.nativeProviders.map(providerShortLabel).join(', ')}`);
+  }
+  if (plan.manifestProviders.length > 0) {
+    const reason = plan.fallbackReason ? ` (${plan.fallbackReason})` : '';
+    parts.push(`Manifesto/previews: ${plan.manifestProviders.map(providerShortLabel).join(', ')}${reason}`);
+  }
+  if (parts.length === 0 && plan.fallbackReason) {
+    parts.push(`Manifesto/previews: ${plan.fallbackReason}`);
+  }
+  return parts.join(' · ');
+}
+
 function formatBrazilDateTime(value: Date | number) {
   return new Intl.DateTimeFormat('pt-BR', {
     timeZone: 'America/Sao_Paulo',
@@ -479,6 +719,9 @@ function humanizeAgentStatus(status: string) {
   if (normalized === 'REMOTE_SECRET_NOT_READABLE') return 'Segredo remoto nao legivel localmente';
   if (normalized === 'READY_UNANIMOUS') return 'Texto liberado';
   if (normalized === 'PAUSED_DRAFT_UNAVAILABLE') return 'Rascunho indisponivel';
+  if (normalized === 'TIME_LIMIT_REACHED') return 'Limite de tempo atingido';
+  if (normalized === 'COST_LIMIT_REACHED') return 'Limite de custo atingido';
+  if (normalized === 'PAUSED_COST_RATES_MISSING') return 'Tarifas de custo ausentes';
   if (normalized === 'PAUSED_WITH_REAL_AGENT_OUTPUTS') return 'Aguardando ajustes';
   return status
     .replace(/_/g, ' ')
@@ -571,19 +814,38 @@ export function App() {
   const [editorialPrompt, setEditorialPrompt] = useState(
     'Escreva um artigo academico sobre o tema informado, seguindo integralmente o protocolo editorial ativo.',
   );
+  const [showPostEditor, setShowPostEditor] = useState(false);
   const [mainSiteHtml, setMainSiteHtml] = useState(
     '<h1>Artigo em preparacao</h1><p style="text-align: justify">Texto inicial para edicao com o mesmo PostEditor usado pelo MainSite.</p>',
   );
   const [providerMode, setProviderMode] = useState<ProviderMode>('hybrid');
   const [initialAgent, setInitialAgent] = useState<InitialAgentKey>('claude');
+  const [activeAgents, setActiveAgents] = useState<InitialAgentKey[]>(defaultActiveAgents);
+  const [maxSessionCostUsd, setMaxSessionCostUsd] = useState('');
+  const [maxSessionMinutes, setMaxSessionMinutes] = useState('');
+  const [promptAttachments, setPromptAttachments] = useState<PromptAttachmentPayload[]>([]);
+  const [sessionLinks, setSessionLinks] = useState('');
   const [credentialStorageMode, setCredentialStorageMode] = useState<CredentialStorageMode>('local_json');
   const [activeSection, setActiveSection] = useState<ActiveSection>('session');
+  const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>('providers');
   const [cloudflareAccountId, setCloudflareAccountId] = useState('');
   const [cloudflareApiToken, setCloudflareApiToken] = useState('');
   const [cloudflareTokenSource, setCloudflareTokenSource] = useState<CloudflareTokenSource>('prompt_each_launch');
   const [cloudflareTokenEnvVar, setCloudflareTokenEnvVar] = useState('MAESTRO_CLOUDFLARE_API_TOKEN');
   const [cloudflareEnvSnapshot, setCloudflareEnvSnapshot] = useState<CloudflareEnvSnapshot | null>(null);
   const [aiCredentials, setAiCredentials] = useState<Record<AiCredentialKey, string>>({
+    openai: '',
+    anthropic: '',
+    gemini: '',
+    deepseek: '',
+  });
+  const [providerInputUsdPerMillion, setProviderInputUsdPerMillion] = useState<Record<ProviderRateKey, string>>({
+    openai: '',
+    anthropic: '',
+    gemini: '',
+    deepseek: '',
+  });
+  const [providerOutputUsdPerMillion, setProviderOutputUsdPerMillion] = useState<Record<ProviderRateKey, string>>({
     openai: '',
     anthropic: '',
     gemini: '',
@@ -633,6 +895,42 @@ export function App() {
   const operationProgressLabel = operationMeterLabel(operation.status);
   const hasLoadedProtocolForResume = protocolText.trim().length >= 100 && protocol.hash !== 'aguardando importacao';
   const initialAgentLabel = initialAgentOptions.find((option) => option.key === initialAgent)?.label ?? 'Claude';
+  const activeAgentLabels = activeAgents
+    .map((agent) => initialAgentOptions.find((option) => option.key === agent)?.label ?? agent)
+    .join(', ');
+  const attachmentTotalBytes = promptAttachments.reduce((total, item) => total + item.size_bytes, 0);
+  const providerForAgent: Record<InitialAgentKey, AiCredentialKey> = {
+    claude: 'anthropic',
+    codex: 'openai',
+    gemini: 'gemini',
+    deepseek: 'deepseek',
+  };
+  const agentUsesApi = (agent: InitialAgentKey) => {
+    if (agent === 'deepseek') return true;
+    if (providerMode === 'api') return true;
+    if (providerMode === 'cli') return false;
+    return aiCredentials[providerForAgent[agent]].trim().length > 0;
+  };
+  const providerRatesConfigured = (provider: AiCredentialKey) =>
+    providerInputUsdPerMillion[provider].trim().length > 0 &&
+    providerOutputUsdPerMillion[provider].trim().length > 0;
+  const agentsMissingCostRates = activeAgents.filter(
+    (agent) => agentUsesApi(agent) && !providerRatesConfigured(providerForAgent[agent]),
+  );
+  const costRatesRequired = agentsMissingCostRates.length > 0;
+  const activeApiAttachmentProviders = activeAgents
+    .filter((agent) => agentUsesApi(agent))
+    .map((agent) => providerForAgent[agent])
+    .filter((provider, index, providers) => providers.indexOf(provider) === index);
+  const attachmentDeliveryPlans = promptAttachments.map((attachment) =>
+    attachmentDeliveryPlan(attachment, activeApiAttachmentProviders),
+  );
+
+  useEffect(() => {
+    if (!activeAgents.includes(initialAgent)) {
+      setInitialAgent(activeAgents[0] ?? 'claude');
+    }
+  }, [activeAgents, initialAgent]);
 
   useEffect(() => {
     void logEvent({
@@ -967,6 +1265,46 @@ export function App() {
       anthropic_api_key_remote: false,
       gemini_api_key_remote: false,
       deepseek_api_key_remote: false,
+      openai_input_usd_per_million: parseOptionalPositiveNumber(
+        providerInputUsdPerMillion.openai,
+        'Tarifa OpenAI de entrada',
+        10000,
+      ),
+      openai_output_usd_per_million: parseOptionalPositiveNumber(
+        providerOutputUsdPerMillion.openai,
+        'Tarifa OpenAI de saida',
+        10000,
+      ),
+      anthropic_input_usd_per_million: parseOptionalPositiveNumber(
+        providerInputUsdPerMillion.anthropic,
+        'Tarifa Anthropic de entrada',
+        10000,
+      ),
+      anthropic_output_usd_per_million: parseOptionalPositiveNumber(
+        providerOutputUsdPerMillion.anthropic,
+        'Tarifa Anthropic de saida',
+        10000,
+      ),
+      gemini_input_usd_per_million: parseOptionalPositiveNumber(
+        providerInputUsdPerMillion.gemini,
+        'Tarifa Gemini de entrada',
+        10000,
+      ),
+      gemini_output_usd_per_million: parseOptionalPositiveNumber(
+        providerOutputUsdPerMillion.gemini,
+        'Tarifa Gemini de saida',
+        10000,
+      ),
+      deepseek_input_usd_per_million: parseOptionalPositiveNumber(
+        providerInputUsdPerMillion.deepseek,
+        'Tarifa DeepSeek de entrada',
+        10000,
+      ),
+      deepseek_output_usd_per_million: parseOptionalPositiveNumber(
+        providerOutputUsdPerMillion.deepseek,
+        'Tarifa DeepSeek de saida',
+        10000,
+      ),
       cloudflare_secret_store_id: null,
       cloudflare_secret_store_name: null,
       updated_at: new Date().toISOString(),
@@ -1000,6 +1338,7 @@ export function App() {
         gemini: config.gemini_api_key ?? '',
         deepseek: config.deepseek_api_key ?? '',
       });
+      applyProviderRatesFromConfig(config);
       const remoteCount = [
         config.openai_api_key_remote,
         config.anthropic_api_key_remote,
@@ -1024,6 +1363,14 @@ export function App() {
           anthropic_key_present: Boolean(config.anthropic_api_key),
           gemini_key_present: Boolean(config.gemini_api_key),
           deepseek_key_present: Boolean(config.deepseek_api_key),
+          openai_rate_input_configured: config.openai_input_usd_per_million != null,
+          openai_rate_output_configured: config.openai_output_usd_per_million != null,
+          anthropic_rate_input_configured: config.anthropic_input_usd_per_million != null,
+          anthropic_rate_output_configured: config.anthropic_output_usd_per_million != null,
+          gemini_rate_input_configured: config.gemini_input_usd_per_million != null,
+          gemini_rate_output_configured: config.gemini_output_usd_per_million != null,
+          deepseek_cost_input_configured: config.deepseek_input_usd_per_million != null,
+          deepseek_cost_output_configured: config.deepseek_output_usd_per_million != null,
           openai_remote_present: config.openai_api_key_remote,
           anthropic_remote_present: config.anthropic_api_key_remote,
           gemini_remote_present: config.gemini_api_key_remote,
@@ -1055,6 +1402,7 @@ export function App() {
         gemini: saved.gemini_api_key ?? '',
         deepseek: saved.deepseek_api_key ?? '',
       });
+      applyProviderRatesFromConfig(saved);
       const storageLabel = aiConfigStorageLabel(saved.credential_storage_mode);
       setAiConfigStatus(`Salvo em ${storageLabel} as ${formatBrazilDateTime(new Date(saved.updated_at))}`);
       appendActivity({
@@ -1076,6 +1424,14 @@ export function App() {
           anthropic_key_present: Boolean(saved.anthropic_api_key),
           gemini_key_present: Boolean(saved.gemini_api_key),
           deepseek_key_present: Boolean(saved.deepseek_api_key),
+          openai_rate_input_configured: saved.openai_input_usd_per_million != null,
+          openai_rate_output_configured: saved.openai_output_usd_per_million != null,
+          anthropic_rate_input_configured: saved.anthropic_input_usd_per_million != null,
+          anthropic_rate_output_configured: saved.anthropic_output_usd_per_million != null,
+          gemini_rate_input_configured: saved.gemini_input_usd_per_million != null,
+          gemini_rate_output_configured: saved.gemini_output_usd_per_million != null,
+          deepseek_cost_input_configured: saved.deepseek_input_usd_per_million != null,
+          deepseek_cost_output_configured: saved.deepseek_output_usd_per_million != null,
           openai_remote_present: saved.openai_api_key_remote,
           anthropic_remote_present: saved.anthropic_api_key_remote,
           gemini_remote_present: saved.gemini_api_key_remote,
@@ -1084,7 +1440,7 @@ export function App() {
       });
       return saved;
     } catch (error) {
-      setAiConfigStatus('Falha ao salvar configuracao das APIs');
+      setAiConfigStatus(error instanceof Error ? error.message : 'Falha ao salvar configuracao das APIs');
       void logEvent({
         level: 'error',
         category: 'settings.ai_provider.config_save_failed',
@@ -1114,6 +1470,16 @@ export function App() {
       category: 'ui.navigation.changed',
       message: 'operator changed active Maestro section',
       context: { active_section: nextSection, session_name: sessionName },
+    });
+  }
+
+  function chooseSettingsTab(nextTab: SettingsTab) {
+    setActiveSettingsTab(nextTab);
+    void logEvent({
+      level: 'info',
+      category: 'ui.settings.navigation.changed',
+      message: 'operator changed active Maestro settings tab',
+      context: { active_settings_tab: nextTab, session_name: sessionName },
     });
   }
 
@@ -1286,6 +1652,122 @@ export function App() {
     });
   }
 
+  function toggleActiveAgent(agent: InitialAgentKey) {
+    setActiveAgents((current) => {
+      if (current.includes(agent)) {
+        if (current.length === 1) return current;
+        return current.filter((item) => item !== agent);
+      }
+      return [...current, agent].filter((item, index, items) => items.indexOf(item) === index).slice(0, 4);
+    });
+  }
+
+  function parseOptionalPositiveNumber(value: string, label: string, maxValue?: number) {
+    const trimmed = value.trim().replace(',', '.');
+    if (!trimmed) return null;
+    const parsed = Number(trimmed);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new Error(`${label} precisa ser um numero positivo ou ficar em branco.`);
+    }
+    if (maxValue != null && parsed > maxValue) {
+      throw new Error(`${label} precisa ser menor ou igual a ${maxValue.toLocaleString('pt-BR')}.`);
+    }
+    return parsed;
+  }
+
+  function parseOptionalPositiveInteger(value: string, label: string) {
+    const parsed = parseOptionalPositiveNumber(value, label);
+    if (parsed == null) return null;
+    if (!Number.isInteger(parsed)) {
+      throw new Error(`${label} precisa ser um numero inteiro de minutos ou ficar em branco.`);
+    }
+    return parsed;
+  }
+
+  function parseSessionLinks() {
+    return sessionLinks
+      .split(/\r?\n|,/)
+      .map((link) => link.trim())
+      .filter(Boolean);
+  }
+
+  function currentSessionRunOptions(): SessionRunOptions {
+    if (activeAgents.length < 1 || activeAgents.length > 4) {
+      throw new Error('Selecione de 1 a 4 peers para a sessao.');
+    }
+    if (!activeAgents.includes(initialAgent)) {
+      throw new Error('O agente da primeira versao precisa estar entre os peers ativos.');
+    }
+    const missingRateLabels = activeAgents
+      .filter((agent) => agentUsesApi(agent))
+      .filter((agent) => {
+        const provider = providerForAgent[agent];
+        parseOptionalPositiveNumber(providerInputUsdPerMillion[provider], `Tarifa ${provider} de entrada`, 10000);
+        parseOptionalPositiveNumber(providerOutputUsdPerMillion[provider], `Tarifa ${provider} de saida`, 10000);
+        return !providerRatesConfigured(provider);
+      })
+      .map((agent) => initialAgentOptions.find((option) => option.key === agent)?.label ?? agent);
+    if (missingRateLabels.length > 0) {
+      throw new Error(
+        `Configure as tarifas de entrada e saida em Configuracoes > Agentes via API > Tabela de tarifas para: ${missingRateLabels.join(', ')}.`,
+      );
+    }
+    return {
+      activeAgents,
+      maxSessionCostUsd: parseOptionalPositiveNumber(maxSessionCostUsd, 'Limite de custo'),
+      maxSessionMinutes: parseOptionalPositiveInteger(maxSessionMinutes, 'Limite de tempo'),
+      attachments: promptAttachments,
+      links: parseSessionLinks(),
+    };
+  }
+
+  async function handlePromptAttachments(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = '';
+    if (files.length === 0) return;
+    const nextTotal = attachmentTotalBytes + files.reduce((total, file) => total + file.size, 0);
+    if (promptAttachments.length + files.length > attachmentLimits.maxFiles) {
+      appendActivity({
+        level: 'summary',
+        title: 'Anexos recusados',
+        detail: `Limite de ${attachmentLimits.maxFiles} arquivos por sessao.`,
+      });
+      return;
+    }
+    if (files.some((file) => file.size > attachmentLimits.maxFileBytes) || nextTotal > attachmentLimits.maxTotalBytes) {
+      appendActivity({
+        level: 'summary',
+        title: 'Anexos recusados',
+        detail: 'Use arquivos de ate 25 MiB cada e ate 75 MiB no total.',
+      });
+      return;
+    }
+    const payloads = await Promise.all(files.map(fileToAttachmentPayload));
+    setPromptAttachments((current) => [...current, ...payloads]);
+  }
+
+  async function fileToAttachmentPayload(file: File): Promise<PromptAttachmentPayload> {
+    const bytes = await file.arrayBuffer();
+    const view = new Uint8Array(bytes);
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let index = 0; index < view.length; index += chunkSize) {
+      binary += String.fromCharCode(...view.subarray(index, index + chunkSize));
+    }
+    return {
+      name: file.name,
+      media_type: file.type || null,
+      size_bytes: file.size,
+      data_base64: btoa(binary),
+    };
+  }
+
+  function removePromptAttachment(name: string, sizeBytes: number) {
+    setPromptAttachments((current) =>
+      current.filter((item) => !(item.name === name && item.size_bytes === sizeBytes)),
+    );
+  }
+
   function startEditorialSession() {
     const promptText = editorialPrompt.trim();
     const runId = createRunId();
@@ -1339,6 +1821,32 @@ export function App() {
       return;
     }
 
+    let runOptions: SessionRunOptions;
+    try {
+      runOptions = currentSessionRunOptions();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Controles da sessao invalidos.';
+      setOperation({
+        title: 'Controles invalidos',
+        progress: 0,
+        current: message,
+        eta: 'ajuste peers, custo ou tempo',
+        status: 'blocked',
+      });
+      appendActivity({
+        level: 'summary',
+        title: 'Sessao bloqueada',
+        detail: message,
+      });
+      void logEvent({
+        level: 'warn',
+        category: 'session.controls.rejected',
+        message: 'operator tried to start an editorial session with invalid controls',
+        context: { error: message },
+      });
+      return;
+    }
+
     setSessionRunId(runId);
     const selectedInitialAgent = initialAgent;
     const selectedInitialAgentLabel =
@@ -1363,7 +1871,7 @@ export function App() {
       {
         round: '000',
         status: 'Sessao criada',
-        note: `Prompt recebido. ${selectedInitialAgentLabel} abrira a primeira versao; entrega final permanece bloqueada ate unanimidade.`,
+        note: `Prompt recebido. ${selectedInitialAgentLabel} abrira a primeira versao; peers ativos: ${activeAgentLabels}.`,
       },
     ]);
     setActivityItems([
@@ -1387,8 +1895,13 @@ export function App() {
         protocol_lines: protocol.lines,
         protocol_chars: protocolText.length,
         required_outputs: finalArtifacts.map((artifact) => artifact.name),
-        consensus_gate: 'all_editorial_agents_ready_same_round',
+        consensus_gate: 'selected_editorial_agents_ready_same_round',
         initial_agent: selectedInitialAgent,
+        active_agents: runOptions.activeAgents,
+        max_session_cost_usd: runOptions.maxSessionCostUsd,
+        max_session_minutes: runOptions.maxSessionMinutes,
+        attachment_count: runOptions.attachments.length,
+        link_count: runOptions.links.length,
       },
     });
     void logEvent({
@@ -1400,6 +1913,7 @@ export function App() {
         provider_mode: providerMode,
         credential_storage_mode: credentialStorageMode,
         initial_agent: selectedInitialAgent,
+        active_agents: runOptions.activeAgents,
       },
     });
 
@@ -1439,7 +1953,7 @@ export function App() {
       message: 'local visible preflight completed',
       context: { run_id: runId },
     });
-    void runRealEditorialSession(runId, promptText, undefined, selectedInitialAgent);
+    void runRealEditorialSession(runId, promptText, undefined, selectedInitialAgent, runOptions);
   }
 
   async function runRealEditorialSession(
@@ -1452,6 +1966,7 @@ export function App() {
       nextRound?: number;
     },
     selectedInitialAgent: InitialAgentKey = initialAgent,
+    runOptions?: SessionRunOptions,
   ) {
     const isResume = Boolean(resumeOptions);
     const startedAt = Date.now();
@@ -1463,7 +1978,11 @@ export function App() {
       progress: 44,
       current: isResume
         ? `Continuando a partir da rodada ${resumeOptions?.nextRound?.toLocaleString('pt-BR') ?? 'salva'}.`
-        : `${selectedInitialAgentLabel} esta preparando a primeira versao; os demais revisam em seguida.`,
+        : `${selectedInitialAgentLabel} esta preparando a primeira versao; peers ativos: ${
+            runOptions?.activeAgents
+              .map((agent) => initialAgentOptions.find((option) => option.key === agent)?.label ?? agent)
+              .join(', ') ?? activeAgentLabels
+          }.`,
       eta: `Inicio: ${startedAtLabel}`,
       status: 'running',
     });
@@ -1477,9 +1996,11 @@ export function App() {
       ...initialAgentOptions.map((option) => ({
         name: option.label,
         cli: option.key,
-        state: 'running' as AgentState,
+        state: runOptions && !runOptions.activeAgents.includes(option.key) ? ('blocked' as AgentState) : ('running' as AgentState),
         note:
-          option.key === selectedInitialAgent
+          runOptions && !runOptions.activeAgents.includes(option.key)
+            ? 'fora desta sessao'
+            : option.key === selectedInitialAgent
             ? 'primeira versao e ajustes em andamento'
             : 'leitura e revisao em andamento',
       })),
@@ -1508,6 +2029,11 @@ export function App() {
         provider_mode: providerMode,
         credential_storage_mode: credentialStorageMode,
         initial_agent: selectedInitialAgent,
+        active_agents: runOptions?.activeAgents ?? null,
+        max_session_cost_usd: runOptions?.maxSessionCostUsd ?? null,
+        max_session_minutes: runOptions?.maxSessionMinutes ?? null,
+        attachment_count: runOptions?.attachments.length ?? 0,
+        link_count: runOptions?.links.length ?? 0,
       },
     });
 
@@ -1560,6 +2086,11 @@ export function App() {
               protocol_text: protocolText,
               protocol_hash: protocol.hash,
               initial_agent: selectedInitialAgent,
+              active_agents: runOptions?.activeAgents ?? null,
+              max_session_cost_usd: runOptions?.maxSessionCostUsd ?? null,
+              max_session_minutes: runOptions?.maxSessionMinutes ?? null,
+              attachments: runOptions?.attachments ?? [],
+              links: runOptions?.links ?? [],
             },
           });
       window.clearInterval(heartbeat);
@@ -1598,7 +2129,9 @@ export function App() {
       appendActivity({
         level: result.consensus_ready ? 'summary' : 'detail',
         title: result.consensus_ready ? 'Texto final liberado' : 'Sessao pausada',
-        detail: summarizeAgentResults(result.agents),
+        detail: `${summarizeAgentResults(result.agents)} Custo observado: ${
+          result.observed_cost_usd == null ? 'nao medido' : `US$ ${result.observed_cost_usd.toFixed(6)}`
+        }. Log humano: ${result.human_log_path ?? 'indisponivel'}.`,
       });
 
       if (result.consensus_ready) {
@@ -1623,6 +2156,9 @@ export function App() {
             run_id: runId,
             final_markdown_path: result.final_markdown_path,
             session_minutes_path: result.session_minutes_path,
+            active_agents: result.active_agents,
+            observed_cost_usd: result.observed_cost_usd,
+            human_log_path: result.human_log_path,
             agents: result.agents.map((agent) => ({ name: agent.name, tone: agent.tone })),
           },
         });
@@ -1633,6 +2169,12 @@ export function App() {
           current:
             result.status === 'PAUSED_DRAFT_UNAVAILABLE'
               ? 'Nenhum agente produziu rascunho utilizavel. A entrega segue indisponivel ate nova tentativa ou intervencao.'
+              : result.status === 'TIME_LIMIT_REACHED'
+              ? 'O limite de tempo opcional foi atingido. A entrega segue indisponivel ate nova sessao ou retomada ajustada.'
+              : result.status === 'COST_LIMIT_REACHED'
+              ? 'O limite de custo opcional foi atingido antes de nova chamada paga. A entrega segue indisponivel.'
+              : result.status === 'PAUSED_COST_RATES_MISSING'
+              ? 'Um peer via API esta selecionado, mas suas tarifas de entrada e saida ainda nao foram configuradas em Configuracoes > Agentes via API.'
               : 'A sessao nao entregou texto final nesta chamada. Divergencias exigem novas rodadas ate unanimidade.',
           eta: `Ata: ${result.session_minutes_path}`,
           status: 'paused',
@@ -1652,6 +2194,11 @@ export function App() {
             status: result.status,
             session_minutes_path: result.session_minutes_path,
             session_dir: result.session_dir,
+            active_agents: result.active_agents,
+            observed_cost_usd: result.observed_cost_usd,
+            max_session_cost_usd: result.max_session_cost_usd,
+            max_session_minutes: result.max_session_minutes,
+            human_log_path: result.human_log_path,
             agents: result.agents.map((agent) => ({
               name: agent.name,
               role: agent.role,
@@ -1691,6 +2238,31 @@ export function App() {
 
   function updateAiCredential(provider: AiCredentialKey, value: string) {
     setAiCredentials((current) => ({ ...current, [provider]: value }));
+  }
+
+  function updateProviderInputRate(provider: ProviderRateKey, value: string) {
+    setProviderInputUsdPerMillion((current) => ({ ...current, [provider]: value }));
+  }
+
+  function updateProviderOutputRate(provider: ProviderRateKey, value: string) {
+    setProviderOutputUsdPerMillion((current) => ({ ...current, [provider]: value }));
+  }
+
+  function applyProviderRatesFromConfig(config: AiProviderConfig) {
+    setProviderInputUsdPerMillion({
+      openai: config.openai_input_usd_per_million == null ? '' : String(config.openai_input_usd_per_million),
+      anthropic:
+        config.anthropic_input_usd_per_million == null ? '' : String(config.anthropic_input_usd_per_million),
+      gemini: config.gemini_input_usd_per_million == null ? '' : String(config.gemini_input_usd_per_million),
+      deepseek: config.deepseek_input_usd_per_million == null ? '' : String(config.deepseek_input_usd_per_million),
+    });
+    setProviderOutputUsdPerMillion({
+      openai: config.openai_output_usd_per_million == null ? '' : String(config.openai_output_usd_per_million),
+      anthropic:
+        config.anthropic_output_usd_per_million == null ? '' : String(config.anthropic_output_usd_per_million),
+      gemini: config.gemini_output_usd_per_million == null ? '' : String(config.gemini_output_usd_per_million),
+      deepseek: config.deepseek_output_usd_per_million == null ? '' : String(config.deepseek_output_usd_per_million),
+    });
   }
 
   function chooseProviderMode(nextMode: ProviderMode) {
@@ -1895,6 +2467,24 @@ export function App() {
     return true;
   }
 
+  function openPostEditor() {
+    setShowPostEditor(true);
+    void logEvent({
+      level: 'info',
+      category: 'editor.posteditor.open',
+      message: 'operator opened PostEditor-compatible editor panel',
+    });
+  }
+
+  function closePostEditor() {
+    setShowPostEditor(false);
+    void logEvent({
+      level: 'info',
+      category: 'editor.posteditor.close',
+      message: 'operator closed PostEditor-compatible editor panel',
+    });
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -1907,21 +2497,26 @@ export function App() {
         </div>
 
         <nav className="nav-list" aria-label="Principal">
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            return (
-              <button
-                className={activeSection === item.section ? 'nav-item active' : 'nav-item'}
-                type="button"
-                key={item.section}
-                aria-current={activeSection === item.section ? 'page' : undefined}
-                onClick={() => chooseSection(item.section)}
-              >
-                <Icon size={18} />
-                {item.label}
-              </button>
-            );
-          })}
+          {navGroups.map((group) => (
+            <div className="nav-group" key={group.label}>
+              <div className="nav-group-label">{group.label}</div>
+              {group.items.map((item) => {
+                const Icon = item.icon;
+                return (
+                  <button
+                    className={activeSection === item.section ? 'nav-item active' : 'nav-item'}
+                    type="button"
+                    key={item.section}
+                    aria-current={activeSection === item.section ? 'page' : undefined}
+                    onClick={() => chooseSection(item.section)}
+                  >
+                    <Icon size={18} />
+                    {item.label}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
         </nav>
 
         <div className="storage-strip">
@@ -2118,6 +2713,108 @@ export function App() {
                     ))}
                   </div>
                 </div>
+                <div className="session-controls" aria-label="Controles da sessao">
+                  <div className="control-row">
+                    <div>
+                      <span>Peers ativos</span>
+                      <strong>{activeAgentLabels}</strong>
+                    </div>
+                    <div className="initial-agent-buttons">
+                      {initialAgentOptions.map((option) => (
+                        <button
+                          className={activeAgents.includes(option.key) ? 'active' : ''}
+                          type="button"
+                          key={option.key}
+                          onClick={() => toggleActiveAgent(option.key)}
+                          aria-pressed={activeAgents.includes(option.key)}
+                          disabled={isRunPreparing || (activeAgents.length === 1 && activeAgents.includes(option.key))}
+                          title={option.detail}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {costRatesRequired && (
+                    <div className="session-warning" role="status">
+                      <AlertTriangle size={16} />
+                      <span>
+                        Tarifas obrigatorias para API pendentes:{' '}
+                        {agentsMissingCostRates
+                          .map((agent) => initialAgentOptions.find((option) => option.key === agent)?.label ?? agent)
+                          .join(', ')}
+                        .
+                      </span>
+                    </div>
+                  )}
+                  <div className="limit-grid">
+                    <label>
+                      <Clock3 size={16} />
+                      <span>Tempo max. min</span>
+                      <input
+                        value={maxSessionMinutes}
+                        onChange={(event) => setMaxSessionMinutes(event.target.value)}
+                        inputMode="numeric"
+                        placeholder="ignorar"
+                        disabled={isRunPreparing}
+                      />
+                    </label>
+                    <label>
+                      <Database size={16} />
+                      <span>Custo max. USD</span>
+                      <input
+                        value={maxSessionCostUsd}
+                        onChange={(event) => setMaxSessionCostUsd(event.target.value)}
+                        inputMode="decimal"
+                        placeholder="ignorar"
+                        disabled={isRunPreparing}
+                      />
+                    </label>
+                  </div>
+                  <div className="attachments-row">
+                    <label className="secondary-button attachment-button">
+                      <Upload size={16} />
+                      Anexos
+                      <input type="file" multiple onChange={(event) => void handlePromptAttachments(event)} disabled={isRunPreparing} />
+                    </label>
+                    <span>
+                      {promptAttachments.length.toLocaleString('pt-BR')} arquivo(s), {formatBytes(attachmentTotalBytes)}
+                    </span>
+                  </div>
+                  {promptAttachments.length > 0 && (
+                    <div className="attachment-list">
+                      {attachmentDeliveryPlans.map((plan) => {
+                        const hint = attachmentDeliveryHint(plan);
+                        return (
+                          <button
+                            type="button"
+                            key={`${plan.attachment.name}-${plan.attachment.size_bytes}`}
+                            onClick={() => removePromptAttachment(plan.attachment.name, plan.attachment.size_bytes)}
+                            disabled={isRunPreparing}
+                            title={`Remover anexo; previsao de entrega: ${hint}. A decisao final acontece no envio.`}
+                          >
+                            <span>
+                              {plan.attachment.name} · {formatBytes(plan.attachment.size_bytes)}
+                            </span>
+                            <small>{hint}</small>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  <label className="links-control">
+                    <span>
+                      <Globe2 size={16} />
+                      Links da sessao
+                    </span>
+                    <textarea
+                      value={sessionLinks}
+                      onChange={(event) => setSessionLinks(event.target.value)}
+                      placeholder="https://..."
+                      disabled={isRunPreparing}
+                    />
+                  </label>
+                </div>
                 <textarea
                   className="prompt-input"
                   value={editorialPrompt}
@@ -2273,33 +2970,44 @@ export function App() {
                   <p className="eyebrow">Editor integrado</p>
                   <h2>PostEditor parity</h2>
                 </div>
-                <span className="parity-badge">HTML MainSite</span>
+                {showPostEditor ? (
+                  <span className="parity-badge">HTML MainSite</span>
+                ) : (
+                  <button className="primary-button" type="button" onClick={openPostEditor}>
+                    <FilePlus2 size={18} />
+                    Criar Post
+                  </button>
+                )}
               </div>
-              <PostEditor
-                editingPostId={null}
-                initialTitle={sessionName}
-                initialAuthor="Leonardo Cardozo Vargas"
-                initialContent={mainSiteHtml}
-                initialIsPublished={false}
-                initialIsAboutSite={false}
-                savingPost={false}
-                showNotification={(message, type) =>
-                  void logEvent({
-                    level: type === 'error' ? 'error' : 'info',
-                    category: 'editor.posteditor.notification',
-                    message,
-                    context: { type },
-                  })
-                }
-                onSave={savePostEditorDraft}
-                onClose={() =>
-                  void logEvent({
-                    level: 'info',
-                    category: 'editor.posteditor.close',
-                    message: 'operator closed PostEditor-compatible editor panel',
-                  })
-                }
-              />
+              {showPostEditor && (
+                <Suspense
+                  fallback={
+                    <div className="posteditor-loading" role="status">
+                      Carregando editor...
+                    </div>
+                  }
+                >
+                  <PostEditor
+                    editingPostId={null}
+                    initialTitle={sessionName}
+                    initialAuthor="Leonardo Cardozo Vargas"
+                    initialContent={mainSiteHtml}
+                    initialIsPublished={false}
+                    initialIsAboutSite={false}
+                    savingPost={false}
+                    showNotification={(message, type) =>
+                      void logEvent({
+                        level: type === 'error' ? 'error' : 'info',
+                        category: 'editor.posteditor.notification',
+                        message,
+                        context: { type },
+                      })
+                    }
+                    onSave={savePostEditorDraft}
+                    onClose={closePostEditor}
+                  />
+                </Suspense>
+              )}
             </section>
           </>
         )}
@@ -2521,8 +3229,37 @@ export function App() {
         )}
 
         {activeSection === 'settings' && (
-          <section className="settings-grid" aria-label="Configuracoes operacionais">
-            <div className="panel settings-panel">
+          <section className="settings-layout" aria-label="Configuracoes operacionais">
+            <aside className="panel settings-nav-panel" aria-label="Areas de configuracao">
+              <div>
+                <p className="eyebrow">Configuracoes</p>
+                <h2>Ajustes do Maestro</h2>
+              </div>
+              <div className="settings-tabs">
+                {settingsTabs.map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <button
+                      className={activeSettingsTab === item.tab ? 'active' : ''}
+                      key={item.tab}
+                      type="button"
+                      aria-pressed={activeSettingsTab === item.tab}
+                      onClick={() => chooseSettingsTab(item.tab)}
+                    >
+                      <Icon size={18} />
+                      <span>
+                        <strong>{item.label}</strong>
+                        <em>{item.detail}</em>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </aside>
+
+            <div className="settings-content">
+              {activeSettingsTab === 'cloudflare' && (
+                <div className="panel settings-panel">
               <div className="panel-heading">
                 <div>
                   <p className="eyebrow">Ajustes</p>
@@ -2632,9 +3369,11 @@ export function App() {
                   </div>
                 ))}
               </div>
-            </div>
+                </div>
+              )}
 
-            <div className="panel settings-panel">
+              {activeSettingsTab === 'providers' && (
+                <div className="panel settings-panel">
               <div className="panel-heading">
                 <div>
                   <p className="eyebrow">Ajustes</p>
@@ -2655,6 +3394,14 @@ export function App() {
                     {mode === 'hybrid' ? 'Hibrido' : mode.toUpperCase()}
                   </button>
                 ))}
+              </div>
+              <div className="provider-mode-note">
+                <strong>Execucao API real por peer</strong>
+                <span>
+                  API usa os provedores oficiais para Claude, Codex, Gemini e DeepSeek. Hibrido usa API quando a
+                  chave esta configurada e CLI como alternativa; tarifas continuam obrigatorias para qualquer chamada
+                  de API.
+                </span>
               </div>
 
               <div className="ai-credential-list">
@@ -2678,6 +3425,49 @@ export function App() {
                     <em>{provider.meta}</em>
                   </div>
                 ))}
+              </div>
+
+              <div className="rate-card-panel" aria-label="Tabela de tarifas dos provedores">
+                <div>
+                  <strong>Tabela de tarifas</strong>
+                  <span>
+                    Valores em USD por 1M tokens. O limite de custo continua sendo unico por sessao; esta tabela
+                    apenas calcula e audita consumo observado. Sem fallback por env var.
+                  </span>
+                </div>
+                <div className="rate-card-table">
+                  <div className="rate-card-head" aria-hidden="true">
+                    <span>Provedor</span>
+                    <span>Entrada</span>
+                    <span>Saida</span>
+                  </div>
+                  {providerRateRows.map((provider) => (
+                    <div className="rate-card-row" key={provider.key}>
+                      <div>
+                        <strong>{provider.name}</strong>
+                        <span>{provider.hint}</span>
+                      </div>
+                      <label>
+                        <span>Entrada USD / 1M</span>
+                        <input
+                          inputMode="decimal"
+                          value={providerInputUsdPerMillion[provider.key]}
+                          onChange={(event) => updateProviderInputRate(provider.key, event.target.value)}
+                          placeholder="ex.: 0.55"
+                        />
+                      </label>
+                      <label>
+                        <span>Saida USD / 1M</span>
+                        <input
+                          inputMode="decimal"
+                          value={providerOutputUsdPerMillion[provider.key]}
+                          onChange={(event) => updateProviderOutputRate(provider.key, event.target.value)}
+                          placeholder="ex.: 2.19"
+                        />
+                      </label>
+                    </div>
+                  ))}
+                </div>
               </div>
 
               <div className="settings-status" role="status" aria-live="polite">
@@ -2722,6 +3512,8 @@ export function App() {
                   </div>
                 ))}
               </div>
+                </div>
+              )}
             </div>
           </section>
         )}

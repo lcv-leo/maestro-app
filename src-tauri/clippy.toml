@@ -1,0 +1,15 @@
+# Editorial spawn-funnel guard (Codex NB-5 from v0.3.15 cross-review).
+#
+# Direct `std::process::Command::new` calls bypass the central
+# `hidden_command` -> `resolved_command_builder` -> `apply_editorial_agent_environment`
+# pipeline that injects PYTHONUTF8/LC_ALL/LANG/GEMINI_CLI_TRUST_WORKSPACE,
+# CREATE_NO_WINDOW on Windows, and pipe-error classification. Bypassing
+# the funnel for an editorial CLI is exactly the "casca vazia" pattern
+# the operator coined: a UI/spec lever whose runtime ignores it.
+#
+# Legitimate exceptions (documented with `#[allow(clippy::disallowed_methods)]`):
+#   - `hidden_command` itself (the funnel entry point)
+#   - test fixtures in `mod tests`
+disallowed-methods = [
+    { path = "std::process::Command::new", reason = "Use hidden_command() / resolved_command_builder so all editorial spawns share the env+sandbox+pipe-classification pipeline. Allow with #[allow(clippy::disallowed_methods)] only inside hidden_command and unit tests." },
+]

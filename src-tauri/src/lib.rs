@@ -1,3 +1,16 @@
+// Editorial spawn-funnel guard: every editorial CLI launch must reach
+// `hidden_command` -> `resolved_command_builder` -> `apply_editorial_agent_environment`.
+// `clippy.toml` forbids direct `std::process::Command::new` calls; only
+// `hidden_command` itself and unit-test fixtures may bypass via
+// `#[allow(clippy::disallowed_methods)]`. (Codex NB-5 from v0.3.15.)
+//
+// Hardened to `deny` per cross-review-v2 R1 of session d4d7a9c1: `warn` was
+// casca vazia because `cargo clippy` already accumulates 17 unrelated warnings
+// that pass without failing CI, so a "warn" signal here would never block.
+// `deny` makes the build fail if a future commit introduces a direct
+// `Command::new` call outside the funnel.
+#![deny(clippy::disallowed_methods)]
+
 use chrono::{DateTime, Utc};
 use regex::Regex;
 use reqwest::{blocking::Client, redirect::Policy, Url};
@@ -707,7 +720,7 @@ fn open_data_file(path: String) -> Result<String, String> {
 
     #[cfg(not(windows))]
     {
-        let mut command = Command::new("xdg-open");
+        let mut command = hidden_command("xdg-open");
         command.arg(&checked);
         command
             .spawn()
@@ -1490,6 +1503,9 @@ fn create_log_session() -> LogSession {
 }
 
 fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    // SAFE-FUNNEL: this is the single allowed Command::new call site for editorial spawns.
+    // See `clippy.toml` and the `#![warn(clippy::disallowed_methods)]` at the top of this file.
+    #[allow(clippy::disallowed_methods)]
     let mut command = Command::new(program);
     apply_hidden_window_policy(&mut command);
     command
@@ -2072,6 +2088,7 @@ fn run_editorial_session_core(
     let agent_dir = checked_data_child_path(&session_dir.join("agent-runs"))?;
     fs::create_dir_all(&agent_dir)
         .map_err(|error| format!("failed to create session dir: {error}"))?;
+    let _finalize_guard = FinalizeRunningArtifactsGuard::new(agent_dir.clone());
 
     let saved_contract = load_session_contract(&session_dir);
     let (active_agent_keys, active_agents_source) = resolve_effective_active_agents(
@@ -2237,6 +2254,8 @@ fn run_editorial_session_core(
     let mut current_draft_path: Option<PathBuf> = None;
     let mut round = 1usize;
     let mut agent_review_fingerprints: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let mut consecutive_all_error_rounds: u32 = 0;
+    const ALL_ERROR_ESCALATION_THRESHOLD: u32 = 3;
 
     if let Some(invalid_initial_agent) = invalid_initial_agent {
         let _ = write_log_record(
@@ -2697,6 +2716,67 @@ fn run_editorial_session_core(
                     },
                 );
             }
+        }
+
+        let all_review_peers_in_error = !round_results.is_empty()
+            && round_results
+                .iter()
+                .all(|agent| agent.tone == "error" || agent.tone == "blocked");
+        if all_review_peers_in_error {
+            consecutive_all_error_rounds += 1;
+        } else {
+            consecutive_all_error_rounds = 0;
+        }
+        if consecutive_all_error_rounds >= ALL_ERROR_ESCALATION_THRESHOLD {
+            let _ = write_log_record(
+                log_session,
+                LogEventInput {
+                    level: "error".to_string(),
+                    category: "session.escalation.all_peers_failing".to_string(),
+                    message: "all review peers have been in error tone across N consecutive rounds; pausing session for operator review".to_string(),
+                    context: Some(json!({
+                        "run_id": &run_id,
+                        "round": round,
+                        "consecutive_all_error_rounds": consecutive_all_error_rounds,
+                        "threshold": ALL_ERROR_ESCALATION_THRESHOLD,
+                        "peer_statuses": round_results.iter()
+                            .map(|agent| json!({
+                                "agent": agent.name,
+                                "status": agent.status,
+                                "tone": agent.tone,
+                            }))
+                            .collect::<Vec<_>>(),
+                        "policy": "pause_for_operator_review_to_avoid_burning_quota_and_time"
+                    })),
+                },
+            );
+            let minutes_path = session_dir.join("ata-da-sessao.md");
+            write_text_file(
+                &minutes_path,
+                &build_session_minutes(request, &run_id, &agents, false, None),
+            )?;
+            let context = SessionResultContext {
+                run_id: &run_id,
+                session_dir: &session_dir,
+                prompt_path: &prompt_path,
+                protocol_path: &protocol_path,
+                active_agents: &active_agent_keys,
+                max_session_cost_usd,
+                max_session_minutes,
+                observed_cost_usd: cost_ledger.total_observed_cost_usd,
+                links_path: evidence.links_path.as_ref(),
+                attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
+                human_log_path: &human_log_path,
+            };
+            return Ok(editorial_session_result(
+                &context,
+                None,
+                &minutes_path,
+                current_draft_path,
+                agents,
+                false,
+                "ALL_PEERS_FAILING",
+            ));
         }
 
         round += 1;
@@ -4139,22 +4219,25 @@ fn run_deepseek_api_agent(
         },
     );
 
-    let response = client
-        .post("https://api.deepseek.com/chat/completions")
-        .bearer_auth(&api_key)
-        .json(&json!({
-            "model": model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "Voce e o peer DeepSeek dentro do Maestro Editorial AI. Leia integralmente o pedido do usuario, o protocolo editorial e os artefatos fornecidos. Responda somente ao que foi solicitado. Em revisoes, a primeira linha precisa seguir exatamente o contrato MAESTRO_STATUS."
-                },
-                { "role": "user", "content": prompt }
-            ],
-            "stream": false,
-            "max_tokens": max_tokens
-        }))
-        .send();
+    let body = json!({
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "Voce e o peer DeepSeek dentro do Maestro Editorial AI. Leia integralmente o pedido do usuario, o protocolo editorial e os artefatos fornecidos. Responda somente ao que foi solicitado. Em revisoes, a primeira linha precisa seguir exatamente o contrato MAESTRO_STATUS."
+            },
+            { "role": "user", "content": prompt }
+        ],
+        "stream": false,
+        "max_tokens": max_tokens
+    });
+    let response = send_with_retry(log_session, run_id, "deepseek", || {
+        client
+            .post("https://api.deepseek.com/chat/completions")
+            .bearer_auth(&api_key)
+            .json(&body)
+            .send()
+    });
 
     match response {
         Ok(response) => {
@@ -4375,17 +4458,20 @@ fn run_openai_api_agent(
         cost_guard.as_ref(),
     );
 
-    let response = client
-        .post("https://api.openai.com/v1/responses")
-        .bearer_auth(&api_key)
-        .json(&json!({
-            "model": model,
-            "instructions": editorial_api_system_prompt(name),
-            "input": input,
-            "max_output_tokens": max_tokens,
-            "store": false
-        }))
-        .send();
+    let body = json!({
+        "model": model,
+        "instructions": editorial_api_system_prompt(name),
+        "input": input,
+        "max_output_tokens": max_tokens,
+        "store": false
+    });
+    let response = send_with_retry(log_session, run_id, "openai", || {
+        client
+            .post("https://api.openai.com/v1/responses")
+            .bearer_auth(&api_key)
+            .json(&body)
+            .send()
+    });
     match response {
         Ok(response) => {
             let endpoint = "https://api.openai.com/v1/responses";
@@ -4565,19 +4651,22 @@ fn run_anthropic_api_agent(
         cost_guard.as_ref(),
     );
 
-    let response = client
-        .post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key", &api_key)
-        .header("anthropic-version", "2023-06-01")
-        .json(&json!({
-            "model": model,
-            "max_tokens": max_tokens,
-            "system": editorial_api_system_prompt(name),
-            "messages": [
-                { "role": "user", "content": content }
-            ]
-        }))
-        .send();
+    let body = json!({
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": editorial_api_system_prompt(name),
+        "messages": [
+            { "role": "user", "content": content }
+        ]
+    });
+    let response = send_with_retry(log_session, run_id, "anthropic", || {
+        client
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", &api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&body)
+            .send()
+    });
     match response {
         Ok(response) => {
             let endpoint = "https://api.anthropic.com/v1/messages";
@@ -4759,24 +4848,27 @@ fn run_gemini_api_agent(
 
     let endpoint =
         format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent");
-    let response = client
-        .post(&endpoint)
-        .query(&[("key", &api_key)])
-        .json(&json!({
-            "systemInstruction": {
-                "parts": [{ "text": editorial_api_system_prompt(name) }]
-            },
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": parts
-                }
-            ],
-            "generationConfig": {
-                "maxOutputTokens": max_tokens
+    let body = json!({
+        "systemInstruction": {
+            "parts": [{ "text": editorial_api_system_prompt(name) }]
+        },
+        "contents": [
+            {
+                "role": "user",
+                "parts": parts
             }
-        }))
-        .send();
+        ],
+        "generationConfig": {
+            "maxOutputTokens": max_tokens
+        }
+    });
+    let response = send_with_retry(log_session, run_id, "gemini", || {
+        client
+            .post(&endpoint)
+            .query(&[("key", &api_key)])
+            .json(&body)
+            .send()
+    });
     match response {
         Ok(response) => {
             let http_status = response.status();
@@ -4912,6 +5004,98 @@ fn build_api_client(timeout: Option<Duration>) -> Result<Client, reqwest::Error>
         client_builder = client_builder.timeout(timeout);
     }
     client_builder.build()
+}
+
+const PROVIDER_RETRY_MAX_ATTEMPTS: u32 = 2;
+const PROVIDER_RETRY_NETWORK_BACKOFF_MS: u64 = 1500;
+const PROVIDER_RETRY_429_DEFAULT_SECS: u64 = 30;
+const PROVIDER_RETRY_429_CAP_SECS: u64 = 120;
+
+/// Parse the Retry-After header per RFC 7231: either a delta-seconds integer
+/// or an HTTP-date. Returns None if absent or unparseable.
+fn parse_retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    if let Ok(seconds) = value.trim().parse::<u64>() {
+        return Some(seconds);
+    }
+    if let Ok(date) = chrono::DateTime::parse_from_rfc2822(value.trim()) {
+        let now = chrono::Utc::now();
+        let delta = date.with_timezone(&chrono::Utc) - now;
+        return Some(delta.num_seconds().max(0) as u64);
+    }
+    None
+}
+
+/// Send a provider HTTP request with bounded retry on transient network errors
+/// (1 retry, 1.5s backoff) and on HTTP 429 responses (up to 2 retries respecting
+/// `Retry-After` header, capped at 120s). Non-transient errors and non-429 HTTP
+/// responses are returned unchanged.
+fn send_with_retry<F>(
+    log_session: &LogSession,
+    run_id: &str,
+    provider_label: &str,
+    mut make_request: F,
+) -> Result<reqwest::blocking::Response, reqwest::Error>
+where
+    F: FnMut() -> Result<reqwest::blocking::Response, reqwest::Error>,
+{
+    let mut attempt = 1u32;
+    loop {
+        let result = make_request();
+        match result {
+            Ok(response) => {
+                if response.status().as_u16() == 429 && attempt < PROVIDER_RETRY_MAX_ATTEMPTS {
+                    let retry_after = parse_retry_after_header(response.headers())
+                        .unwrap_or(PROVIDER_RETRY_429_DEFAULT_SECS)
+                        .min(PROVIDER_RETRY_429_CAP_SECS);
+                    let _ = write_log_record(
+                        log_session,
+                        LogEventInput {
+                            level: "warn".to_string(),
+                            category: "session.provider.retry_after_429".to_string(),
+                            message: "provider returned HTTP 429; sleeping until retry".to_string(),
+                            context: Some(json!({
+                                "run_id": run_id,
+                                "provider": provider_label,
+                                "attempt": attempt,
+                                "retry_after_seconds": retry_after,
+                                "retry_after_source": parse_retry_after_header(response.headers())
+                                    .map(|_| "header")
+                                    .unwrap_or("default"),
+                            })),
+                        },
+                    );
+                    std::thread::sleep(Duration::from_secs(retry_after));
+                    attempt += 1;
+                    continue;
+                }
+                return Ok(response);
+            }
+            Err(error) if attempt < PROVIDER_RETRY_MAX_ATTEMPTS => {
+                let _ = write_log_record(
+                    log_session,
+                    LogEventInput {
+                        level: "warn".to_string(),
+                        category: "session.provider.retry_network".to_string(),
+                        message: "provider network error; retrying after backoff".to_string(),
+                        context: Some(json!({
+                            "run_id": run_id,
+                            "provider": provider_label,
+                            "attempt": attempt,
+                            "backoff_ms": PROVIDER_RETRY_NETWORK_BACKOFF_MS,
+                            "error": sanitize_text(&error.to_string(), 240),
+                            "error_is_timeout": error.is_timeout(),
+                            "error_is_connect": error.is_connect(),
+                        })),
+                    },
+                );
+                std::thread::sleep(Duration::from_millis(PROVIDER_RETRY_NETWORK_BACKOFF_MS));
+                attempt += 1;
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn editorial_api_system_prompt(agent_name: &str) -> String {
@@ -5618,9 +5802,10 @@ fn run_editorial_agent(
             } else {
                 "DRAFT_CREATED"
             };
-            let tone = if result.timed_out {
-                "error"
-            } else if status == "AGENT_FAILED_EMPTY" || status == "AGENT_FAILED_NO_OUTPUT" {
+            let tone = if result.timed_out
+                || status == "AGENT_FAILED_EMPTY"
+                || status == "AGENT_FAILED_NO_OUTPUT"
+            {
                 "error"
             } else if result.output.status.success()
                 && (status == "READY" || status == "DRAFT_CREATED")
@@ -5925,6 +6110,38 @@ fn review_complaint_fingerprint(artifact: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     head.hash(&mut hasher);
     hasher.finish()
+}
+
+/// RAII guard that runs `finalize_running_agent_artifacts(&self.agent_dir)` from
+/// its Drop impl. This makes the RUNNING-placeholder cleanup pass fire on every
+/// exit path of the session loop, including panics and early `?` returns —
+/// closing the gap that the v0.3.15 hook in `editorial_session_result(...)` left
+/// open by only running when the result struct was successfully built. The
+/// finalize routine is idempotent, so when both this guard and the
+/// `editorial_session_result` call fire on a normal completion path the second
+/// pass is a no-op (Codex NB-2 from the v0.3.15 cross-review handoff).
+struct FinalizeRunningArtifactsGuard {
+    agent_dir: PathBuf,
+}
+
+impl FinalizeRunningArtifactsGuard {
+    fn new(agent_dir: PathBuf) -> Self {
+        Self { agent_dir }
+    }
+}
+
+impl Drop for FinalizeRunningArtifactsGuard {
+    fn drop(&mut self) {
+        // Wrap in catch_unwind so an unforeseen panic inside the finalize routine
+        // (today: none, since all `Result` returns are swallowed via `let _ = `
+        // and `if let Ok(...)` patterns) cannot escape the Drop while the stack
+        // is already unwinding from another panic. A panic-during-unwind is
+        // process abort by default; this guard renders that abort impossible.
+        let agent_dir = self.agent_dir.clone();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            finalize_running_agent_artifacts(&agent_dir);
+        }));
+    }
 }
 
 /// Final-pass safety net for agent-runs/*.md files left at `Status: RUNNING`.
@@ -6635,7 +6852,7 @@ fn extract_public_urls(text: &str) -> Vec<String> {
     for matched in regex.find_iter(text).take(80) {
         let cleaned = matched
             .as_str()
-            .trim_end_matches(|character: char| matches!(character, '.' | ',' | ';' | ':'))
+            .trim_end_matches(['.', ',', ';', ':'])
             .to_string();
         if is_public_http_url(&cleaned) {
             urls.insert(cleaned);
@@ -8874,6 +9091,72 @@ mod tests {
     }
 
     #[test]
+    fn finalize_running_artifacts_drop_guard_runs_on_panic() {
+        use std::panic::AssertUnwindSafe;
+        let session_dir = sessions_dir().join("run-finalize-drop-guard-test");
+        let _ = fs::remove_dir_all(&session_dir);
+        let agent_dir = session_dir.join("agent-runs");
+        fs::create_dir_all(&agent_dir).unwrap();
+        let stuck_path = agent_dir.join("round-099-codex-review.md");
+        write_text_file(
+            &stuck_path,
+            "# Codex - review\n\n- CLI: `codex`\n- Status: `RUNNING`\n- Exit code: `unknown`\n\n## Stdout\n\n```text\n\n```\n",
+        )
+        .unwrap();
+
+        let agent_dir_clone = agent_dir.clone();
+        let panic_caught = std::panic::catch_unwind(AssertUnwindSafe(move || {
+            let _guard = FinalizeRunningArtifactsGuard::new(agent_dir_clone);
+            panic!("simulating mid-session panic");
+        }));
+        assert!(panic_caught.is_err(), "panic must propagate");
+
+        let after = read_text_file(&stuck_path).unwrap();
+        assert!(
+            after.contains("- Status: `AGENT_FAILED_NO_OUTPUT`"),
+            "Drop guard must rewrite RUNNING placeholder even on panic; got: {after}"
+        );
+        let _ = fs::remove_dir_all(&session_dir);
+    }
+
+    #[test]
+    fn parse_retry_after_header_reads_delta_seconds() {
+        use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("42"));
+        assert_eq!(parse_retry_after_header(&headers), Some(42));
+    }
+
+    #[test]
+    fn parse_retry_after_header_reads_http_date() {
+        use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+        let future = chrono::Utc::now() + chrono::Duration::seconds(45);
+        let value = future.to_rfc2822();
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_str(&value).unwrap());
+        let parsed = parse_retry_after_header(&headers).expect("date should parse");
+        assert!(
+            (43..=47).contains(&parsed),
+            "expected ~45s until reset, got {parsed}"
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_header_returns_none_when_absent() {
+        use reqwest::header::HeaderMap;
+        let headers = HeaderMap::new();
+        assert_eq!(parse_retry_after_header(&headers), None);
+    }
+
+    #[test]
+    fn parse_retry_after_header_returns_none_for_garbage() {
+        use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("never"));
+        assert_eq!(parse_retry_after_header(&headers), None);
+    }
+
+    #[test]
     fn classify_pipe_error_recognises_windows_109_as_broken_pipe() {
         let error = std::io::Error::from_raw_os_error(109);
         let classification = classify_pipe_error(&error);
@@ -8890,6 +9173,7 @@ mod tests {
 
     #[test]
     fn editorial_agent_environment_sets_utf8_for_all_clis() {
+        #[allow(clippy::disallowed_methods)]
         let mut command = std::process::Command::new("printf");
         let path = Path::new("printf");
         apply_editorial_agent_environment(&mut command, path);
@@ -8912,6 +9196,7 @@ mod tests {
 
     #[test]
     fn editorial_agent_environment_sets_gemini_trust_only_for_gemini_cli() {
+        #[allow(clippy::disallowed_methods)]
         let mut command = std::process::Command::new("gemini");
         let path = Path::new("gemini");
         apply_editorial_agent_environment(&mut command, path);

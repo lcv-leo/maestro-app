@@ -4,6 +4,31 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.16] - 2026-05-02
+
+Patch release fechando 4 bugs reais surfaceados em logs de produção da v0.3.15 + 2 hardenings (NB-2/NB-5) + clippy hygiene (A+B do parecer pós-v0.3.15). Operator analisou `data/logs/maestro-2026-05-01T18-01-15Z-pid28124.ndjson` rodando v0.3.15 e confirmou: B11 ficou parcialmente casca-vazia + 3 novos bugs (B13/B14/B15). Codex emitiu parecer pedindo NB-2 + NB-5 prioritários.
+
+### Fixed
+- **B11 regressão de v0.3.15.** Operator confirmou: "selecionei apenas DeepSeek, mas todos rodaram." Root cause: `App.tsx:1661` (`startResumeSession`) chamava `runRealEditorialSession` com apenas 3 argumentos posicionais — `runOptions` ficava `undefined`, o resume invoke enviava `active_agents: null`, e o backend caía no saved_contract (que tinha os 4 originais). A v0.3.15 fechou o lado backend (`#[serde(default)]`, log `active_agents_resolved`) mas deixou o callsite frontend incompleto. v0.3.16 expande `startResumeSession` para invocar `currentSessionRunOptions()` e propagar `selectedInitialAgent` + `runOptions` de fato. Falha de validação (peers fora dos limites) bloqueia o resume com `setOperation({ status: 'blocked', ... })` em vez de avançar com estado inválido.
+- **B13 PROVIDER_NETWORK_ERROR sem retry.** Logs mostravam todos os 4 peers timing out em ~30s sequencialmente, sem retry, perdendo rodadas inteiras a cada blip de rede. Novo helper `send_with_retry(log_session, run_id, provider_label, make_request)` em `lib.rs` envolve cada call site (DeepSeek, OpenAI, Anthropic, Gemini) com 1 retry pós-1.5s backoff em qualquer `Err` de `.send()`. Limita o desperdício a 3s extras por agente em pior caso, recupera transient flakiness em melhor caso. Logs `session.provider.retry_network` warn registram cada retry com `error_is_timeout` / `error_is_connect` flags do reqwest.
+- **B14 HTTP 429 sem respeitar Retry-After.** Mesma sessão mostrava Claude retornando 429 às 18:03:10 e Maestro re-tentando 90 segundos depois → 429 novamente. `send_with_retry` agora detecta `response.status() == 429` e dorme por `parse_retry_after_header(headers)` (delta-seconds OU HTTP-date RFC 2822), default 30s, cap 120s. Logs `session.provider.retry_after_429` warn registram a fonte (`header` vs `default`) para auditoria post-hoc.
+- **B15 loop infinito em rounds all-error.** Logs mostravam round 74, 75, 76 com todos os 4 peers em tone=error/blocked sem nenhuma escalada. Novo contador `consecutive_all_error_rounds` em `run_editorial_session_inner` incrementa quando `round_results.iter().all(|r| r.tone == "error" || r.tone == "blocked")` e reseta quando ao menos um peer foi ok/warn. Após 3 rounds consecutivos all-error, emite `session.escalation.all_peers_failing` (level=error NDJSON com peer statuses snapshot) e retorna `EditorialSessionResult` com status `ALL_PEERS_FAILING`, pausando a sessão para revisão do operator em vez de queimar quota e tempo.
+
+### Added (Codex NB-2/NB-5 hardenings)
+- **NB-2 finalize-running Drop guard.** `FinalizeRunningArtifactsGuard` (RAII) é instanciado no início de `run_editorial_session_inner` com `_finalize_guard = FinalizeRunningArtifactsGuard::new(agent_dir.clone())`. O `Drop` impl chama `finalize_running_agent_artifacts(&self.agent_dir)`, garantindo que `Status: RUNNING` placeholders sejam reescritos para `AGENT_FAILED_NO_OUTPUT` em todos os exit paths — incluindo `?` early returns e panics, que a hook em `editorial_session_result` da v0.3.15 não cobria. `finalize_running_agent_artifacts` permanece idempotente, então o duplo-passo no caminho normal (Drop + chamada explícita em `editorial_session_result`) é no-op no segundo. Teste novo `finalize_running_artifacts_drop_guard_runs_on_panic` usa `std::panic::catch_unwind` para provar que o Drop dispara mesmo em panic mid-session.
+- **NB-5 spawn-funnel lint guard.** Novo `src-tauri/clippy.toml` com `disallowed-methods = [{ path = "std::process::Command::new", reason = "..." }]`. `lib.rs` ganha `#![warn(clippy::disallowed_methods)]` no topo. `hidden_command` (a única entrada legítima do funil editorial) e dois test fixtures recebem `#[allow(clippy::disallowed_methods)]` com comentário SAFE-FUNNEL. Qualquer futuro `Command::new` direto em `lib.rs` ou módulos relacionados dispara warn no `cargo clippy` (que já é gate). Substitui também o único `Command::new("xdg-open")` direto restante (linha 712 anterior) por `hidden_command("xdg-open")` para unificar o pattern em todos os OSes.
+
+### Hygiene (advisor recommendation A+B aplicada)
+- `manual_pattern_char_comparison` em `lib.rs:6840`: `matches!(char, '.' | ',' | ';' | ':')` colapsado para `['.', ',', ';', ':']` array literal.
+- `if_same_then_else` em `lib.rs:5799-5811` (código próprio v0.3.15 do tone derivation B2): `timed_out` e `AGENT_FAILED_EMPTY/AGENT_FAILED_NO_OUTPUT` retornavam ambos "error" em arms separados; merged em uma única condição `||`. Sem perda de legibilidade.
+- Clippy warnings: 19 → 17 (2 idiom fixes aplicados; demais 17 são `too_many_arguments` em código autoral de fases anteriores, deferred para o split planejado de `lib.rs` per `docs/code-split-plan.md`).
+
+### Validation
+- `cargo test`: **66 passed** (5 new + 61 existing). Novos: `finalize_running_artifacts_drop_guard_runs_on_panic`, `parse_retry_after_header_reads_delta_seconds`, `parse_retry_after_header_reads_http_date`, `parse_retry_after_header_returns_none_when_absent`, `parse_retry_after_header_returns_none_for_garbage`.
+- `npm run typecheck`: clean.
+- `npm run build`: clean (~1s, 2434 modules).
+- `cargo clippy --no-deps`: 17 warnings (todos pré-existentes de `too_many_arguments` ou já anotados com `#[allow(clippy::too_many_arguments)]` em `build_active_agents_resolved_log_context`).
+
 ## [v0.3.15] - 2026-05-02
 
 ### Fixed — session-log-driven anti-"casca vazia" sweep (12 distinct bugs across run-2026-04-26)

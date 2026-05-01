@@ -723,6 +723,7 @@ function humanizeAgentStatus(status: string) {
   if (normalized === 'TIME_LIMIT_REACHED') return 'Limite de tempo atingido';
   if (normalized === 'COST_LIMIT_REACHED') return 'Limite de custo atingido';
   if (normalized === 'PAUSED_COST_RATES_MISSING') return 'Tarifas de custo ausentes';
+  if (normalized === 'ALL_PEERS_FAILING') return 'Todos os peers em erro';
   if (normalized === 'PAUSED_WITH_REAL_AGENT_OUTPUTS') return 'Aguardando ajustes';
   return status
     .replace(/_/g, ' ')
@@ -1613,6 +1614,26 @@ export function App() {
     setSessionRunId(session.run_id);
     setSessionName(session.session_name);
     const protocolOverride = resumeProtocolOptions(useLoadedProtocol);
+    let resumeRunOptions: SessionRunOptions;
+    try {
+      resumeRunOptions = currentSessionRunOptions();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setOperation({
+        title: 'Retomada bloqueada',
+        progress: 0,
+        current: message,
+        eta: 'Ajuste a configuracao de peers e tente novamente.',
+        status: 'blocked',
+      });
+      void logEvent({
+        level: 'error',
+        category: 'session.resume.run_options_invalid',
+        message: 'resume aborted because UI peers/caps state is invalid',
+        context: { run_id: session.run_id, error: message },
+      });
+      return;
+    }
     setOperation({
       title: 'Retomando sessao editorial',
       progress: 32,
@@ -1658,10 +1679,20 @@ export function App() {
       },
     });
 
-    await runRealEditorialSession(session.run_id, '', {
-      ...protocolOverride,
-      nextRound: session.next_round,
-    });
+    const resumeInitialAgent: InitialAgentKey = resumeRunOptions.activeAgents.includes(initialAgent)
+      ? initialAgent
+      : (resumeRunOptions.activeAgents[0] ?? initialAgent);
+
+    await runRealEditorialSession(
+      session.run_id,
+      '',
+      {
+        ...protocolOverride,
+        nextRound: session.next_round,
+      },
+      resumeInitialAgent,
+      resumeRunOptions,
+    );
   }
 
   function toggleActiveAgent(agent: InitialAgentKey) {
@@ -2192,6 +2223,8 @@ export function App() {
               ? 'O limite de custo opcional foi atingido antes de nova chamada paga. A entrega segue indisponivel.'
               : result.status === 'PAUSED_COST_RATES_MISSING'
               ? 'Um peer via API esta selecionado, mas suas tarifas de entrada e saida ainda nao foram configuradas em Configuracoes > Agentes via API.'
+              : result.status === 'ALL_PEERS_FAILING'
+              ? 'Todos os peers ativos retornaram erro em 3 rodadas consecutivas. Sessao pausada para nao queimar quota e tempo. Verifique conectividade, chaves de API e quotas; depois retome.'
               : 'A sessao nao entregou texto final nesta chamada. Divergencias exigem novas rodadas ate unanimidade.',
           eta: `Ata: ${result.session_minutes_path}`,
           status: 'paused',

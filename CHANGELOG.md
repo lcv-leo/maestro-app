@@ -4,6 +4,25 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.30] - 2026-05-02
+
+Pure refactor — no behavior change. Continues migration step 5 by extracting AI provider credential probes (4 providers + helpers) into a dedicated module.
+
+### Changed (extracted to `src-tauri/src/ai_probes.rs`, ~205 lines with doc header, 8 functions)
+- `pub(crate) fn run_ai_provider_probe` — top-level entry that builds the HTTP client once.
+- 4 per-provider probes: `probe_openai_api`, `probe_anthropic_api`, `probe_gemini_api`, `probe_deepseek_api`.
+- Internal helpers: `missing_provider_key_row`, `summarize_ai_probe_response`, `ai_probe_row`.
+
+### `pub(crate)` visibility upgrades in `lib.rs`
+- `pub(crate) struct AiProviderProbeRow` + 3 fields.
+- `pub(crate) struct AiProviderProbeResult` + 2 fields.
+
+### Validation
+- `cargo test`: 74 passed.
+- `npm run typecheck` + `npm run build`: clean.
+- `lib.rs`: 6137 → 5973 lines (−164 deleted via 3 sed ranges: `'3916,3926d;3828,3887d;3720,3812d'`).
+- ZERO-line byte-parity diff vs v0.3.29 (commit fd77a4c) on all 3 ranges (`exit=0` × 3).
+
 ## [v0.3.29] - 2026-05-02
 
 Pure refactor — no behavior change. Continues migration step 5 by extracting the resumable-session inspection + agent-runs/* artifact reading helpers into a dedicated module.

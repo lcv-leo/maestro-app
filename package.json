@@ -24,7 +24,7 @@
     "vite": "8.0.10"
   },
   "dependencies": {
-    "@tauri-apps/api": "2.10.1",
+    "@tauri-apps/api": "2.11.0",
     "@tiptap/core": "3.22.5",
     "@tiptap/extension-character-count": "3.22.5",
     "@tiptap/extension-code-block-lowlight": "3.22.5",

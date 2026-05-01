@@ -4,6 +4,39 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.23] - 2026-05-02
+
+Pure refactor — no behavior change. Begins `docs/code-split-plan.md` migration step 4 ("Cloudflare D1 and Secrets Store operations") by extracting the Cloudflare client + probe + D1 + Secrets Store surface into a dedicated module.
+
+### Changed (extracted to `src-tauri/src/cloudflare.rs`, ~960 lines with doc header)
+- HTTP layer: `cloudflare_client`, `cloudflare_get`, `cloudflare_post_json`, `cloudflare_patch_json`, `cloudflare_get_paginated_results`, `cloudflare_page_path`, `cloudflare_verify_path`, `cloudflare_token_kind`, `cloudflare_error_summary`.
+- Token resolution: `token_from_probe_request`, `token_source_label`, `cloudflare_token_from_provider_request`.
+- JSON helpers: `cloudflare_result_names`, `cloudflare_result_id_for_name`, `cloudflare_store_records`, `cloudflare_store_for_target_or_existing`, `cloudflare_secret_ids_by_name`, `cloudflare_secret_id_from_response`, `cloudflare_created_result_id`, `CloudflareStoreRecord` struct.
+- D1 + Secrets Store ensure logic: `ensure_cloudflare_d1_database`, `ensure_cloudflare_secret_store`, `provision_maestro_d1_schema`, `link_secret_store_reference`.
+- AI provider bridge: `ai_provider_secret_values`, `upsert_ai_provider_secrets`, `write_ai_provider_metadata_to_cloudflare`.
+- Probe entry point: `run_cloudflare_probe`, `probe_row`.
+
+### `pub(crate)` visibility upgrades in `lib.rs` (consumed by `cloudflare.rs`)
+- `pub(crate) fn env_value_with_scope` (used by token resolvers in cloudflare.rs).
+- `pub(crate) struct CloudflareProbeRequest` + 6 fields.
+- `pub(crate) struct CloudflareProbeRow` + 3 fields.
+- `pub(crate) struct CloudflareProbeResult` + 1 field.
+- `pub(crate) struct CloudflareProviderStorageRequest` + 5 fields.
+
+### Stayed in `lib.rs`
+- `cloudflare_env_snapshot`, `verify_cloudflare_credentials` (Tauri commands — must stay because of `tauri::generate_handler!` registration).
+- `persist_ai_provider_cloudflare_marker`, `persist_ai_provider_config_to_cloudflare`, `enrich_ai_provider_config_from_cloudflare`, `read_ai_provider_cloudflare_metadata` (AI provider <-> Cloudflare bridges).
+- `tests::secrets_store_selection_*`, `tests::routes_*_tokens_to_*_verify_endpoint`, `tests::ai_provider_secret_values_use_cloudflare_safe_names` (kept in `lib.rs::tests`; functions re-imported via `use crate::cloudflare::{cloudflare_page_path, cloudflare_store_for_target_or_existing, cloudflare_verify_path}`).
+
+### Validation
+- `cargo test`: 74 passed, 0 failed (zero regression).
+- `npm run typecheck`: clean.
+- `npm run build`: clean, 1.17s, 2434 modules transformed (PostEditor chunk-size warning is pre-existing).
+- `lib.rs`: 8236 → 7260 lines (−976). `cloudflare.rs`: ~960 lines new.
+
+### Operational notes
+- Followed advisor's "delete first, edit second" sequence: built `cloudflare.rs` before any `lib.rs` mutation, then captured fresh line numbers immediately before a single `sed -i 5250,6225d` deletion (976 lines), then added `mod` + `use` + `pub(crate)` upgrades. Same workflow that made v0.3.22 succeed in 2 cross-review rounds vs v0.3.21's 5.
+
 ## [v0.3.22] - 2026-05-02
 
 Pure refactor — no behavior change. Continues `docs/code-split-plan.md` migration step 3 by bundling the 3 isomorphic provider runners (OpenAI / Anthropic / Gemini) and their shared helper family into a single new module. v0.3.21 already extracted DeepSeek (the structural outlier). With v0.3.22, all 4 per-provider runners are out of `lib.rs`.

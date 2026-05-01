@@ -97,6 +97,7 @@ src/
 - 2026-05-01: extracted native human-log projection helpers into `src-tauri/src/human_logs.rs`.
 - 2026-05-01: extracted selected-peer, optional limit, and provider cost helpers into `src-tauri/src/session_controls.rs`.
 - 2026-05-01: converted the MainSite-compatible PostEditor parity surface from a static `App.tsx` import into an on-demand lazy import opened by `Criar Post`, matching the admin-app loading pattern.
+- 2026-05-02 (v0.3.17): extracted `APP_ROOT` static + 18 path resolution and safety helpers (`app_root`, `data_dir`, `sessions_dir`, `checked_data_child_path`, `sanitize_path_segment`, `is_safe_data_file_name`, `safe_run_id_from_entry`, etc.) into `src-tauri/src/app_paths.rs`. `initialize_app_root` (Tauri-bound) and the panic/crash record helpers stayed in `lib.rs` because they touch the runtime or compose JSON records using `Utc`/`serde_json`/`sanitize_text`. lib.rs went from 9759 → 9632 lines. Migration order step 2 partially complete; logging extraction (`logging.rs`) is the next target for the same step.
 
 ## Rules
 

@@ -21,7 +21,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     process::{self, Command, Output, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -32,9 +32,24 @@ use std::{
 };
 use tauri::Manager;
 
+mod app_paths;
 mod human_logs;
 mod session_controls;
 mod session_evidence;
+
+// Re-export the app_paths surface used throughout this file. The functions
+// keep their pre-extraction call sites (`sessions_dir()`, `app_root()`, etc.)
+// untouched; only the home of the implementation moved per
+// `docs/code-split-plan.md`. See `app_paths.rs` for documentation.
+use crate::app_paths::{
+    active_or_early_logs_dir, ai_provider_config_path, app_root, app_root_if_initialized,
+    bootstrap_config_path, checked_data_child_path, data_dir, human_log_path_for,
+    is_safe_data_file_name, logs_dir, resolve_portable_app_root, safe_run_id_from_entry,
+    sanitize_path_segment, sessions_dir, try_set_app_root,
+};
+// Items below are only referenced from `mod tests` and cargo flags them as unused
+// when compiled without the test cfg. Re-importing inside the test module avoids
+// `#[cfg(test)]` annotations on the main use list.
 
 #[cfg(test)]
 use human_logs::should_collapse_human_log_event;
@@ -53,7 +68,8 @@ use session_evidence::{
 };
 
 static NATIVE_LOG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-static APP_ROOT: OnceLock<PathBuf> = OnceLock::new();
+// `APP_ROOT` lives in `app_paths::APP_ROOT`; access via `app_paths::app_root()`,
+// `app_paths::try_set_app_root(..)`, and `app_paths::app_root_if_initialized()`.
 const API_NATIVE_ATTACHMENT_MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -1277,62 +1293,11 @@ fn list_resumable_sessions_blocking(
     Ok(sessions)
 }
 
-fn app_root() -> PathBuf {
-    if let Some(path) = APP_ROOT.get() {
-        return path.clone();
-    }
-
-    #[cfg(test)]
-    {
-        return PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("maestro-editorial-ai-tests");
-    }
-
-    #[cfg(not(test))]
-    {
-        panic!("Maestro app root must be initialized by Tauri setup before use");
-    }
-}
-
 fn initialize_app_root(app: &tauri::App) -> Result<(), String> {
     let _ = app;
     let root = resolve_portable_app_root()?;
-    let _ = APP_ROOT.set(root);
+    try_set_app_root(root);
     Ok(())
-}
-
-fn resolve_portable_app_root() -> Result<PathBuf, String> {
-    let exe = std::env::current_exe()
-        .map_err(|error| format!("failed to resolve current executable path: {error}"))?;
-    portable_root_from_exe_path(&exe)
-}
-
-fn portable_root_from_exe_path(exe: &Path) -> Result<PathBuf, String> {
-    let parent = exe
-        .parent()
-        .ok_or_else(|| "current executable path has no parent directory".to_string())?;
-    parent
-        .canonicalize()
-        .map_err(|error| format!("failed to canonicalize portable executable dir: {error}"))
-}
-
-fn early_logs_dir() -> PathBuf {
-    resolve_portable_app_root()
-        .unwrap_or_else(|_| {
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join("maestro-editorial-ai")
-        })
-        .join("data")
-        .join("logs")
-}
-
-fn active_or_early_logs_dir() -> PathBuf {
-    APP_ROOT
-        .get()
-        .map(|root| root.join("data").join("logs"))
-        .unwrap_or_else(early_logs_dir)
 }
 
 fn install_process_panic_hook() {
@@ -1389,107 +1354,12 @@ fn write_early_crash_record(payload: &str, location: Option<&str>) -> Result<(),
             "pid": process::id(),
             "cwd": std::env::current_dir().ok().map(|path| path.to_string_lossy().to_string()),
             "current_exe": std::env::current_exe().ok().map(|path| path.to_string_lossy().to_string()),
-            "app_root": APP_ROOT.get().map(|path| path.to_string_lossy().to_string())
+            "app_root": app_root_if_initialized().map(|path| path.to_string_lossy().to_string())
         }
     });
     let bytes = serde_json::to_vec_pretty(&record)
         .map_err(|error| format!("failed to serialize early crash log: {error}"))?;
     fs::write(&path, bytes).map_err(|error| format!("failed to write early crash log: {error}"))
-}
-
-fn data_dir() -> PathBuf {
-    app_root().join("data")
-}
-
-fn logs_dir() -> PathBuf {
-    data_dir().join("logs")
-}
-
-fn human_logs_dir() -> PathBuf {
-    logs_dir().join("human")
-}
-
-fn human_log_path_for(raw_log_path: &Path) -> PathBuf {
-    let stem = raw_log_path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("maestro-log");
-    human_logs_dir().join(format!("{stem}.log"))
-}
-
-fn config_dir() -> PathBuf {
-    data_dir().join("config")
-}
-
-fn bootstrap_config_path() -> PathBuf {
-    config_dir().join("bootstrap.json")
-}
-
-fn ai_provider_config_path() -> PathBuf {
-    config_dir().join("ai-providers.json")
-}
-
-pub(crate) fn sessions_dir() -> PathBuf {
-    data_dir().join("sessions")
-}
-
-pub(crate) fn checked_data_child_path(path: &Path) -> Result<PathBuf, String> {
-    if !path.is_absolute() {
-        return Err("internal data path must be absolute".to_string());
-    }
-
-    let data_root = data_dir();
-    fs::create_dir_all(&data_root)
-        .map_err(|error| format!("failed to create Maestro data root: {error}"))?;
-    let relative = path
-        .strip_prefix(&data_root)
-        .map_err(|_| "internal data path escaped Maestro data directory".to_string())?;
-
-    if !is_safe_relative_data_path(relative) {
-        return Err("internal data path contains unsafe segments".to_string());
-    }
-
-    Ok(data_root.join(relative))
-}
-
-fn is_safe_relative_data_path(path: &Path) -> bool {
-    path.components().all(|component| match component {
-        Component::Normal(value) => value.to_str().map(is_safe_data_file_name).unwrap_or(false),
-        _ => false,
-    })
-}
-
-fn is_safe_data_file_name(value: &str) -> bool {
-    // General data filenames may contain dots for extensions; run IDs stay stricter
-    // through sanitize_path_segment because they become directory names.
-    !value.is_empty()
-        && value != "."
-        && value != ".."
-        && value.len() <= 255
-        && value.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
-        })
-}
-
-fn safe_run_id_from_entry(entry: &fs::DirEntry) -> Option<String> {
-    let name = entry.file_name();
-    let name = name.to_str()?;
-    let sanitized = sanitize_path_segment(name, 120);
-    if sanitized == name {
-        Some(sanitized)
-    } else {
-        None
-    }
-}
-
-pub(crate) fn sanitize_path_segment(value: &str, max_len: usize) -> String {
-    value
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
-        .take(max_len)
-        .collect::<String>()
-        .trim_matches(['_', '-'])
-        .to_string()
 }
 
 fn create_log_session() -> LogSession {
@@ -8460,6 +8330,9 @@ fn secret_value_regex() -> &'static Regex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Test-only path helpers (not used in non-test builds; re-imported here to
+    // avoid `#[cfg(test)]` clutter on the main use list above).
+    use crate::app_paths::{config_dir, portable_root_from_exe_path};
 
     fn test_manifest_attachment(
         session_dir: &Path,

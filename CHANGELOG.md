@@ -4,6 +4,31 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.17] - 2026-05-02
+
+Pure refactor — no behavior change. Continues `docs/code-split-plan.md` migration order step 2 ("logging and path safety"). `lib.rs` is at 9759 lines pre-split; this batch trims it by 127 lines into a new `src-tauri/src/app_paths.rs` module (220 lines with doc comments).
+
+### Changed (extracted to `src-tauri/src/app_paths.rs`)
+- `APP_ROOT` `OnceLock<PathBuf>` static moved into `app_paths.rs`. `lib.rs::initialize_app_root` now calls `app_paths::try_set_app_root(...)`. Panic-record helper uses `app_paths::app_root_if_initialized()`.
+- Path resolution: `app_root`, `resolve_portable_app_root`, `portable_root_from_exe_path`, `data_dir`, `logs_dir`, `human_logs_dir`, `human_log_path_for`, `config_dir`, `bootstrap_config_path`, `ai_provider_config_path`, `sessions_dir`.
+- Boot-time path helpers: `early_logs_dir`, `active_or_early_logs_dir` (and new `app_root_if_initialized` returning `Option<PathBuf>` for the panic record).
+- Path-safety primitives: `checked_data_child_path`, `is_safe_relative_data_path`, `is_safe_data_file_name`, `safe_run_id_from_entry`, `sanitize_path_segment`.
+
+### Stayed in `lib.rs`
+- `initialize_app_root` (touches `&tauri::App`, the runtime boundary).
+- `install_process_panic_hook` and `write_early_crash_record` (compose JSON crash records that depend on `Utc`, `serde_json`, and the local `sanitize_text` redactor).
+- `create_log_session` and the rest of the diagnostic logger (planned for the next split batch).
+
+### Validation
+- `cargo test`: 66 passed (no test count change; same surface — the `mod tests` block re-imports `config_dir`, `portable_root_from_exe_path` from `app_paths` to keep the cargo unused-import warnings clean in non-test builds).
+- `npm run typecheck` + `npm run build`: clean.
+- `cargo clippy --no-deps --all-targets`: 0 errors. The `#![deny(clippy::disallowed_methods)]` from v0.3.16 is preserved at lib.rs and main.rs.
+
+### Notes
+- `lib.rs` line count: 9759 → 9632.
+- No public Tauri command name changed. No portable data path changed. No secret redaction logic touched.
+- Per `docs/code-split-plan.md` migration order, the next batches will be: AI provider credentials/probes (step 3), Cloudflare D1 + Secrets Store (step 4), editorial orchestration + artifacts (step 5).
+
 ## [v0.3.16] - 2026-05-02
 
 Patch release fechando 4 bugs reais surfaceados em logs de produção da v0.3.15 + 2 hardenings (NB-2/NB-5) + clippy hygiene (A+B do parecer pós-v0.3.15). Operator analisou `data/logs/maestro-2026-05-01T18-01-15Z-pid28124.ndjson` rodando v0.3.15 e confirmou: B11 ficou parcialmente casca-vazia + 3 novos bugs (B13/B14/B15). Codex emitiu parecer pedindo NB-2 + NB-5 prioritários.

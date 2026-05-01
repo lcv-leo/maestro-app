@@ -35,6 +35,7 @@ use tauri::Manager;
 mod app_paths;
 mod human_logs;
 mod logging;
+mod provider_deepseek;
 mod provider_retry;
 mod session_controls;
 mod session_evidence;
@@ -50,6 +51,7 @@ use crate::app_paths::{
     sanitize_path_segment, sessions_dir, try_set_app_root,
 };
 use crate::logging::{create_log_session, write_log_record, LogEventInput, LogSession, LogWriteResult};
+use crate::provider_deepseek::run_deepseek_api_agent;
 use crate::provider_retry::{build_api_client, send_with_retry};
 // Items below are only referenced from `mod tests` and cargo flags them as unused
 // when compiled without the test cfg. Re-importing inside the test module avoids
@@ -60,7 +62,7 @@ use human_logs::should_collapse_human_log_event;
 // `human_log_summary`, `severity_number_for`, `write_human_log_projection`
 // are now consumed inside `logging.rs`; lib.rs no longer needs them.
 use session_controls::{
-    all_agent_keys, api_role_max_tokens, effective_draft_lead, estimate_provider_cost,
+    all_agent_keys, api_role_max_tokens, effective_draft_lead,
     estimate_provider_cost_from_input_chars, normalize_active_agents, provider_cost,
     provider_cost_guard_for, sanitize_optional_positive_f64, sanitize_optional_positive_u64,
     selected_editorial_agent_specs, usage_tokens, ProviderCostGuard, ProviderCostRates,
@@ -94,26 +96,26 @@ struct BootstrapConfig {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
-struct AiProviderConfig {
+pub(crate) struct AiProviderConfig {
     schema_version: u8,
     provider_mode: String,
     credential_storage_mode: String,
     #[serde(default)]
-    openai_api_key: Option<String>,
+    pub(crate) openai_api_key: Option<String>,
     #[serde(default)]
-    anthropic_api_key: Option<String>,
+    pub(crate) anthropic_api_key: Option<String>,
     #[serde(default)]
-    gemini_api_key: Option<String>,
+    pub(crate) gemini_api_key: Option<String>,
     #[serde(default)]
-    deepseek_api_key: Option<String>,
+    pub(crate) deepseek_api_key: Option<String>,
     #[serde(default)]
-    openai_api_key_remote: bool,
+    pub(crate) openai_api_key_remote: bool,
     #[serde(default)]
-    anthropic_api_key_remote: bool,
+    pub(crate) anthropic_api_key_remote: bool,
     #[serde(default)]
-    gemini_api_key_remote: bool,
+    pub(crate) gemini_api_key_remote: bool,
     #[serde(default)]
-    deepseek_api_key_remote: bool,
+    pub(crate) deepseek_api_key_remote: bool,
     #[serde(default)]
     openai_input_usd_per_million: Option<f64>,
     #[serde(default)]
@@ -291,19 +293,19 @@ struct EditorialSessionResult {
 }
 
 #[derive(Clone, Serialize)]
-struct EditorialAgentResult {
-    name: String,
-    role: String,
-    cli: String,
-    tone: String,
-    status: String,
-    duration_ms: u128,
-    exit_code: Option<i32>,
-    output_path: String,
-    usage_input_tokens: Option<u64>,
-    usage_output_tokens: Option<u64>,
-    cost_usd: Option<f64>,
-    cost_estimated: Option<bool>,
+pub(crate) struct EditorialAgentResult {
+    pub(crate) name: String,
+    pub(crate) role: String,
+    pub(crate) cli: String,
+    pub(crate) tone: String,
+    pub(crate) status: String,
+    pub(crate) duration_ms: u128,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) output_path: String,
+    pub(crate) usage_input_tokens: Option<u64>,
+    pub(crate) usage_output_tokens: Option<u64>,
+    pub(crate) cost_usd: Option<f64>,
+    pub(crate) cost_estimated: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -1792,7 +1794,7 @@ fn json_find_first_string(value: &Value, key: &str) -> Option<String> {
     }
 }
 
-fn first_env_value(candidates: &[&str]) -> Option<(String, String, String)> {
+pub(crate) fn first_env_value(candidates: &[&str]) -> Option<(String, String, String)> {
     candidates.iter().find_map(|name| {
         env_value_with_scope(name).map(|(scope, value)| ((*name).to_string(), scope, value))
     })
@@ -3882,303 +3884,6 @@ fn gemini_api_user_parts(
     Ok(parts)
 }
 
-fn run_deepseek_api_agent(
-    log_session: &LogSession,
-    run_id: &str,
-    role: &str,
-    prompt: String,
-    output_path: &Path,
-    timeout: Option<Duration>,
-    config: &AiProviderConfig,
-    cost_guard: Option<ProviderCostGuard>,
-) -> EditorialAgentResult {
-    let started = Instant::now();
-    let model_hint = deepseek_model();
-    let name = "DeepSeek";
-    let cli = "deepseek-api";
-
-    let Some((api_key, key_source)) = effective_provider_key(
-        config.deepseek_api_key.as_deref(),
-        &["MAESTRO_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY"],
-    ) else {
-        let status = if config.deepseek_api_key_remote {
-            "REMOTE_SECRET_NOT_READABLE"
-        } else {
-            "API_KEY_NOT_AVAILABLE"
-        };
-        let note = if config.deepseek_api_key_remote {
-            "A referencia do segredo existe no Cloudflare Secrets Store, mas a Cloudflare nao devolve o valor bruto ao app local. Informe MAESTRO_DEEPSEEK_API_KEY/DEEPSEEK_API_KEY ou configure um broker Cloudflare para consumir o segredo."
-        } else {
-            "DeepSeek precisa de MAESTRO_DEEPSEEK_API_KEY, DEEPSEEK_API_KEY ou chave informada na tela Ajustes > Agentes via API."
-        };
-        let _ = write_text_file(
-            output_path,
-            &format!(
-                "# {name} - {role}\n\n- CLI: `{cli}`\n- Status: `{status}`\n- Exit code: `unknown`\n- Duration ms: `{}`\n- Model: `{model}`\n\n{note}\n\n## Stdout\n\n```text\n\n```\n\n## Stderr\n\n```text\n{note}\n```\n",
-                started.elapsed().as_millis(),
-                model = model_hint
-            ),
-        );
-        let result = EditorialAgentResult {
-            name: name.to_string(),
-            role: role.to_string(),
-            cli: cli.to_string(),
-            tone: "blocked".to_string(),
-            status: status.to_string(),
-            duration_ms: started.elapsed().as_millis(),
-            exit_code: None,
-            output_path: output_path.to_string_lossy().to_string(),
-            usage_input_tokens: None,
-            usage_output_tokens: None,
-            cost_usd: None,
-            cost_estimated: None,
-        };
-        log_editorial_agent_finished(
-            log_session,
-            run_id,
-            &result,
-            None,
-            Some(note.len()),
-            None,
-            false,
-        );
-        return result;
-    };
-
-    let max_tokens = api_role_max_tokens(role);
-    if let Some(guard) = cost_guard.as_ref() {
-        let estimated_cost = estimate_provider_cost(&prompt, max_tokens, guard.rates);
-        if let Some(max_session_cost_usd) = guard.max_session_cost_usd {
-            if guard.observed_cost_usd + estimated_cost > max_session_cost_usd {
-                let status = "COST_LIMIT_REACHED";
-                let note = format!(
-                "DeepSeek nao foi chamado: custo projetado ${:.6} somado ao observado ${:.6} excede o limite ${:.6}.",
-                estimated_cost, guard.observed_cost_usd, max_session_cost_usd
-            );
-                let _ = write_text_file(
-                output_path,
-                &format!(
-                    "# {name} - {role}\n\n- CLI: `{cli}`\n- Provider: `deepseek`\n- Status: `{status}`\n- Exit code: `unknown`\n- Duration ms: `{}`\n- Cost projected USD: `{:.6}`\n\n## Stdout\n\n```text\n\n```\n\n## Stderr\n\n```text\n{}\n```\n",
-                    started.elapsed().as_millis(),
-                    estimated_cost,
-                    note
-                ),
-            );
-                let result = EditorialAgentResult {
-                    name: name.to_string(),
-                    role: role.to_string(),
-                    cli: cli.to_string(),
-                    tone: "blocked".to_string(),
-                    status: status.to_string(),
-                    duration_ms: started.elapsed().as_millis(),
-                    exit_code: None,
-                    output_path: output_path.to_string_lossy().to_string(),
-                    usage_input_tokens: None,
-                    usage_output_tokens: None,
-                    cost_usd: None,
-                    cost_estimated: None,
-                };
-                log_editorial_agent_finished(
-                    log_session,
-                    run_id,
-                    &result,
-                    None,
-                    Some(note.len()),
-                    None,
-                    false,
-                );
-                return result;
-            }
-        }
-    }
-
-    let mut client_builder = Client::builder().user_agent(format!(
-        "Maestro Editorial AI/{}",
-        env!("CARGO_PKG_VERSION")
-    ));
-    if let Some(timeout) = timeout {
-        client_builder = client_builder.timeout(timeout);
-    }
-    let client = match client_builder.build() {
-        Ok(client) => client,
-        Err(error) => {
-            let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
-            return write_deepseek_error_result(
-                log_session,
-                run_id,
-                role,
-                output_path,
-                &model_hint,
-                &status,
-                started.elapsed().as_millis(),
-            );
-        }
-    };
-
-    let model = resolve_deepseek_model(&client, &api_key);
-    let _ = write_log_record(
-        log_session,
-        LogEventInput {
-            level: "info".to_string(),
-            category: "session.agent.started".to_string(),
-            message: "editorial API peer request starting".to_string(),
-            context: Some(json!({
-                "run_id": sanitize_short(run_id, 120),
-                "agent": name,
-                "role": role,
-                "cli": cli,
-                "provider": "deepseek",
-                "model": model,
-                "prompt_chars": prompt.chars().count(),
-                "output_path": output_path.to_string_lossy().to_string(),
-                "timeout_seconds": timeout.map(|value| value.as_secs()),
-                "timeout_policy": if timeout.is_some() { "session_deadline" } else { "none_editorial_session" },
-                "cost_limit_usd": cost_guard.as_ref().and_then(|guard| guard.max_session_cost_usd),
-                "observed_cost_usd": cost_guard.as_ref().map(|guard| guard.observed_cost_usd)
-            })),
-        },
-    );
-
-    let body = json!({
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": "Voce e o peer DeepSeek dentro do Maestro Editorial AI. Leia integralmente o pedido do usuario, o protocolo editorial e os artefatos fornecidos. Responda somente ao que foi solicitado. Em revisoes, a primeira linha precisa seguir exatamente o contrato MAESTRO_STATUS."
-            },
-            { "role": "user", "content": prompt }
-        ],
-        "stream": false,
-        "max_tokens": max_tokens
-    });
-    let response = send_with_retry(log_session, run_id, "deepseek", || {
-        client
-            .post("https://api.deepseek.com/chat/completions")
-            .bearer_auth(&api_key)
-            .json(&body)
-            .send()
-    });
-
-    match response {
-        Ok(response) => {
-            let http_status = response.status();
-            let body = response.text().unwrap_or_default();
-            if !http_status.is_success() {
-                let status = sanitize_text(
-                    &format!(
-                        "PROVIDER_ERROR_HTTP_{}: {}",
-                        http_status.as_u16(),
-                        api_error_message(&body)
-                    ),
-                    240,
-                );
-                return write_deepseek_error_result(
-                    log_session,
-                    run_id,
-                    role,
-                    output_path,
-                    &model,
-                    &status,
-                    started.elapsed().as_millis(),
-                );
-            }
-
-            let parsed: Value = serde_json::from_str(&body).unwrap_or_else(|_| json!({}));
-            let (usage_input_tokens, usage_output_tokens) = usage_tokens(&parsed);
-            let cost_usd = cost_guard.as_ref().and_then(|guard| {
-                usage_input_tokens
-                    .zip(usage_output_tokens)
-                    .map(|(input, output)| provider_cost(input, output, guard.rates))
-            });
-            let stdout = parsed
-                .pointer("/choices/0/message/content")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(body.trim())
-                .to_string();
-            let model_reported = parsed
-                .get("model")
-                .and_then(Value::as_str)
-                .unwrap_or(&model);
-            let status = if role == "review" {
-                if stdout.trim().is_empty() {
-                    "AGENT_FAILED_EMPTY"
-                } else {
-                    extract_maestro_status(&stdout).unwrap_or("NOT_READY")
-                }
-            } else if stdout.trim().is_empty() {
-                "EMPTY_DRAFT"
-            } else {
-                "DRAFT_CREATED"
-            };
-            let tone = if status == "READY" || status == "DRAFT_CREATED" {
-                "ok"
-            } else if status == "EMPTY_DRAFT" || status == "AGENT_FAILED_EMPTY" {
-                "error"
-            } else {
-                "warn"
-            };
-            let artifact = format!(
-                "# {name} - {role}\n\n- CLI: `{cli}`\n- Provider: `deepseek`\n- Model: `{}`\n- Model reported: `{}`\n- Key source: `{}`\n- Status: `{status}`\n- Exit code: `0`\n- Duration ms: `{}`\n- Prompt chars: `{}`\n- Stdout chars: `{}`\n- Usage input tokens: `{}`\n- Usage output tokens: `{}`\n- Cost USD: `{}`\n- Stderr chars: `0`\n\n## Stdout\n\n```text\n{}\n```\n\n## Stderr\n\n```text\n\n```\n",
-                model,
-                sanitize_text(model_reported, 120),
-                sanitize_text(&key_source, 120),
-                started.elapsed().as_millis(),
-                prompt.chars().count(),
-                stdout.chars().count(),
-                usage_input_tokens
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "unknown".to_string()),
-                usage_output_tokens
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "unknown".to_string()),
-                cost_usd
-                    .map(|value| format!("{value:.8}"))
-                    .unwrap_or_else(|| "unknown".to_string()),
-                stdout
-            );
-            let _ = write_text_file(output_path, &artifact);
-            let result = EditorialAgentResult {
-                name: name.to_string(),
-                role: role.to_string(),
-                cli: cli.to_string(),
-                tone: tone.to_string(),
-                status: status.to_string(),
-                duration_ms: started.elapsed().as_millis(),
-                exit_code: Some(0),
-                output_path: output_path.to_string_lossy().to_string(),
-                usage_input_tokens,
-                usage_output_tokens,
-                cost_usd,
-                cost_estimated: cost_usd.map(|_| true),
-            };
-            log_editorial_agent_finished(
-                log_session,
-                run_id,
-                &result,
-                Some(stdout.chars().count()),
-                Some(0),
-                Some("https://api.deepseek.com/chat/completions".to_string()),
-                false,
-            );
-            result
-        }
-        Err(error) => {
-            let status = sanitize_text(&format!("PROVIDER_NETWORK_ERROR: {error}"), 240);
-            write_deepseek_error_result(
-                log_session,
-                run_id,
-                role,
-                output_path,
-                &model,
-                &status,
-                started.elapsed().as_millis(),
-            )
-        }
-    }
-}
-
 fn run_openai_api_agent(
     log_session: &LogSession,
     run_id: &str,
@@ -4768,53 +4473,6 @@ fn run_gemini_api_agent(
     }
 }
 
-fn write_deepseek_error_result(
-    log_session: &LogSession,
-    run_id: &str,
-    role: &str,
-    output_path: &Path,
-    model: &str,
-    status: &str,
-    duration_ms: u128,
-) -> EditorialAgentResult {
-    let name = "DeepSeek";
-    let cli = "deepseek-api";
-    let safe_status = sanitize_text(status, 240);
-    let _ = write_text_file(
-        output_path,
-        &format!(
-            "# {name} - {role}\n\n- CLI: `{cli}`\n- Provider: `deepseek`\n- Model: `{}`\n- Status: `{}`\n- Exit code: `unknown`\n- Duration ms: `{duration_ms}`\n\n## Stdout\n\n```text\n\n```\n\n## Stderr\n\n```text\n{}\n```\n",
-            sanitize_text(model, 120),
-            safe_status,
-            safe_status
-        ),
-    );
-    let result = EditorialAgentResult {
-        name: name.to_string(),
-        role: role.to_string(),
-        cli: cli.to_string(),
-        tone: "error".to_string(),
-        status: safe_status,
-        duration_ms,
-        exit_code: None,
-        output_path: output_path.to_string_lossy().to_string(),
-        usage_input_tokens: None,
-        usage_output_tokens: None,
-        cost_usd: None,
-        cost_estimated: None,
-    };
-    log_editorial_agent_finished(
-        log_session,
-        run_id,
-        &result,
-        None,
-        Some(status.len()),
-        None,
-        false,
-    );
-    result
-}
-
 // `build_api_client`, `send_with_retry`, `parse_retry_after_header`, and
 // the `PROVIDER_RETRY_*` constants moved into `provider_retry.rs` in v0.3.20.
 
@@ -5121,70 +4779,6 @@ fn log_provider_api_started(
             })),
         },
     );
-}
-
-fn deepseek_model() -> String {
-    first_env_value(&["MAESTRO_DEEPSEEK_MODEL", "CROSS_REVIEW_DEEPSEEK_MODEL"])
-        .map(|(_, _, value)| sanitize_short(&value, 120))
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "deepseek-v4-pro".to_string())
-}
-
-fn resolve_deepseek_model(client: &Client, api_key: &str) -> String {
-    if let Some((_, _, value)) =
-        first_env_value(&["MAESTRO_DEEPSEEK_MODEL", "CROSS_REVIEW_DEEPSEEK_MODEL"])
-    {
-        let model = sanitize_short(&value, 120);
-        if !model.is_empty() {
-            return model;
-        }
-    }
-
-    let response = client
-        .get("https://api.deepseek.com/models")
-        .bearer_auth(api_key)
-        .send();
-    if let Ok(response) = response {
-        if response.status().is_success() {
-            let body = response.text().unwrap_or_default();
-            if let Ok(value) = serde_json::from_str::<Value>(&body) {
-                let models = deepseek_model_ids(&value);
-                for candidate in [
-                    "deepseek-v4-pro",
-                    "deepseek-reasoner",
-                    "deepseek-chat",
-                    "deepseek-v4-flash",
-                ] {
-                    if models.iter().any(|model| model == candidate) {
-                        return candidate.to_string();
-                    }
-                }
-                if let Some(first) = models.first() {
-                    return first.clone();
-                }
-            }
-        }
-    }
-
-    "deepseek-reasoner".to_string()
-}
-
-fn deepseek_model_ids(value: &Value) -> Vec<String> {
-    value
-        .get("data")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| {
-                    item.get("id")
-                        .and_then(Value::as_str)
-                        .map(|id| sanitize_short(id, 120))
-                })
-                .filter(|id| !id.is_empty())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
 }
 
 fn resolve_openai_model(client: &Client, api_key: &str) -> String {
@@ -6012,7 +5606,7 @@ fn write_editorial_agent_error_artifact(
     )
 }
 
-fn log_editorial_agent_finished(
+pub(crate) fn log_editorial_agent_finished(
     log_session: &LogSession,
     run_id: &str,
     result: &EditorialAgentResult,
@@ -6118,7 +5712,7 @@ fn log_editorial_agent_running(
     );
 }
 
-fn extract_maestro_status(output: &str) -> Option<&'static str> {
+pub(crate) fn extract_maestro_status(output: &str) -> Option<&'static str> {
     output.lines().find_map(|line| {
         let normalized = line.trim().to_ascii_uppercase();
         if normalized == "MAESTRO_STATUS: READY" {
@@ -6461,7 +6055,7 @@ fn probe_deepseek_api(client: &Client, config: &AiProviderConfig) -> AiProviderP
     summarize_ai_probe_response("DeepSeek", response)
 }
 
-fn effective_provider_key(
+pub(crate) fn effective_provider_key(
     config_value: Option<&str>,
     env_candidates: &[&str],
 ) -> Option<(String, String)> {
@@ -6536,7 +6130,7 @@ fn summarize_ai_probe_response(
     }
 }
 
-fn api_error_message(body: &str) -> String {
+pub(crate) fn api_error_message(body: &str) -> String {
     if body.trim().is_empty() {
         return "sem detalhe na resposta".to_string();
     }
@@ -8615,25 +8209,6 @@ mod tests {
         assert!(values.contains_key("MAESTRO_GEMINI_API_KEY"));
         assert!(values.contains_key("MAESTRO_DEEPSEEK_API_KEY"));
         assert!(!values.contains_key("MAESTRO_ANTHROPIC_API_KEY"));
-    }
-
-    #[test]
-    fn deepseek_model_ids_extract_current_api_shape() {
-        let value = json!({
-            "object": "list",
-            "data": [
-                { "id": "deepseek-v4-flash", "object": "model" },
-                { "id": "deepseek-v4-pro", "object": "model" }
-            ]
-        });
-
-        assert_eq!(
-            deepseek_model_ids(&value),
-            vec![
-                "deepseek-v4-flash".to_string(),
-                "deepseek-v4-pro".to_string()
-            ]
-        );
     }
 
     #[test]

@@ -4,6 +4,37 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.21] - 2026-05-02
+
+Pure refactor — no behavior change. Continues `docs/code-split-plan.md` migration order step 3 ("AI provider credentials/probes, including DeepSeek"). v0.3.20 extracted the shared `provider_retry` primitives; v0.3.21 begins migrating the per-provider runners themselves, starting with DeepSeek because it is the structural outlier (custom error helper, predates the unified `write_provider_failure_result` family used by openai/anthropic/gemini). The remaining 3 isomorphic runners + their shared helper family are scheduled for v0.3.22.
+
+### Changed (extracted to `src-tauri/src/provider_deepseek.rs`, 467 lines with doc header)
+- `pub(crate) fn run_deepseek_api_agent(...) -> EditorialAgentResult` — the chat-completions runner with retry, cost pre-flight, output sanitization and NDJSON instrumentation. Byte-for-byte preserves every status string, log line, format string and tone classification from the v0.3.20 lib.rs source.
+- `pub(crate) fn write_deepseek_error_result(...)` — DeepSeek-specific error artifact + result envelope (custom helper, not the unified `write_provider_failure_result`).
+- `pub(crate) fn deepseek_model() -> String` — env override (`MAESTRO_DEEPSEEK_MODEL` / `CROSS_REVIEW_DEEPSEEK_MODEL`) with `deepseek-v4-pro` fallback.
+- `pub(crate) fn resolve_deepseek_model(client, api_key) -> String` — env override first, then `/models` listing with the candidate-preference list, with `deepseek-reasoner` as ultimate fallback.
+- `pub(crate) fn deepseek_model_ids(value) -> Vec<String>` — JSON ID extractor.
+- `#[cfg(test)] fn deepseek_model_ids_extract_current_api_shape` test moved with the function it covers.
+
+### `pub(crate)` visibility upgrades in `lib.rs` (consumed from `provider_deepseek.rs`)
+- `struct AiProviderConfig` + the 4 fields the runner reads (`deepseek_api_key`, `deepseek_api_key_remote`, plus the parallel openai/anthropic/gemini fields upgraded for consistency since v0.3.22 will need them).
+- `struct EditorialAgentResult` + all 12 fields (since the runner constructs the struct).
+- `fn first_env_value` (consumed by `deepseek_model` and `resolve_deepseek_model`).
+- `fn effective_provider_key` (consumed by the runner).
+- `fn log_editorial_agent_finished` (consumed by the runner and the error helper).
+- `fn extract_maestro_status` (consumed by the runner).
+- `fn api_error_message` (consumed by the runner).
+
+### Stayed in `lib.rs` (move in v0.3.22)
+- `run_openai_api_agent`, `run_anthropic_api_agent`, `run_gemini_api_agent` (the 3 isomorphic runners that share the unified provider helper family).
+- `editorial_api_system_prompt`, `api_cost_preflight_result`, `write_provider_missing_key_result`, `write_provider_error_result`, `write_provider_failure_result`, `api_input_estimate_chars`, `provider_key_for_agent`, `provider_remote_present`, `openai_response_text`, `log_provider_api_started`, `write_provider_success_result` — the unified provider helpers.
+
+### Validation
+- `cargo test`: 74 passed, 0 failed (zero regression). The `deepseek_model_ids_extract_current_api_shape` test now runs as `provider_deepseek::tests::deepseek_model_ids_extract_current_api_shape`.
+- `npm run typecheck`: clean.
+- `npm run build`: clean, 1.11s, 2434 modules transformed (PostEditor chunk-size warning is pre-existing).
+- `lib.rs`: 9776 → 9351 lines (−425). `provider_deepseek.rs`: 467 lines new (includes 17-line doc header + use block + the test module).
+
 ## [v0.3.20] - 2026-05-02
 
 Pure refactor — no behavior change. Extracts the shared provider HTTP networking primitives into `src-tauri/src/provider_retry.rs` (137 lines with doc comments). Per `docs/code-split-plan.md` migration step 3 ("AI provider credentials/probes"). The 4 provider runner functions (DeepSeek/OpenAI/Anthropic/Gemini) stay in `lib.rs` and will move in v0.3.21+ along with their request body shapes and response parsers.

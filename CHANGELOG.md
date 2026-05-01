@@ -4,6 +4,27 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.27] - 2026-05-02
+
+Pure refactor — no behavior change. Continues migration step 5 by extracting session contract + cost ledger persistence helpers into a dedicated module.
+
+### Changed (extracted to `src-tauri/src/session_persistence.rs`, ~128 lines with doc header)
+- `pub(crate) fn session_contract_path`, `cost_ledger_path` — canonical paths inside a session directory.
+- `pub(crate) fn load_session_contract`, `write_session_contract` — JSON persistence with parse-failure logging.
+- `pub(crate) fn load_cost_ledger`, `write_cost_ledger` — JSON persistence for the cumulative per-session cost ledger.
+- `pub(crate) fn append_agent_cost_to_ledger` — appends one entry and recomputes the total.
+- `pub(crate) fn api_provider_from_cli` — peer CLI name → provider id mapping.
+
+### `pub(crate)` visibility upgrades in `lib.rs`
+- `pub(crate) struct CostLedger` field upgrades (`schema_version`, `run_id`, `entries` had been private; v0.3.27 makes them `pub(crate)` along with the existing `total_observed_cost_usd`).
+- `pub(crate) struct CostLedgerEntry` + 9 fields.
+
+### Validation
+- `cargo test`: 74 passed.
+- `npm run typecheck` + `npm run build`: clean.
+- `lib.rs`: 6693 → 6605 lines (−88 deleted; +5 mod+use lines = net −83).
+- ZERO-line diff vs v0.3.26 baseline (commit aaaacff).
+
 ## [v0.3.26] - 2026-05-02
 
 Pure refactor — no behavior change. Continues migration step 5 by extracting agent input preparation, the active-agents log context builder, and the time-budget anchor helper into a dedicated module.

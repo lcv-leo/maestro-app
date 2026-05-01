@@ -44,6 +44,7 @@ mod provider_retry;
 mod provider_runners;
 mod session_controls;
 mod session_evidence;
+mod session_persistence;
 
 // Re-export the app_paths surface used throughout this file. The functions
 // keep their pre-extraction call sites (`sessions_dir()`, `app_root()`, etc.)
@@ -78,6 +79,9 @@ use crate::logging::{create_log_session, write_log_record, LogEventInput, LogSes
 use crate::provider_deepseek::run_deepseek_api_agent;
 use crate::provider_runners::{
     run_anthropic_api_agent, run_gemini_api_agent, run_openai_api_agent, write_provider_error_result,
+};
+use crate::session_persistence::{
+    append_agent_cost_to_ledger, load_cost_ledger, load_session_contract, write_session_contract,
 };
 // Items below are only referenced from `mod tests` and cargo flags them as unused
 // when compiled without the test cfg. Re-importing inside the test module avoids
@@ -417,23 +421,23 @@ fn default_session_contract_schema_version() -> u8 {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct CostLedger {
-    schema_version: u8,
-    run_id: String,
+    pub(crate) schema_version: u8,
+    pub(crate) run_id: String,
     pub(crate) total_observed_cost_usd: f64,
-    entries: Vec<CostLedgerEntry>,
+    pub(crate) entries: Vec<CostLedgerEntry>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct CostLedgerEntry {
-    at: String,
-    provider: String,
-    agent: String,
-    role: String,
-    model: String,
-    input_tokens: u64,
-    output_tokens: u64,
-    cost_usd: f64,
-    estimated: bool,
+pub(crate) struct CostLedgerEntry {
+    pub(crate) at: String,
+    pub(crate) provider: String,
+    pub(crate) agent: String,
+    pub(crate) role: String,
+    pub(crate) model: String,
+    pub(crate) input_tokens: u64,
+    pub(crate) output_tokens: u64,
+    pub(crate) cost_usd: f64,
+    pub(crate) estimated: bool,
 }
 
 #[derive(Clone)]
@@ -2828,94 +2832,6 @@ fn editorial_session_result(
     }
 }
 
-fn session_contract_path(session_dir: &Path) -> PathBuf {
-    session_dir.join("session-contract.json")
-}
-
-fn cost_ledger_path(session_dir: &Path) -> PathBuf {
-    session_dir.join("cost-ledger.json")
-}
-
-fn load_session_contract(session_dir: &Path) -> Option<SessionContract> {
-    let path = session_contract_path(session_dir);
-    let text = read_text_file(&path).ok()?;
-    match serde_json::from_str::<SessionContract>(&text) {
-        Ok(contract) => Some(contract),
-        Err(error) => {
-            eprintln!(
-                "session_contract_parse_failed path={} error={}",
-                path.display(),
-                error
-            );
-            None
-        }
-    }
-}
-
-fn write_session_contract(session_dir: &Path, contract: &SessionContract) -> Result<(), String> {
-    let bytes = serde_json::to_string_pretty(contract)
-        .map_err(|error| format!("failed to serialize session contract: {error}"))?;
-    write_text_file(&session_contract_path(session_dir), &bytes)
-}
-
-fn load_cost_ledger(session_dir: &Path, run_id: &str) -> CostLedger {
-    let path = cost_ledger_path(session_dir);
-    read_text_file(&path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<CostLedger>(&text).ok())
-        .unwrap_or_else(|| CostLedger {
-            schema_version: 1,
-            run_id: run_id.to_string(),
-            total_observed_cost_usd: 0.0,
-            entries: Vec::new(),
-        })
-}
-
-fn write_cost_ledger(session_dir: &Path, ledger: &CostLedger) -> Result<(), String> {
-    let bytes = serde_json::to_string_pretty(ledger)
-        .map_err(|error| format!("failed to serialize cost ledger: {error}"))?;
-    write_text_file(&cost_ledger_path(session_dir), &bytes)
-}
-
-fn append_agent_cost_to_ledger(
-    session_dir: &Path,
-    ledger: &mut CostLedger,
-    agent: &EditorialAgentResult,
-) -> Result<(), String> {
-    let Some(cost_usd) = agent.cost_usd else {
-        return Ok(());
-    };
-    let input_tokens = agent.usage_input_tokens.unwrap_or_default();
-    let output_tokens = agent.usage_output_tokens.unwrap_or_default();
-    let provider = api_provider_from_cli(&agent.cli).unwrap_or("cli");
-    ledger.entries.push(CostLedgerEntry {
-        at: Utc::now().to_rfc3339(),
-        provider: provider.to_string(),
-        agent: agent.name.clone(),
-        role: agent.role.clone(),
-        model: provider.to_string(),
-        input_tokens,
-        output_tokens,
-        cost_usd,
-        estimated: agent.cost_estimated.unwrap_or(true),
-    });
-    ledger.total_observed_cost_usd = ledger
-        .entries
-        .iter()
-        .map(|entry| entry.cost_usd)
-        .sum::<f64>();
-    write_cost_ledger(session_dir, ledger)
-}
-
-fn api_provider_from_cli(cli: &str) -> Option<&'static str> {
-    match cli {
-        "anthropic-api" => Some("anthropic"),
-        "openai-api" => Some("openai"),
-        "gemini-api" => Some("gemini"),
-        "deepseek-api" => Some("deepseek"),
-        _ => None,
-    }
-}
 
 fn parse_created_at(value: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(value)

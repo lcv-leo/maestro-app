@@ -35,6 +35,7 @@ use tauri::Manager;
 mod app_paths;
 mod cloudflare;
 mod editorial_helpers;
+mod editorial_prompts;
 mod human_logs;
 mod logging;
 mod provider_deepseek;
@@ -63,6 +64,10 @@ use crate::editorial_helpers::{
     filter_existing_agents_to_active_set, finalize_running_agent_artifacts,
     resolve_effective_active_agents, review_complaint_fingerprint, write_editorial_agent_error_artifact,
     write_editorial_agent_running_artifact, FinalizeRunningArtifactsGuard,
+};
+use crate::editorial_prompts::{
+    build_draft_prompt, build_review_prompt, build_revision_prompt, editorial_agent_specs,
+    ordered_editorial_agent_specs, resolve_initial_agent_key,
 };
 use crate::logging::{create_log_session, write_log_record, LogEventInput, LogSession, LogWriteResult};
 use crate::provider_deepseek::run_deepseek_api_agent;
@@ -257,19 +262,19 @@ struct CliAdapterProbeResult {
 }
 
 #[derive(Clone, Deserialize)]
-struct EditorialSessionRequest {
-    run_id: String,
-    session_name: String,
-    prompt: String,
-    protocol_name: String,
-    protocol_text: String,
-    protocol_hash: String,
-    initial_agent: Option<String>,
-    active_agents: Option<Vec<String>>,
-    max_session_cost_usd: Option<f64>,
-    max_session_minutes: Option<u64>,
-    attachments: Option<Vec<PromptAttachmentRequest>>,
-    links: Option<Vec<String>>,
+pub(crate) struct EditorialSessionRequest {
+    pub(crate) run_id: String,
+    pub(crate) session_name: String,
+    pub(crate) prompt: String,
+    pub(crate) protocol_name: String,
+    pub(crate) protocol_text: String,
+    pub(crate) protocol_hash: String,
+    pub(crate) initial_agent: Option<String>,
+    pub(crate) active_agents: Option<Vec<String>>,
+    pub(crate) max_session_cost_usd: Option<f64>,
+    pub(crate) max_session_minutes: Option<u64>,
+    pub(crate) attachments: Option<Vec<PromptAttachmentRequest>>,
+    pub(crate) links: Option<Vec<String>>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -375,9 +380,9 @@ struct ResumeSessionState {
 #[derive(Clone, Copy)]
 pub(crate) struct EditorialAgentSpec {
     pub(crate) key: &'static str,
-    name: &'static str,
-    command: &'static str,
-    args: fn() -> Vec<String>,
+    pub(crate) name: &'static str,
+    pub(crate) command: &'static str,
+    pub(crate) args: fn() -> Vec<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -3399,251 +3404,6 @@ fn system_time_to_unix(value: SystemTime) -> Option<u64> {
         .map(|duration| duration.as_secs())
 }
 
-fn claude_args() -> Vec<String> {
-    vec![
-        "--print".to_string(),
-        "--input-format".to_string(),
-        "text".to_string(),
-        "--output-format".to_string(),
-        "text".to_string(),
-        "--permission-mode".to_string(),
-        "dontAsk".to_string(),
-    ]
-}
-
-fn codex_args() -> Vec<String> {
-    vec![
-        "--ask-for-approval".to_string(),
-        "never".to_string(),
-        "exec".to_string(),
-        "--skip-git-repo-check".to_string(),
-        "--sandbox".to_string(),
-        "read-only".to_string(),
-        "--color".to_string(),
-        "never".to_string(),
-        "Leia integralmente o bloco <stdin> fornecido pelo Maestro e responda conforme as instrucoes.".to_string(),
-    ]
-}
-
-fn gemini_args() -> Vec<String> {
-    vec![
-        "--prompt".to_string(),
-        "Leia o stdin integralmente e responda conforme as instrucoes do Maestro.".to_string(),
-        "--output-format".to_string(),
-        "text".to_string(),
-        "--approval-mode".to_string(),
-        "yolo".to_string(),
-        "--skip-trust".to_string(),
-    ]
-}
-
-fn deepseek_args() -> Vec<String> {
-    Vec::new()
-}
-
-fn editorial_agent_specs() -> Vec<EditorialAgentSpec> {
-    vec![
-        EditorialAgentSpec {
-            key: "claude",
-            name: "Claude",
-            command: "claude",
-            args: claude_args,
-        },
-        EditorialAgentSpec {
-            key: "codex",
-            name: "Codex",
-            command: "codex",
-            args: codex_args,
-        },
-        EditorialAgentSpec {
-            key: "gemini",
-            name: "Gemini",
-            command: "gemini",
-            args: gemini_args,
-        },
-        EditorialAgentSpec {
-            key: "deepseek",
-            name: "DeepSeek",
-            command: "deepseek-api",
-            args: deepseek_args,
-        },
-    ]
-}
-
-fn resolve_initial_agent_key(value: Option<&str>) -> (&'static str, Option<String>) {
-    let Some(value) = value else {
-        return ("claude", None);
-    };
-    let normalized = value.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "claude" | "anthropic" => ("claude", None),
-        "codex" | "openai" | "chatgpt" => ("codex", None),
-        "gemini" | "google" => ("gemini", None),
-        "deepseek" | "deepseek-api" => ("deepseek", None),
-        "" => ("claude", None),
-        _ => ("claude", Some(sanitize_text(value, 80))),
-    }
-}
-
-fn ordered_editorial_agent_specs(first_key: &str) -> Vec<EditorialAgentSpec> {
-    let specs = editorial_agent_specs();
-    let mut ordered = specs
-        .iter()
-        .copied()
-        .filter(|spec| spec.key == first_key)
-        .collect::<Vec<_>>();
-    ordered.extend(specs.into_iter().filter(|spec| spec.key != first_key));
-    ordered
-}
-
-fn build_draft_prompt(
-    request: &EditorialSessionRequest,
-    run_id: &str,
-    evidence_block: &str,
-) -> String {
-    format!(
-        r#"# Maestro Editorial AI - Geracao Real
-
-Run: `{run_id}`
-Sessao: {}
-
-Voce e o agente redator escolhido para abrir a sessao editorial. Leia integralmente o protocolo abaixo antes de escrever.
-Gere um rascunho em Markdown puro para a solicitacao do operador.
-Nao crie arquivos locais. Escreva a resposta inteira somente na saida padrao da CLI.
-Nao invente links. Se faltar evidencia, marque explicitamente `[EVIDENCIA_PENDENTE]`.
-
-## Solicitacao do operador
-
-{}
-
-## Protocolo editorial integral
-
-```markdown
-{}
-```
-{}
-"#,
-        sanitize_text(&request.session_name, 200),
-        request.prompt,
-        request.protocol_text,
-        evidence_block
-    )
-}
-
-fn build_review_prompt(
-    request: &EditorialSessionRequest,
-    run_id: &str,
-    draft: &str,
-    evidence_block: &str,
-) -> String {
-    format!(
-        r#"# Maestro Editorial AI - Revisao Real
-
-Run: `{run_id}`
-Sessao: {}
-
-Leia integralmente o protocolo editorial e revise o rascunho abaixo.
-Responda em Markdown.
-
-Obrigatorio:
-- A primeira linha deve ser exatamente `MAESTRO_STATUS: READY` ou `MAESTRO_STATUS: NOT_READY`.
-- Use READY somente se o rascunho pode ser entregue como texto final conforme o protocolo.
-- Use NOT_READY se houver falhas, links a verificar, violacao ABNT, falta de evidencia, confabulacao, ou problema editorial.
-- Liste correcoes concretas.
-
-## Solicitacao do operador
-
-{}
-
-## Protocolo editorial integral
-
-```markdown
-{}
-```
-
-## Rascunho a revisar
-
-```markdown
-{}
-```
-{}
-"#,
-        sanitize_text(&request.session_name, 200),
-        request.prompt,
-        request.protocol_text,
-        draft,
-        evidence_block
-    )
-}
-
-fn build_revision_prompt(
-    request: &EditorialSessionRequest,
-    run_id: &str,
-    round: usize,
-    draft: &str,
-    review_agents: &[EditorialAgentResult],
-    evidence_block: &str,
-) -> String {
-    let mut review_notes = String::new();
-    for agent in review_agents {
-        let artifact = read_text_file(Path::new(&agent.output_path)).unwrap_or_default();
-        let stdout = extract_stdout_block(&artifact).unwrap_or_default().trim();
-        let useful_excerpt = if stdout.is_empty() {
-            format!(
-                "Sem parecer editorial utilizavel nesta tentativa. Status operacional: {} / {}.",
-                agent.status, agent.tone
-            )
-        } else {
-            stdout.chars().take(18_000).collect::<String>()
-        };
-        review_notes.push_str(&format!(
-            "\n### {} / {}\n\nStatus: `{}` (`{}`)\nArtifact: `{}`\n\n```markdown\n{}\n```\n",
-            agent.name, agent.role, agent.status, agent.tone, agent.output_path, useful_excerpt
-        ));
-    }
-
-    format!(
-        r#"# Maestro Editorial AI - Revisao de Rascunho
-
-Run: `{run_id}`
-Rodada de revisao: `{round}`
-Sessao: {}
-
-Leia integralmente o protocolo editorial, o rascunho atual e as manifestacoes dos peers.
-Sua tarefa e produzir uma nova versao completa do texto em Markdown puro, incorporando todas as correcoes concretas.
-Nao entregue comentarios sobre o processo. Entregue apenas o texto revisado.
-Nao crie arquivos locais. Escreva a resposta inteira somente na saida padrao da CLI.
-Nao invente links. Se faltar evidencia, preserve marcador `[EVIDENCIA_PENDENTE]`.
-
-## Solicitacao do operador
-
-{}
-
-## Protocolo editorial integral
-
-```markdown
-{}
-```
-
-## Rascunho atual
-
-```markdown
-{}
-```
-
-## Manifestacoes dos peers
-
-{}
-{}
-"#,
-        sanitize_text(&request.session_name, 200),
-        request.prompt,
-        request.protocol_text,
-        draft,
-        review_notes,
-        evidence_block
-    )
-}
 
 fn run_editorial_agent_for_spec(
     log_session: &LogSession,
@@ -5564,6 +5324,7 @@ mod tests {
     use crate::cloudflare::{
         cloudflare_page_path, cloudflare_store_for_target_or_existing, cloudflare_verify_path,
     };
+    use crate::editorial_prompts::{claude_args, gemini_args};
     use crate::provider_retry::parse_retry_after_header;
     use crate::session_controls::{normalize_active_agents, provider_cost};
 

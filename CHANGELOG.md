@@ -4,6 +4,26 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.25] - 2026-05-02
+
+Pure refactor — no behavior change. Continues migration step 5 by extracting the agent specs (CLI args + spec table) and prompt builders (draft/review/revision) into a dedicated module. The heavy `run_editorial_session_inner` block stays in lib.rs for v0.3.26.
+
+### Changed (extracted to `src-tauri/src/editorial_prompts.rs`, ~290 lines with doc header)
+- `pub(crate) fn claude_args`, `codex_args`, `gemini_args`, `deepseek_args` — argv templates per peer CLI.
+- `pub(crate) fn editorial_agent_specs` — 4-entry vector keyed by peer name.
+- `pub(crate) fn resolve_initial_agent_key` — normalize operator's free-form initial-agent string.
+- `pub(crate) fn ordered_editorial_agent_specs` — places chosen first key at the head of the spec list.
+- `pub(crate) fn build_draft_prompt`, `build_review_prompt`, `build_revision_prompt` — markdown prompt templates.
+
+### `pub(crate)` visibility upgrades in `lib.rs` (consumed by `editorial_prompts.rs`)
+- `pub(crate) struct EditorialSessionRequest` + 12 fields (run_id, session_name, prompt, protocol_*, initial_agent, active_agents, max_session_*, attachments, links).
+- `pub(crate) struct EditorialAgentSpec` `name`/`command`/`args` fields (the struct itself was already pub(crate); only the `key` field had been upgraded prior).
+
+### Validation
+- `cargo test`: 74 passed, 0 failed.
+- `npm run typecheck` + `npm run build`: clean.
+- `lib.rs`: 7081 → 6840 lines (−241; net delta 6836+4 mod/use lines).
+
 ## [v0.3.24] - 2026-05-02
 
 Pure refactor — no behavior change. Begins migration step 5 ("editorial orchestration and artifacts") by extracting the small/standalone helpers cluster (active-agent filtering/resolution, review-complaint fingerprinting, RUNNING-artifact finalization, per-attempt running/error artifact writers) into a dedicated module. The heavy `run_editorial_session_inner` block stays in lib.rs for a follow-up batch.

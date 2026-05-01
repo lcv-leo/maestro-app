@@ -11,7 +11,7 @@
 // `Command::new` call outside the funnel.
 #![deny(clippy::disallowed_methods)]
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use regex::Regex;
 use reqwest::{blocking::Client, redirect::Policy, Url};
 use serde::{Deserialize, Serialize};
@@ -28,7 +28,7 @@ use std::{
         Arc, OnceLock,
     },
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 use tauri::Manager;
 
@@ -45,6 +45,7 @@ mod provider_runners;
 mod session_controls;
 mod session_evidence;
 mod session_persistence;
+mod session_resume;
 
 // Re-export the app_paths surface used throughout this file. The functions
 // keep their pre-extraction call sites (`sessions_dir()`, `app_root()`, etc.)
@@ -52,9 +53,9 @@ mod session_persistence;
 // `docs/code-split-plan.md`. See `app_paths.rs` for documentation.
 use crate::app_paths::{
     active_or_early_logs_dir, ai_provider_config_path, app_root, app_root_if_initialized,
-    bootstrap_config_path, checked_data_child_path, data_dir, human_log_path_for,
-    is_safe_data_file_name, logs_dir, resolve_portable_app_root, safe_run_id_from_entry,
-    sanitize_path_segment, sessions_dir, try_set_app_root,
+    bootstrap_config_path, checked_data_child_path, data_dir, human_log_path_for, logs_dir,
+    resolve_portable_app_root, safe_run_id_from_entry, sanitize_path_segment, sessions_dir,
+    try_set_app_root,
 };
 use crate::cloudflare::{
     ai_provider_secret_values, cloudflare_client, cloudflare_get, cloudflare_post_json,
@@ -82,6 +83,12 @@ use crate::provider_runners::{
 };
 use crate::session_persistence::{
     append_agent_cost_to_ledger, load_cost_ledger, load_session_contract, write_session_contract,
+};
+use crate::session_resume::{
+    count_known_session_markdown_artifacts, extract_bullet_code_value, extract_saved_initial_agent,
+    extract_saved_prompt, extract_saved_session_name, humanize_agent_name,
+    known_session_activity_unix, parse_created_at, remaining_session_duration,
+    session_time_exhausted, stable_text_fingerprint,
 };
 // Items below are only referenced from `mod tests` and cargo flags them as unused
 // when compiled without the test cfg. Re-importing inside the test module avoids
@@ -2833,31 +2840,6 @@ fn editorial_session_result(
 }
 
 
-fn parse_created_at(value: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(value)
-        .map(|value| value.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now())
-}
-
-fn remaining_session_duration(
-    created_at: DateTime<Utc>,
-    max_session_minutes: Option<u64>,
-) -> Option<Duration> {
-    let minutes = max_session_minutes?;
-    let deadline = created_at + chrono::Duration::minutes(minutes as i64);
-    let remaining = deadline - Utc::now();
-    if remaining.num_milliseconds() <= 0 {
-        Some(Duration::from_secs(0))
-    } else {
-        Some(Duration::from_millis(remaining.num_milliseconds() as u64))
-    }
-}
-
-fn session_time_exhausted(created_at: DateTime<Utc>, max_session_minutes: Option<u64>) -> bool {
-    remaining_session_duration(created_at, max_session_minutes)
-        .map(|duration| duration.as_secs() < 2)
-        .unwrap_or(false)
-}
 
 fn inspect_resumable_session_dir(path: &Path) -> Result<Option<ResumableSessionInfo>, String> {
     let session_dir = checked_data_child_path(path)?;
@@ -2969,11 +2951,11 @@ fn load_resume_session_state(agent_dir: &Path) -> Result<ResumeSessionState, Str
 }
 
 #[derive(Clone)]
-struct SessionArtifact {
-    round: usize,
-    agent: String,
-    role: String,
-    path: PathBuf,
+pub(crate) struct SessionArtifact {
+    pub(crate) round: usize,
+    pub(crate) agent: String,
+    pub(crate) role: String,
+    pub(crate) path: PathBuf,
 }
 
 fn find_latest_draft_artifact(agent_dir: &Path) -> Result<Option<SessionArtifact>, String> {
@@ -3138,192 +3120,6 @@ fn parse_agent_artifact_result(artifact: &SessionArtifact) -> Option<EditorialAg
     })
 }
 
-fn extract_bullet_code_value(text: &str, label: &str) -> Option<String> {
-    let prefix = format!("- {label}: `");
-    text.lines().find_map(|line| {
-        let value = line.trim().strip_prefix(&prefix)?;
-        let end = value.find('`')?;
-        Some(value[..end].trim().to_string())
-    })
-}
-
-fn humanize_agent_name(value: &str) -> String {
-    match value.to_ascii_lowercase().as_str() {
-        "claude" => "Claude".to_string(),
-        "codex" => "Codex".to_string(),
-        "gemini" => "Gemini".to_string(),
-        "deepseek" => "DeepSeek".to_string(),
-        other => other
-            .replace('_', " ")
-            .split_whitespace()
-            .map(|part| {
-                let mut chars = part.chars();
-                match chars.next() {
-                    Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
-                    None => String::new(),
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" "),
-    }
-}
-
-fn extract_saved_session_name(prompt_file: &str) -> Option<String> {
-    prompt_file.lines().find_map(|line| {
-        let value = line.strip_prefix("Sessao: ")?;
-        let value = value.trim();
-        if value.is_empty() {
-            None
-        } else {
-            Some(value.to_string())
-        }
-    })
-}
-
-fn extract_saved_initial_agent(prompt_file: &str) -> Option<String> {
-    prompt_file.lines().find_map(|line| {
-        let value = line.strip_prefix("Agente redator inicial: ")?;
-        let value = value.trim().trim_matches('`');
-        let (agent, invalid) = resolve_initial_agent_key(Some(value));
-        if invalid.is_some() {
-            None
-        } else {
-            Some(agent.to_string())
-        }
-    })
-}
-
-fn extract_saved_prompt(prompt_file: &str) -> Option<String> {
-    let marker = "\n\n";
-    let (_, prompt) = prompt_file.split_once(marker)?;
-    let (_, prompt) = prompt.split_once(marker)?;
-    let prompt = prompt.trim();
-    if prompt.is_empty() {
-        None
-    } else {
-        Some(prompt.to_string())
-    }
-}
-
-fn stable_text_fingerprint(text: &str) -> String {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in text.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("fnv64-{hash:016x}")
-}
-
-fn count_known_session_markdown_artifacts(
-    session_dir: &Path,
-    artifacts: &[SessionArtifact],
-) -> Result<usize, String> {
-    let session_dir = checked_data_child_path(session_dir)?;
-    let backup_stats = protocol_backup_stats(&session_dir)?;
-    let known_session_files = [
-        "prompt.md",
-        "protocolo.md",
-        "ata-da-sessao.md",
-        "texto-final.md",
-    ];
-    let session_file_count = known_session_files
-        .iter()
-        .filter(|file_name| session_dir.join(file_name).is_file())
-        .count();
-    Ok(session_file_count + backup_stats.count + artifacts.len())
-}
-
-fn known_session_activity_unix(
-    session_dir: &Path,
-    prompt_path: &Path,
-    protocol_path: &Path,
-    artifacts: &[SessionArtifact],
-) -> Option<u64> {
-    let backup_latest = protocol_backup_stats(session_dir)
-        .ok()
-        .and_then(|stats| stats.latest_activity_unix);
-    [
-        checked_data_child_path(session_dir).ok(),
-        checked_data_child_path(prompt_path).ok(),
-        checked_data_child_path(protocol_path).ok(),
-        checked_data_child_path(&session_dir.join("ata-da-sessao.md")).ok(),
-        checked_data_child_path(&session_dir.join("texto-final.md")).ok(),
-    ]
-    .into_iter()
-    .flatten()
-    .chain(artifacts.iter().map(|artifact| artifact.path.clone()))
-    .filter_map(|path| {
-        path.metadata()
-            .ok()
-            .and_then(|metadata| metadata.modified().ok())
-            .and_then(system_time_to_unix)
-    })
-    .chain(backup_latest)
-    .max()
-}
-
-struct ProtocolBackupStats {
-    count: usize,
-    latest_activity_unix: Option<u64>,
-}
-
-fn protocol_backup_stats(session_dir: &Path) -> Result<ProtocolBackupStats, String> {
-    let session_dir = checked_data_child_path(session_dir)?;
-    if !session_dir.is_dir() {
-        return Ok(ProtocolBackupStats {
-            count: 0,
-            latest_activity_unix: None,
-        });
-    }
-
-    let mut count = 0;
-    let mut latest_activity_unix = None;
-    for entry in fs::read_dir(&session_dir)
-        .map_err(|error| format!("failed to read session backup dir: {error}"))?
-    {
-        let entry =
-            entry.map_err(|error| format!("failed to read session backup entry: {error}"))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("failed to read session backup entry type: {error}"))?;
-        if !file_type.is_file() {
-            continue;
-        }
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if !is_protocol_backup_file_name(name) {
-            continue;
-        }
-        count += 1;
-        if let Ok(metadata) = entry.metadata() {
-            if let Some(modified) = metadata.modified().ok().and_then(system_time_to_unix) {
-                latest_activity_unix = Some(
-                    latest_activity_unix
-                        .map(|current: u64| current.max(modified))
-                        .unwrap_or(modified),
-                );
-            }
-        }
-    }
-
-    Ok(ProtocolBackupStats {
-        count,
-        latest_activity_unix,
-    })
-}
-
-fn is_protocol_backup_file_name(name: &str) -> bool {
-    is_safe_data_file_name(name) && name.starts_with("protocolo-anterior-") && name.ends_with(".md")
-}
-
-fn system_time_to_unix(value: SystemTime) -> Option<u64> {
-    value
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .map(|duration| duration.as_secs())
-}
 
 
 fn run_editorial_agent_for_spec(
@@ -5094,6 +4890,7 @@ mod tests {
     use crate::editorial_prompts::{claude_args, gemini_args};
     use crate::provider_retry::parse_retry_after_header;
     use crate::session_controls::{normalize_active_agents, provider_cost};
+    use crate::session_resume::protocol_backup_stats;
 
     fn test_manifest_attachment(
         session_dir: &Path,

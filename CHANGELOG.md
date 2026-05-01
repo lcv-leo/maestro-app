@@ -4,6 +4,26 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.28] - 2026-05-02
+
+Pure refactor — no behavior change. Continues migration step 5 by extracting session-time helpers, extract/parse utilities, and protocol-backup helpers into a dedicated module.
+
+### Changed (extracted to `src-tauri/src/session_resume.rs`, ~250 lines with doc header)
+- `pub(crate) fn parse_created_at`, `remaining_session_duration`, `session_time_exhausted` — wall-clock helpers around the optional `max_session_minutes` cap.
+- `pub(crate) fn extract_bullet_code_value`, `humanize_agent_name` — markdown-bullet parser + agent-key prettifier.
+- `pub(crate) fn extract_saved_session_name`, `extract_saved_initial_agent`, `extract_saved_prompt` — parse fields back out of saved `prompt.md`.
+- `pub(crate) fn stable_text_fingerprint` — FNV-64 hash for stable per-prompt identifiers.
+- `pub(crate) fn count_known_session_markdown_artifacts`, `known_session_activity_unix` — session-directory inspection helpers.
+- `pub(crate) struct ProtocolBackupStats` + `pub(crate) fn protocol_backup_stats`, `is_protocol_backup_file_name`, `system_time_to_unix` — `protocolo-anterior-*.md` summary.
+
+### `pub(crate)` visibility upgrades in `lib.rs`
+- `pub(crate) struct SessionArtifact` + 4 fields (`round`, `agent`, `role`, `path`).
+
+### Validation
+- `cargo test`: 74 passed.
+- `npm run typecheck` + `npm run build`: clean.
+- `lib.rs`: 6609 → 6398 lines (−211 deleted; 2 ranges: 2836-2860 + 3141-3326). Cleaned up 3 unused imports (`DateTime`, `SystemTime`/`UNIX_EPOCH`, `is_safe_data_file_name`) that no longer have callers in lib.rs.
+
 ## [v0.3.27] - 2026-05-02
 
 Pure refactor — no behavior change. Continues migration step 5 by extracting session contract + cost ledger persistence helpers into a dedicated module.

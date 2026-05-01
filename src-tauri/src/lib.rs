@@ -323,16 +323,27 @@ pub(crate) struct EditorialAgentSpec {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct SessionContract {
+    #[serde(default = "default_session_contract_schema_version")]
     schema_version: u8,
     run_id: String,
     session_name: String,
     created_at: String,
+    #[serde(default)]
     active_agents: Vec<String>,
+    #[serde(default)]
     initial_agent: String,
+    #[serde(default)]
     max_session_cost_usd: Option<f64>,
+    #[serde(default)]
     max_session_minutes: Option<u64>,
+    #[serde(default)]
     pub(crate) links: Vec<String>,
+    #[serde(default)]
     pub(crate) attachments: Vec<AttachmentManifestEntry>,
+}
+
+fn default_session_contract_schema_version() -> u8 {
+    1
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -369,6 +380,8 @@ struct TimedCommandOutput {
     output: Output,
     duration_ms: u128,
     timed_out: bool,
+    stdout_pipe_error: Option<String>,
+    stderr_pipe_error: Option<String>,
 }
 
 impl Default for BootstrapConfig {
@@ -2061,19 +2074,36 @@ fn run_editorial_session_core(
         .map_err(|error| format!("failed to create session dir: {error}"))?;
 
     let saved_contract = load_session_contract(&session_dir);
-    let active_agent_keys = if request.active_agents.is_some() {
-        normalize_active_agents(request.active_agents.as_ref())?
-    } else if let Some(contract) = saved_contract.as_ref() {
-        normalize_active_agents(Some(&contract.active_agents))?
-    } else {
-        normalize_active_agents(None)?
-    };
+    let (active_agent_keys, active_agents_source) = resolve_effective_active_agents(
+        request.active_agents.as_ref(),
+        saved_contract.as_ref().map(|contract| &contract.active_agents),
+    )?;
     let (draft_lead_key, invalid_initial_agent) =
         effective_draft_lead(request.initial_agent.as_deref(), &active_agent_keys);
     let draft_lead_name = selected_editorial_agent_specs(draft_lead_key, &active_agent_keys)
         .first()
         .map(|spec| spec.name)
         .unwrap_or("Claude");
+    let log_context = build_active_agents_resolved_log_context(
+        &run_id,
+        request.active_agents.as_ref(),
+        saved_contract.as_ref(),
+        &active_agent_keys,
+        active_agents_source,
+        draft_lead_key,
+        invalid_initial_agent.as_deref(),
+        request.max_session_cost_usd,
+        request.max_session_minutes,
+    );
+    let _ = write_log_record(
+        log_session,
+        LogEventInput {
+            level: "info".to_string(),
+            category: "session.editorial.active_agents_resolved".to_string(),
+            message: "effective active_agents and caps resolved before spawning".to_string(),
+            context: Some(log_context),
+        },
+    );
     let max_session_cost_usd =
         sanitize_optional_positive_f64(request.max_session_cost_usd.or_else(|| {
             saved_contract
@@ -2206,6 +2236,7 @@ fn run_editorial_session_core(
     let mut current_draft = String::new();
     let mut current_draft_path: Option<PathBuf> = None;
     let mut round = 1usize;
+    let mut agent_review_fingerprints: BTreeMap<String, Vec<u64>> = BTreeMap::new();
 
     if let Some(invalid_initial_agent) = invalid_initial_agent {
         let _ = write_log_record(
@@ -2635,6 +2666,39 @@ fn run_editorial_session_core(
             },
         );
 
+        for agent in &round_results {
+            if agent.status == "READY" {
+                continue;
+            }
+            let fingerprint =
+                review_complaint_fingerprint(&read_text_file(Path::new(&agent.output_path)).unwrap_or_default());
+            let history = agent_review_fingerprints
+                .entry(agent.name.clone())
+                .or_default();
+            history.push(fingerprint);
+            if history.len() > 3 {
+                history.remove(0);
+            }
+            if history.len() == 3 && history.windows(2).all(|pair| pair[0] == pair[1]) {
+                let _ = write_log_record(
+                    log_session,
+                    LogEventInput {
+                        level: "warn".to_string(),
+                        category: "session.divergence.persistent".to_string(),
+                        message: "agent has repeated the same NOT_READY rebuttal across 3 consecutive rounds".to_string(),
+                        context: Some(json!({
+                            "run_id": &run_id,
+                            "round": round,
+                            "agent": agent.name.clone(),
+                            "status": agent.status.clone(),
+                            "fingerprint": history.last().copied(),
+                            "policy": "partial_v0_3_15_surface_only_no_auto_resolve"
+                        })),
+                    },
+                );
+            }
+        }
+
         round += 1;
         let revision_prompt = build_revision_prompt(
             request,
@@ -2831,6 +2895,7 @@ fn editorial_session_result(
     consensus_ready: bool,
     status: &str,
 ) -> EditorialSessionResult {
+    finalize_running_agent_artifacts(&context.session_dir.join("agent-runs"));
     EditorialSessionResult {
         run_id: context.run_id.to_string(),
         session_dir: context.session_dir.to_string_lossy().to_string(),
@@ -2867,7 +2932,17 @@ fn cost_ledger_path(session_dir: &Path) -> PathBuf {
 fn load_session_contract(session_dir: &Path) -> Option<SessionContract> {
     let path = session_contract_path(session_dir);
     let text = read_text_file(&path).ok()?;
-    serde_json::from_str::<SessionContract>(&text).ok()
+    match serde_json::from_str::<SessionContract>(&text) {
+        Ok(contract) => Some(contract),
+        Err(error) => {
+            eprintln!(
+                "session_contract_parse_failed path={} error={}",
+                path.display(),
+                error
+            );
+            None
+        }
+    }
 }
 
 fn write_session_contract(session_dir: &Path, contract: &SessionContract) -> Result<(), String> {
@@ -3195,6 +3270,8 @@ fn parse_agent_artifact_result(artifact: &SessionArtifact) -> Option<EditorialAg
         "blocked"
     } else if status.starts_with("EXEC_ERROR")
         || status == "AGENT_FAILED_NO_OUTPUT"
+        || status == "AGENT_FAILED_EMPTY"
+        || status == "EMPTY_DRAFT"
         || status == "RUNNING"
     {
         "error"
@@ -4122,7 +4199,11 @@ fn run_deepseek_api_agent(
                 .and_then(Value::as_str)
                 .unwrap_or(&model);
             let status = if role == "review" {
-                extract_maestro_status(&stdout).unwrap_or("NOT_READY")
+                if stdout.trim().is_empty() {
+                    "AGENT_FAILED_EMPTY"
+                } else {
+                    extract_maestro_status(&stdout).unwrap_or("NOT_READY")
+                }
             } else if stdout.trim().is_empty() {
                 "EMPTY_DRAFT"
             } else {
@@ -4130,7 +4211,7 @@ fn run_deepseek_api_agent(
             };
             let tone = if status == "READY" || status == "DRAFT_CREATED" {
                 "ok"
-            } else if status == "EMPTY_DRAFT" {
+            } else if status == "EMPTY_DRAFT" || status == "AGENT_FAILED_EMPTY" {
                 "error"
             } else {
                 "warn"
@@ -5523,8 +5604,12 @@ fn run_editorial_agent(
             let stderr = String::from_utf8_lossy(&result.output.stderr).to_string();
             let exit_code = result.output.status.code();
             let status = if role == "review" {
-                if !result.output.status.success() && stdout.trim().is_empty() {
-                    "AGENT_FAILED_NO_OUTPUT"
+                if stdout.trim().is_empty() {
+                    if result.output.status.success() {
+                        "AGENT_FAILED_EMPTY"
+                    } else {
+                        "AGENT_FAILED_NO_OUTPUT"
+                    }
                 } else {
                     extract_maestro_status(&stdout).unwrap_or("NOT_READY")
                 }
@@ -5534,6 +5619,8 @@ fn run_editorial_agent(
                 "DRAFT_CREATED"
             };
             let tone = if result.timed_out {
+                "error"
+            } else if status == "AGENT_FAILED_EMPTY" || status == "AGENT_FAILED_NO_OUTPUT" {
                 "error"
             } else if result.output.status.success()
                 && (status == "READY" || status == "DRAFT_CREATED")
@@ -5546,6 +5633,8 @@ fn run_editorial_agent(
             };
             let note = if status == "AGENT_FAILED_NO_OUTPUT" {
                 "\n> O agente encerrou sem entregar avaliacao editorial em stdout. Este arquivo e diagnostico operacional, nao parecer de revisao.\n"
+            } else if status == "AGENT_FAILED_EMPTY" {
+                "\n> O agente encerrou com exit code 0 mas devolveu stdout vazio. Tratado como falha operacional (NAO READY), nao como parecer editorial.\n"
             } else {
                 ""
             };
@@ -5554,8 +5643,25 @@ fn run_editorial_agent(
                 .as_ref()
                 .map(|input_path| format!("- Input file: `{}`\n", input_path.to_string_lossy()))
                 .unwrap_or_else(|| "- Input file: `inline stdin`\n".to_string());
+            let pipe_diagnostic_line = if result.stdout_pipe_error.is_some()
+                || result.stderr_pipe_error.is_some()
+            {
+                format!(
+                    "- Stdout pipe error: `{}`\n- Stderr pipe error: `{}`\n",
+                    result
+                        .stdout_pipe_error
+                        .as_deref()
+                        .unwrap_or("none"),
+                    result
+                        .stderr_pipe_error
+                        .as_deref()
+                        .unwrap_or("none"),
+                )
+            } else {
+                String::new()
+            };
             let artifact = format!(
-                "# {name} - {role}\n\n- CLI: `{command}`\n- Resolved path: `{}`\n- Args: `{}`\n- Status: `{status}`\n- Exit code: `{}`\n- Duration ms: `{}`\n- Timed out: `{}`\n- Stdin chars: `{}`\n- Original prompt chars: `{}`\n{input_line}- Stdout chars: `{}`\n- Stderr chars: `{}`\n{note}\n## Stdout\n\n```text\n{}\n```\n\n## Stderr\n\n```text\n{}\n```\n",
+                "# {name} - {role}\n\n- CLI: `{command}`\n- Resolved path: `{}`\n- Args: `{}`\n- Status: `{status}`\n- Exit code: `{}`\n- Duration ms: `{}`\n- Timed out: `{}`\n- Stdin chars: `{}`\n- Original prompt chars: `{}`\n{input_line}- Stdout chars: `{}`\n- Stderr chars: `{}`\n{pipe_diagnostic_line}{note}\n## Stdout\n\n```text\n{}\n```\n\n## Stderr\n\n```text\n{}\n```\n",
                 path.to_string_lossy(),
                 sanitize_text(&effective_input.args.join(" "), 1000),
                 exit_code
@@ -5568,7 +5674,7 @@ fn run_editorial_agent(
                 stdout.chars().count(),
                 stderr.chars().count(),
                 stdout,
-                sanitize_text(&stderr, 8000)
+                truncate_text_head_tail(&stderr, 1024, 60 * 1024)
             );
             let _ = write_text_file(output_path, &artifact);
 
@@ -5715,6 +5821,146 @@ fn prepare_agent_input(
             original_chars,
             input_path: None,
         },
+    }
+}
+
+/// Build the JSON context payload for the `session.editorial.active_agents_resolved`
+/// NDJSON log entry. Extracted so unit tests can pin the field shape and source-label
+/// derivation independently of the surrounding session loop.
+#[allow(clippy::too_many_arguments)]
+fn build_active_agents_resolved_log_context(
+    run_id: &str,
+    request_active_agents: Option<&Vec<String>>,
+    saved_contract: Option<&SessionContract>,
+    active_agent_keys: &[String],
+    active_agents_source: &str,
+    draft_lead_key: &str,
+    invalid_initial_agent: Option<&str>,
+    request_max_session_cost_usd: Option<f64>,
+    request_max_session_minutes: Option<u64>,
+) -> Value {
+    let max_session_cost_usd_source = if request_max_session_cost_usd.is_some() {
+        "request"
+    } else if saved_contract
+        .and_then(|contract| contract.max_session_cost_usd)
+        .is_some()
+    {
+        "saved_contract"
+    } else {
+        "unset"
+    };
+    let max_session_minutes_source = if request_max_session_minutes.is_some() {
+        "request"
+    } else if saved_contract
+        .and_then(|contract| contract.max_session_minutes)
+        .is_some()
+    {
+        "saved_contract"
+    } else {
+        "unset"
+    };
+    json!({
+        "run_id": run_id,
+        "active_agents_requested": request_active_agents.cloned(),
+        "active_agents_saved_contract": saved_contract
+            .map(|contract| contract.active_agents.clone()),
+        "active_agents_effective": active_agent_keys.to_vec(),
+        "active_agents_source": active_agents_source,
+        "draft_lead_key": draft_lead_key,
+        "invalid_initial_agent": invalid_initial_agent,
+        "max_session_cost_usd_requested": request_max_session_cost_usd,
+        "max_session_cost_usd_saved": saved_contract
+            .and_then(|contract| contract.max_session_cost_usd),
+        "max_session_cost_usd_source": max_session_cost_usd_source,
+        "max_session_minutes_requested": request_max_session_minutes,
+        "max_session_minutes_saved": saved_contract
+            .and_then(|contract| contract.max_session_minutes),
+        "max_session_minutes_source": max_session_minutes_source,
+    })
+}
+
+/// Decide the effective active_agents list and the source label for the audit log.
+/// Mirrors the pre-existing decision tree but is unit-testable in isolation.
+/// Returns Err only when normalize_active_agents rejects the chosen list.
+fn resolve_effective_active_agents(
+    request_active_agents: Option<&Vec<String>>,
+    saved_active_agents: Option<&Vec<String>>,
+) -> Result<(Vec<String>, &'static str), String> {
+    if request_active_agents.is_some() {
+        let normalized = normalize_active_agents(request_active_agents)?;
+        return Ok((normalized, "request"));
+    }
+    if let Some(saved) = saved_active_agents {
+        if !saved.is_empty() {
+            let normalized = normalize_active_agents(Some(saved))?;
+            return Ok((normalized, "saved_contract"));
+        }
+    }
+    let normalized = normalize_active_agents(None)?;
+    Ok((normalized, "default_all"))
+}
+
+/// Hash the actionable portion of a review artifact (the agent's stdout body)
+/// so consecutive identical NOT_READY rebuttals can be detected as persistent
+/// divergence. Walks the artifact's `## Stdout` block, collapses whitespace,
+/// and returns a stable u64 fingerprint based on the first 1024 chars.
+fn review_complaint_fingerprint(artifact: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let stdout = extract_stdout_block(artifact).unwrap_or(artifact);
+    let normalized: String = stdout
+        .chars()
+        .map(|character| {
+            if character.is_whitespace() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let head: String = normalized.chars().take(1024).collect();
+    let mut hasher = DefaultHasher::new();
+    head.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Final-pass safety net for agent-runs/*.md files left at `Status: RUNNING`.
+/// Writes only when the file actually contains the RUNNING placeholder,
+/// rewriting it to AGENT_FAILED_NO_OUTPUT and appending a diagnostic note.
+/// This protects against the rare case where a process exits without producing
+/// stdout (the structured-result path normally overwrites the placeholder).
+fn finalize_running_agent_artifacts(agent_dir: &Path) {
+    let entries = match fs::read_dir(agent_dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        let Ok(contents) = read_text_file(&path) else {
+            continue;
+        };
+        if !contents.contains("- Status: `RUNNING`") {
+            continue;
+        }
+        let rewritten = contents.replacen(
+            "- Status: `RUNNING`",
+            "- Status: `AGENT_FAILED_NO_OUTPUT`",
+            1,
+        );
+        let with_note = if rewritten.contains("\n> Sessao finalizada com este artefato ainda em RUNNING") {
+            rewritten
+        } else {
+            format!(
+                "{rewritten}\n> Sessao finalizada com este artefato ainda em RUNNING. Reclassificado para AGENT_FAILED_NO_OUTPUT na finalizacao.\n"
+            )
+        };
+        let _ = write_text_file(&path, &with_note);
     }
 }
 
@@ -5963,6 +6209,8 @@ fn build_blocked_minutes_decision(agents: &[EditorialAgentResult]) -> String {
                 || agent.tone == "blocked"
                 || agent.status == "RUNNING"
                 || agent.status == "AGENT_FAILED_NO_OUTPUT"
+                || agent.status == "AGENT_FAILED_EMPTY"
+                || agent.status == "EMPTY_DRAFT"
                 || agent.status.starts_with("EXEC_ERROR")
         })
         .collect::<Vec<_>>();
@@ -7696,14 +7944,20 @@ fn run_resolved_command_observed(
     let stderr_bytes = Arc::new(AtomicU64::new(0));
     let stdout_counter = Arc::clone(&stdout_bytes);
     let stderr_counter = Arc::clone(&stderr_bytes);
-    let stdout_handle = thread::spawn(move || read_pipe_to_end_counting(stdout, stdout_counter));
-    let stderr_handle = thread::spawn(move || read_pipe_to_end_counting(stderr, stderr_counter));
+    let stdout_handle =
+        thread::spawn(move || read_pipe_to_end_counting_classified(stdout, stdout_counter));
+    let stderr_handle =
+        thread::spawn(move || read_pipe_to_end_counting_classified(stderr, stderr_counter));
     let mut last_progress = Instant::now();
 
     loop {
         if let Some(status) = child.try_wait()? {
-            let stdout = stdout_handle.join().unwrap_or_default();
-            let stderr = stderr_handle.join().unwrap_or_default();
+            let (stdout, stdout_pipe_error) = stdout_handle
+                .join()
+                .unwrap_or_else(|_| (Vec::new(), Some("stdout_thread_panic".to_string())));
+            let (stderr, stderr_pipe_error) = stderr_handle
+                .join()
+                .unwrap_or_else(|_| (Vec::new(), Some("stderr_thread_panic".to_string())));
             return Ok(TimedCommandOutput {
                 output: Output {
                     status,
@@ -7712,6 +7966,8 @@ fn run_resolved_command_observed(
                 },
                 duration_ms: started.elapsed().as_millis(),
                 timed_out: false,
+                stdout_pipe_error,
+                stderr_pipe_error,
             });
         }
 
@@ -7719,8 +7975,12 @@ fn run_resolved_command_observed(
             if started.elapsed() >= timeout {
                 let _ = child.kill();
                 let status = child.wait()?;
-                let stdout = stdout_handle.join().unwrap_or_default();
-                let stderr = stderr_handle.join().unwrap_or_default();
+                let (stdout, stdout_pipe_error) = stdout_handle
+                    .join()
+                    .unwrap_or_else(|_| (Vec::new(), Some("stdout_thread_panic".to_string())));
+                let (stderr, stderr_pipe_error) = stderr_handle
+                    .join()
+                    .unwrap_or_else(|_| (Vec::new(), Some("stderr_thread_panic".to_string())));
                 return Ok(TimedCommandOutput {
                     output: Output {
                         status,
@@ -7729,6 +7989,8 @@ fn run_resolved_command_observed(
                     },
                     duration_ms: started.elapsed().as_millis(),
                     timed_out: true,
+                    stdout_pipe_error,
+                    stderr_pipe_error,
                 });
             }
         }
@@ -7750,9 +8012,13 @@ fn run_resolved_command_observed(
     }
 }
 
-fn read_pipe_to_end_counting(pipe: Option<impl Read>, byte_counter: Arc<AtomicU64>) -> Vec<u8> {
+fn read_pipe_to_end_counting_classified(
+    pipe: Option<impl Read>,
+    byte_counter: Arc<AtomicU64>,
+) -> (Vec<u8>, Option<String>) {
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 8192];
+    let mut pipe_error: Option<String> = None;
     if let Some(mut pipe) = pipe {
         loop {
             match pipe.read(&mut chunk) {
@@ -7761,11 +8027,33 @@ fn read_pipe_to_end_counting(pipe: Option<impl Read>, byte_counter: Arc<AtomicU6
                     byte_counter.fetch_add(count as u64, Ordering::Relaxed);
                     buffer.extend_from_slice(&chunk[..count]);
                 }
-                Err(_) => break,
+                Err(error) => {
+                    pipe_error = Some(classify_pipe_error(&error));
+                    break;
+                }
             }
         }
     }
-    buffer
+    (buffer, pipe_error)
+}
+
+fn classify_pipe_error(error: &std::io::Error) -> String {
+    let raw = error.raw_os_error();
+    let kind = error.kind();
+    let label = match (raw, kind) {
+        (Some(109), _) => "windows_error_109_broken_pipe",
+        (Some(232), _) => "windows_error_232_pipe_closing",
+        (Some(233), _) => "windows_error_233_pipe_no_listener",
+        (_, std::io::ErrorKind::BrokenPipe) => "broken_pipe",
+        (_, std::io::ErrorKind::UnexpectedEof) => "unexpected_eof",
+        (_, std::io::ErrorKind::Interrupted) => "interrupted",
+        (_, std::io::ErrorKind::TimedOut) => "timed_out",
+        _ => "other",
+    };
+    let raw_label = raw
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    format!("{label} (kind={kind:?}, raw_os_error={raw_label})")
 }
 
 fn resolved_command_builder(path: &Path, args: &[String]) -> Command {
@@ -7781,6 +8069,7 @@ fn resolved_command_builder(path: &Path, args: &[String]) -> Command {
             let mut command =
                 hidden_command(std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string()));
             command.arg("/C").arg(path).args(args);
+            apply_editorial_agent_environment(&mut command, path);
             return command;
         }
 
@@ -7790,13 +8079,32 @@ fn resolved_command_builder(path: &Path, args: &[String]) -> Command {
                 .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
                 .arg(path)
                 .args(args);
+            apply_editorial_agent_environment(&mut command, path);
             return command;
         }
     }
 
     let mut command = hidden_command(path);
     command.args(args);
+    apply_editorial_agent_environment(&mut command, path);
     command
+}
+
+fn apply_editorial_agent_environment(command: &mut Command, path: &Path) {
+    command
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("PYTHONUTF8", "1")
+        .env("LC_ALL", "C.UTF-8")
+        .env("LANG", "C.UTF-8");
+
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if stem == "gemini" {
+        command.env("GEMINI_CLI_TRUST_WORKSPACE", "true");
+    }
 }
 
 fn sanitize_short(value: &str, max_len: usize) -> String {
@@ -7811,6 +8119,30 @@ fn sanitize_short(value: &str, max_len: usize) -> String {
 pub(crate) fn sanitize_text(value: &str, max_len: usize) -> String {
     let redacted = redact_secrets(value);
     redacted.chars().take(max_len).collect()
+}
+
+/// Truncates large stderr/stdout text preserving head and tail with a marker in the middle.
+/// Useful for CLIs (Codex, others) that emit large preambles followed by the actual error tail.
+pub(crate) fn truncate_text_head_tail(
+    value: &str,
+    head_chars: usize,
+    tail_chars: usize,
+) -> String {
+    let redacted = redact_secrets(value);
+    let total = redacted.chars().count();
+    let cap = head_chars + tail_chars;
+    if total <= cap {
+        return redacted;
+    }
+    let head: String = redacted.chars().take(head_chars).collect();
+    let tail: String = redacted
+        .chars()
+        .skip(total - tail_chars)
+        .collect();
+    let dropped = total - cap;
+    format!(
+        "{head}\n\n[... {dropped} chars truncated (head {head_chars} / tail {tail_chars}) ...]\n\n{tail}"
+    )
 }
 
 fn sanitize_value(value: Value, depth: usize) -> Value {
@@ -8325,6 +8657,339 @@ mod tests {
         assert_eq!(parsed.status, "AGENT_FAILED_NO_OUTPUT");
         assert_eq!(parsed.tone, "error");
         let _ = fs::remove_dir_all(&session_dir);
+    }
+
+    #[test]
+    fn truncate_text_head_tail_preserves_both_ends() {
+        let body = "A".repeat(100) + &"X".repeat(2_000) + &"Z".repeat(100);
+        let truncated = truncate_text_head_tail(&body, 50, 50);
+        assert!(truncated.starts_with(&"A".repeat(50)));
+        assert!(truncated.ends_with(&"Z".repeat(50)));
+        assert!(truncated.contains("chars truncated"));
+    }
+
+    #[test]
+    fn truncate_text_head_tail_passthrough_when_under_cap() {
+        let body = "short body";
+        let truncated = truncate_text_head_tail(body, 1024, 60 * 1024);
+        assert_eq!(truncated, "short body");
+    }
+
+    #[test]
+    fn session_contract_loads_legacy_payload_without_links_attachments() {
+        let session_dir = sessions_dir().join("run-legacy-contract-test");
+        let _ = fs::remove_dir_all(&session_dir);
+        fs::create_dir_all(&session_dir).unwrap();
+        let legacy_payload = r#"{
+            "run_id": "run-legacy",
+            "session_name": "Legacy",
+            "created_at": "2026-04-01T12:00:00.000000+00:00",
+            "active_agents": ["claude"],
+            "initial_agent": "claude"
+        }"#;
+        write_text_file(
+            &session_dir.join("session-contract.json"),
+            legacy_payload,
+        )
+        .unwrap();
+        let loaded = load_session_contract(&session_dir).expect("legacy contract should parse");
+        assert_eq!(loaded.created_at, "2026-04-01T12:00:00.000000+00:00");
+        assert_eq!(loaded.active_agents, vec!["claude".to_string()]);
+        assert_eq!(loaded.links.len(), 0);
+        assert_eq!(loaded.attachments.len(), 0);
+        assert_eq!(
+            loaded.schema_version, 1,
+            "schema_version must default to 1 when missing from legacy payload"
+        );
+        let _ = fs::remove_dir_all(&session_dir);
+    }
+
+    #[test]
+    fn resolve_effective_active_agents_request_overrides_saved() {
+        let request = vec!["claude".to_string()];
+        let saved = vec!["codex".to_string(), "gemini".to_string()];
+        let (effective, source) = resolve_effective_active_agents(Some(&request), Some(&saved))
+            .expect("request override should resolve");
+        assert_eq!(effective, vec!["claude".to_string()]);
+        assert_eq!(source, "request");
+    }
+
+    #[test]
+    fn resolve_effective_active_agents_falls_back_to_saved_contract_when_request_omits() {
+        let saved = vec!["codex".to_string(), "gemini".to_string()];
+        let (effective, source) = resolve_effective_active_agents(None, Some(&saved))
+            .expect("saved fallback should resolve");
+        assert_eq!(effective, vec!["codex".to_string(), "gemini".to_string()]);
+        assert_eq!(source, "saved_contract");
+    }
+
+    #[test]
+    fn resolve_effective_active_agents_falls_back_to_default_when_both_missing() {
+        let (effective, source) = resolve_effective_active_agents(None, None)
+            .expect("default fallback should resolve");
+        assert_eq!(effective.len(), 4);
+        assert_eq!(source, "default_all");
+    }
+
+    #[test]
+    fn resolve_effective_active_agents_recovers_when_saved_contract_is_empty() {
+        let saved: Vec<String> = Vec::new();
+        let (effective, source) = resolve_effective_active_agents(None, Some(&saved))
+            .expect("empty saved contract should fall through, not error");
+        assert_eq!(effective.len(), 4);
+        assert_eq!(source, "default_all");
+    }
+
+    #[test]
+    fn resolve_effective_active_agents_rejects_empty_request_array() {
+        let request: Vec<String> = Vec::new();
+        let result = resolve_effective_active_agents(Some(&request), None);
+        assert!(
+            result.is_err(),
+            "empty request array must be a hard error, not silent override"
+        );
+    }
+
+    #[test]
+    fn resolve_effective_active_agents_rejects_empty_request_even_when_saved_contract_present() {
+        let request: Vec<String> = Vec::new();
+        let saved = vec!["codex".to_string()];
+        let result = resolve_effective_active_agents(Some(&request), Some(&saved));
+        assert!(
+            result.is_err(),
+            "empty request array must be a hard error even when a saved contract exists; explicit Some([]) does not silently fall back to saved"
+        );
+    }
+
+    #[test]
+    fn active_agents_resolved_log_context_pins_field_shape_and_sources() {
+        let saved = SessionContract {
+            schema_version: 1,
+            run_id: "run-saved".to_string(),
+            session_name: "Saved".to_string(),
+            created_at: "2026-04-01T00:00:00.000Z".to_string(),
+            active_agents: vec!["codex".to_string(), "gemini".to_string()],
+            initial_agent: "codex".to_string(),
+            max_session_cost_usd: Some(7.5),
+            max_session_minutes: None,
+            links: Vec::new(),
+            attachments: Vec::new(),
+        };
+        let effective = vec!["codex".to_string(), "gemini".to_string()];
+        let context = build_active_agents_resolved_log_context(
+            "run-test",
+            None,
+            Some(&saved),
+            &effective,
+            "saved_contract",
+            "codex",
+            None,
+            None,
+            Some(45),
+        );
+        let object = context
+            .as_object()
+            .expect("log context must be a JSON object");
+        for required_key in [
+            "run_id",
+            "active_agents_requested",
+            "active_agents_saved_contract",
+            "active_agents_effective",
+            "active_agents_source",
+            "draft_lead_key",
+            "invalid_initial_agent",
+            "max_session_cost_usd_requested",
+            "max_session_cost_usd_saved",
+            "max_session_cost_usd_source",
+            "max_session_minutes_requested",
+            "max_session_minutes_saved",
+            "max_session_minutes_source",
+        ] {
+            assert!(
+                object.contains_key(required_key),
+                "log context must contain key {required_key}"
+            );
+        }
+        assert_eq!(object["active_agents_source"], "saved_contract");
+        assert_eq!(
+            object["max_session_cost_usd_source"], "saved_contract",
+            "cost source should fall back to saved contract when request omits it"
+        );
+        assert_eq!(
+            object["max_session_minutes_source"], "request",
+            "minutes source should be request when request supplies the value"
+        );
+        assert_eq!(object["max_session_cost_usd_saved"], 7.5);
+        assert_eq!(object["max_session_minutes_requested"], 45);
+        assert!(object["active_agents_requested"].is_null());
+    }
+
+    #[test]
+    fn active_agents_resolved_log_context_marks_caps_unset_when_neither_request_nor_saved_supply() {
+        let effective = vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "gemini".to_string(),
+            "deepseek".to_string(),
+        ];
+        let context = build_active_agents_resolved_log_context(
+            "run-test",
+            None,
+            None,
+            &effective,
+            "default_all",
+            "claude",
+            None,
+            None,
+            None,
+        );
+        assert_eq!(context["max_session_cost_usd_source"], "unset");
+        assert_eq!(context["max_session_minutes_source"], "unset");
+        assert_eq!(context["active_agents_source"], "default_all");
+        assert!(context["active_agents_saved_contract"].is_null());
+    }
+
+    #[test]
+    fn finalize_running_agent_artifacts_rewrites_running_to_failed_no_output() {
+        let session_dir = sessions_dir().join("run-finalize-running-test");
+        let _ = fs::remove_dir_all(&session_dir);
+        let agent_dir = session_dir.join("agent-runs");
+        fs::create_dir_all(&agent_dir).unwrap();
+        let stuck_path = agent_dir.join("round-007-codex-review.md");
+        let stuck_artifact = "# Codex - review\n\n- CLI: `codex`\n- Status: `RUNNING`\n- Exit code: `unknown`\n\n## Stdout\n\n```text\n\n```\n";
+        write_text_file(&stuck_path, stuck_artifact).unwrap();
+        let normal_path = agent_dir.join("round-007-claude-review.md");
+        let normal_artifact = "# Claude - review\n\n- CLI: `claude`\n- Status: `READY`\n- Exit code: `0`\n\n## Stdout\n\n```text\nMAESTRO_STATUS=READY\n```\n";
+        write_text_file(&normal_path, normal_artifact).unwrap();
+
+        finalize_running_agent_artifacts(&agent_dir);
+
+        let stuck_after = read_text_file(&stuck_path).unwrap();
+        assert!(stuck_after.contains("- Status: `AGENT_FAILED_NO_OUTPUT`"));
+        assert!(!stuck_after.contains("- Status: `RUNNING`"));
+        assert!(stuck_after.contains("Reclassificado para AGENT_FAILED_NO_OUTPUT"));
+        let normal_after = read_text_file(&normal_path).unwrap();
+        assert_eq!(normal_after, normal_artifact);
+        let _ = fs::remove_dir_all(&session_dir);
+    }
+
+    #[test]
+    fn classify_pipe_error_recognises_windows_109_as_broken_pipe() {
+        let error = std::io::Error::from_raw_os_error(109);
+        let classification = classify_pipe_error(&error);
+        assert!(classification.contains("windows_error_109_broken_pipe"));
+        assert!(classification.contains("raw_os_error=109"));
+    }
+
+    #[test]
+    fn classify_pipe_error_recognises_kind_broken_pipe() {
+        let error = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "child closed pipe");
+        let classification = classify_pipe_error(&error);
+        assert!(classification.contains("broken_pipe"));
+    }
+
+    #[test]
+    fn editorial_agent_environment_sets_utf8_for_all_clis() {
+        let mut command = std::process::Command::new("printf");
+        let path = Path::new("printf");
+        apply_editorial_agent_environment(&mut command, path);
+        let envs: Vec<(String, String)> = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                Some((
+                    key.to_str()?.to_string(),
+                    value?.to_str()?.to_string(),
+                ))
+            })
+            .collect();
+        let envs_map: std::collections::BTreeMap<_, _> = envs.into_iter().collect();
+        assert_eq!(envs_map.get("PYTHONIOENCODING").map(String::as_str), Some("utf-8"));
+        assert_eq!(envs_map.get("PYTHONUTF8").map(String::as_str), Some("1"));
+        assert_eq!(envs_map.get("LC_ALL").map(String::as_str), Some("C.UTF-8"));
+        assert_eq!(envs_map.get("LANG").map(String::as_str), Some("C.UTF-8"));
+        assert_eq!(envs_map.get("GEMINI_CLI_TRUST_WORKSPACE"), None);
+    }
+
+    #[test]
+    fn editorial_agent_environment_sets_gemini_trust_only_for_gemini_cli() {
+        let mut command = std::process::Command::new("gemini");
+        let path = Path::new("gemini");
+        apply_editorial_agent_environment(&mut command, path);
+        let envs: Vec<(String, String)> = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                Some((
+                    key.to_str()?.to_string(),
+                    value?.to_str()?.to_string(),
+                ))
+            })
+            .collect();
+        let envs_map: std::collections::BTreeMap<_, _> = envs.into_iter().collect();
+        assert_eq!(
+            envs_map.get("GEMINI_CLI_TRUST_WORKSPACE").map(String::as_str),
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn review_complaint_fingerprint_stable_across_whitespace_normalization() {
+        let artifact_a = "# C - review\n\n- Status: NOT_READY\n\n## Stdout\n\n```text\nLink quebrado\n  na referencia 12.\n```\n";
+        let artifact_b = "# C - review\n\n- Status: NOT_READY\n\n## Stdout\n\n```text\nLink   quebrado na referencia 12.\n```\n";
+        assert_eq!(
+            review_complaint_fingerprint(artifact_a),
+            review_complaint_fingerprint(artifact_b)
+        );
+    }
+
+    #[test]
+    fn review_complaint_fingerprint_differs_on_distinct_complaints() {
+        let artifact_a = "# C - review\n\n## Stdout\n\n```text\nLink A quebrado.\n```\n";
+        let artifact_b = "# C - review\n\n## Stdout\n\n```text\nLink B quebrado.\n```\n";
+        assert_ne!(
+            review_complaint_fingerprint(artifact_a),
+            review_complaint_fingerprint(artifact_b)
+        );
+    }
+
+    #[test]
+    fn nonzero_empty_review_with_success_exit_classifies_as_agent_failed_empty() {
+        let session_dir = sessions_dir().join("run-success-empty-review-test");
+        let _ = fs::remove_dir_all(&session_dir);
+        let agent_dir = session_dir.join("agent-runs");
+        fs::create_dir_all(&agent_dir).unwrap();
+        let path = agent_dir.join("round-001-deepseek-review.md");
+        write_text_file(
+            &path,
+            "# DeepSeek - review\n\n- CLI: `deepseek-api`\n- Status: `AGENT_FAILED_EMPTY`\n- Exit code: `0`\n- Duration ms: `120`\n\n## Stdout\n\n```text\n\n```\n",
+        )
+        .unwrap();
+        let artifact = parse_agent_artifact_name(&agent_dir, "round-001-deepseek-review.md")
+            .expect("artifact should parse");
+        let parsed = parse_agent_artifact_result(&artifact).expect("artifact result should parse");
+        assert_eq!(parsed.status, "AGENT_FAILED_EMPTY");
+        assert_eq!(parsed.tone, "error");
+        let _ = fs::remove_dir_all(&session_dir);
+    }
+
+    #[test]
+    fn blocked_minutes_decision_includes_agent_failed_empty_in_operational_failures() {
+        let agents = vec![EditorialAgentResult {
+            name: "DeepSeek".to_string(),
+            role: "review".to_string(),
+            cli: "deepseek-api".to_string(),
+            tone: "error".to_string(),
+            status: "AGENT_FAILED_EMPTY".to_string(),
+            duration_ms: 120,
+            exit_code: Some(0),
+            output_path: "agent-runs/round-001-deepseek-review.md".to_string(),
+            usage_input_tokens: None,
+            usage_output_tokens: None,
+            cost_usd: None,
+            cost_estimated: None,
+        }];
+        let decision = build_blocked_minutes_decision(&agents);
+        assert!(decision.contains("Falhas operacionais"));
+        assert!(decision.contains("AGENT_FAILED_EMPTY"));
     }
 
     #[test]

@@ -2087,6 +2087,11 @@ export function App() {
               protocol_text: resumeOptions.protocolText ?? null,
               protocol_hash: resumeOptions.protocolHash ?? null,
               initial_agent: selectedInitialAgent,
+              active_agents: runOptions?.activeAgents ?? null,
+              max_session_cost_usd: runOptions?.maxSessionCostUsd ?? null,
+              max_session_minutes: runOptions?.maxSessionMinutes ?? null,
+              attachments: runOptions?.attachments ?? [],
+              links: runOptions?.links ?? null,
             },
           })
         : await invoke<EditorialSessionResult>('run_editorial_session', {
@@ -2760,25 +2765,25 @@ export function App() {
                     </div>
                   )}
                   <div className="limit-grid">
-                    <label>
+                    <label title="Verificado entre rodadas e como timeout por chamada. Em branco = sem teto.">
                       <Clock3 size={16} />
                       <span>Tempo max. min</span>
                       <input
                         value={maxSessionMinutes}
                         onChange={(event) => setMaxSessionMinutes(event.target.value)}
                         inputMode="numeric"
-                        placeholder="ignorar"
+                        placeholder="60 (em branco = sem teto)"
                         disabled={isRunPreparing}
                       />
                     </label>
-                    <label>
+                    <label title="Aplica-se apenas a peers em modo API. Peers via CLI rodam sob assinatura. Em branco = sem teto.">
                       <Database size={16} />
                       <span>Custo max. USD</span>
                       <input
                         value={maxSessionCostUsd}
                         onChange={(event) => setMaxSessionCostUsd(event.target.value)}
                         inputMode="decimal"
-                        placeholder="ignorar"
+                        placeholder="5.00 (em branco = sem teto)"
                         disabled={isRunPreparing}
                       />
                     </label>

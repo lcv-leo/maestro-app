@@ -35,6 +35,7 @@ use tauri::Manager;
 mod app_paths;
 mod cloudflare;
 mod editorial_helpers;
+mod editorial_inputs;
 mod editorial_prompts;
 mod human_logs;
 mod logging;
@@ -64,6 +65,10 @@ use crate::editorial_helpers::{
     filter_existing_agents_to_active_set, finalize_running_agent_artifacts,
     resolve_effective_active_agents, review_complaint_fingerprint, write_editorial_agent_error_artifact,
     write_editorial_agent_running_artifact, FinalizeRunningArtifactsGuard,
+};
+use crate::editorial_inputs::{
+    build_active_agents_resolved_log_context, effective_agent_input, prepare_agent_input,
+    resolve_time_budget_anchor,
 };
 use crate::editorial_prompts::{
     build_draft_prompt, build_review_prompt, build_revision_prompt, editorial_agent_specs,
@@ -329,17 +334,17 @@ pub(crate) struct EditorialAgentResult {
 }
 
 #[derive(Clone)]
-struct PreparedAgentInput {
-    stdin_text: String,
-    original_chars: usize,
-    input_path: Option<PathBuf>,
+pub(crate) struct PreparedAgentInput {
+    pub(crate) stdin_text: String,
+    pub(crate) original_chars: usize,
+    pub(crate) input_path: Option<PathBuf>,
 }
 
-struct EffectiveAgentInput {
-    args: Vec<String>,
-    stdin_text: Option<String>,
-    stdin_chars: usize,
-    delivery: &'static str,
+pub(crate) struct EffectiveAgentInput {
+    pub(crate) args: Vec<String>,
+    pub(crate) stdin_text: Option<String>,
+    pub(crate) stdin_chars: usize,
+    pub(crate) delivery: &'static str,
 }
 
 #[derive(Serialize)]
@@ -3902,160 +3907,6 @@ fn run_editorial_agent(
     }
 }
 
-fn effective_agent_input(
-    command: &str,
-    args: Vec<String>,
-    prepared: &PreparedAgentInput,
-) -> EffectiveAgentInput {
-    if command == "gemini" && prepared.input_path.is_some() {
-        let mut next_args = args;
-        if let Some(prompt_index) = next_args.iter().position(|arg| arg == "--prompt") {
-            if let Some(prompt) = next_args.get_mut(prompt_index + 1) {
-                *prompt = prepared.stdin_text.clone();
-            }
-        }
-
-        return EffectiveAgentInput {
-            args: next_args,
-            stdin_text: None,
-            stdin_chars: 0,
-            delivery: "prompt_arg_sidecar",
-        };
-    }
-
-    EffectiveAgentInput {
-        args,
-        stdin_text: Some(prepared.stdin_text.clone()),
-        stdin_chars: prepared.stdin_text.chars().count(),
-        delivery: if prepared.input_path.is_some() {
-            "stdin_sidecar"
-        } else {
-            "stdin_inline"
-        },
-    }
-}
-
-fn prepare_agent_input(
-    name: &str,
-    role: &str,
-    input: &str,
-    output_path: &Path,
-) -> PreparedAgentInput {
-    const INLINE_PROMPT_LIMIT_CHARS: usize = 48_000;
-    let original_chars = input.chars().count();
-    if original_chars <= INLINE_PROMPT_LIMIT_CHARS {
-        return PreparedAgentInput {
-            stdin_text: input.to_string(),
-            original_chars,
-            input_path: None,
-        };
-    }
-
-    let input_path = output_path.with_file_name(format!(
-        "{}-input.md",
-        output_path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or("maestro-agent")
-    ));
-    match write_text_file(&input_path, input) {
-        Ok(()) => {
-            let file_name = input_path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("arquivo-de-entrada.md");
-            PreparedAgentInput {
-                stdin_text: format!(
-                    "# Maestro Editorial AI - entrada por arquivo\n\nAgente: {name}\nTarefa: {role}\n\nLeia integralmente o arquivo local `{file_name}` no diretorio de trabalho atual antes de responder.\nO arquivo contem a solicitacao, o protocolo editorial integral, o rascunho e as instrucoes obrigatorias para esta rodada.\nExecute exatamente as instrucoes do arquivo e escreva a resposta final somente na saida padrao.\n"
-                ),
-                original_chars,
-                input_path: Some(input_path),
-            }
-        }
-        Err(_) => PreparedAgentInput {
-            stdin_text: input.to_string(),
-            original_chars,
-            input_path: None,
-        },
-    }
-}
-
-/// Build the JSON context payload for the `session.editorial.active_agents_resolved`
-/// NDJSON log entry. Extracted so unit tests can pin the field shape and source-label
-/// derivation independently of the surrounding session loop.
-#[allow(clippy::too_many_arguments)]
-fn build_active_agents_resolved_log_context(
-    run_id: &str,
-    request_active_agents: Option<&Vec<String>>,
-    saved_contract: Option<&SessionContract>,
-    active_agent_keys: &[String],
-    active_agents_source: &str,
-    draft_lead_key: &str,
-    invalid_initial_agent: Option<&str>,
-    request_max_session_cost_usd: Option<f64>,
-    request_max_session_minutes: Option<u64>,
-) -> Value {
-    let max_session_cost_usd_source = if request_max_session_cost_usd.is_some() {
-        "request"
-    } else if saved_contract
-        .and_then(|contract| contract.max_session_cost_usd)
-        .is_some()
-    {
-        "saved_contract"
-    } else {
-        "unset"
-    };
-    let max_session_minutes_source = if request_max_session_minutes.is_some() {
-        "request"
-    } else if saved_contract
-        .and_then(|contract| contract.max_session_minutes)
-        .is_some()
-    {
-        "saved_contract"
-    } else {
-        "unset"
-    };
-    json!({
-        "run_id": run_id,
-        "active_agents_requested": request_active_agents.cloned(),
-        "active_agents_saved_contract": saved_contract
-            .map(|contract| contract.active_agents.clone()),
-        "active_agents_effective": active_agent_keys.to_vec(),
-        "active_agents_source": active_agents_source,
-        "draft_lead_key": draft_lead_key,
-        "invalid_initial_agent": invalid_initial_agent,
-        "max_session_cost_usd_requested": request_max_session_cost_usd,
-        "max_session_cost_usd_saved": saved_contract
-            .and_then(|contract| contract.max_session_cost_usd),
-        "max_session_cost_usd_source": max_session_cost_usd_source,
-        "max_session_minutes_requested": request_max_session_minutes,
-        "max_session_minutes_saved": saved_contract
-            .and_then(|contract| contract.max_session_minutes),
-        "max_session_minutes_source": max_session_minutes_source,
-    })
-}
-
-/// Decide which clock to anchor `max_session_minutes` against.
-///
-/// **B18 fix (v0.3.18)**: the optional `max_session_minutes` cap counts wall-
-/// clock time from THIS session-call (resume or fresh start), not from the
-/// original session's `created_at` which may be days old. Without this anchor,
-/// an operator setting `max_minutes=5` on a session created 5 days ago would
-/// see `TIME_LIMIT_REACHED` fire instantly without any peer ever running.
-/// `created_at` remains the single source of truth for cumulative metrics and
-/// is still persisted in the session contract; only the time-budget gate
-/// switches to the per-call anchor.
-fn resolve_time_budget_anchor(
-    created_at: DateTime<Utc>,
-    is_resume: bool,
-    now: DateTime<Utc>,
-) -> DateTime<Utc> {
-    if is_resume {
-        now
-    } else {
-        created_at
-    }
-}
 
 /// Filter `existing_agents` recovered from the agent-runs/ directory on resume
 /// down to only those whose names normalize to a key in `active_agent_keys`.

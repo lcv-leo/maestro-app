@@ -4,6 +4,25 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.26] - 2026-05-02
+
+Pure refactor — no behavior change. Continues migration step 5 by extracting agent input preparation, the active-agents log context builder, and the time-budget anchor helper into a dedicated module.
+
+### Changed (extracted to `src-tauri/src/editorial_inputs.rs`, ~190 lines with doc header)
+- `pub(crate) fn effective_agent_input` — gemini-aware adapter that places the prepared prompt into argv when a sidecar input file is written.
+- `pub(crate) fn prepare_agent_input` — write large prompts (> 48k chars) to a `<output>-input.md` sidecar.
+- `pub(crate) fn build_active_agents_resolved_log_context` — JSON payload builder for `session.editorial.active_agents_resolved` NDJSON entry.
+- `pub(crate) fn resolve_time_budget_anchor` — clock anchor for `max_session_minutes` cap (B18 fix from v0.3.18).
+
+### `pub(crate)` visibility upgrades in `lib.rs`
+- `pub(crate) struct PreparedAgentInput` + 3 fields.
+- `pub(crate) struct EffectiveAgentInput` + 4 fields.
+
+### Validation
+- `cargo test`: 74 passed, 0 failed.
+- `npm run typecheck` + `npm run build`: clean.
+- `lib.rs`: 6840 → 6688 lines (−152; 154 deleted, 4 mod+use added, 2 struct prefix net).
+
 ## [v0.3.25] - 2026-05-02
 
 Pure refactor — no behavior change. Continues migration step 5 by extracting the agent specs (CLI args + spec table) and prompt builders (draft/review/revision) into a dedicated module. The heavy `run_editorial_session_inner` block stays in lib.rs for v0.3.26.

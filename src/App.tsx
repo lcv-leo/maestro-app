@@ -265,6 +265,10 @@ type ResumableSessionInfo = {
   artifact_count: number;
   protocol_lines: number;
   status: string;
+  saved_active_agents: InitialAgentKey[];
+  saved_initial_agent: string | null;
+  saved_max_session_cost_usd: number | null;
+  saved_max_session_minutes: number | null;
 };
 
 type ProtocolReadingGate = {
@@ -1614,25 +1618,68 @@ export function App() {
     setSessionRunId(session.run_id);
     setSessionName(session.session_name);
     const protocolOverride = resumeProtocolOptions(useLoadedProtocol);
+
+    // B17 fix (v0.3.18): pre-populate React state from the saved session
+    // contract before building resumeRunOptions, so that clicking "Retomar"
+    // continues with the same peers and caps that were active when the
+    // session paused — not the cold-open default of all 4 peers.
+    // currentSessionRunOptions() reads React state synchronously, so we
+    // must update the state and snapshot the contract values into a local
+    // `runOptionsOverride` instead of relying on a re-render.
+    const validSavedAgents = session.saved_active_agents.filter((agent) =>
+      initialAgentOptions.some((option) => option.key === agent),
+    ) as InitialAgentKey[];
     let resumeRunOptions: SessionRunOptions;
-    try {
-      resumeRunOptions = currentSessionRunOptions();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setOperation({
-        title: 'Retomada bloqueada',
-        progress: 0,
-        current: message,
-        eta: 'Ajuste a configuracao de peers e tente novamente.',
-        status: 'blocked',
-      });
+    if (validSavedAgents.length >= 1 && validSavedAgents.length <= 4) {
+      setActiveAgents(validSavedAgents);
+      const candidateInitial = (session.saved_initial_agent ?? '') as InitialAgentKey;
+      const resolvedInitial: InitialAgentKey = validSavedAgents.includes(candidateInitial)
+        ? candidateInitial
+        : (validSavedAgents[0] as InitialAgentKey);
+      setInitialAgent(resolvedInitial);
+      const savedMinutes = session.saved_max_session_minutes;
+      const savedCost = session.saved_max_session_cost_usd;
+      setMaxSessionMinutes(savedMinutes != null && savedMinutes > 0 ? String(savedMinutes) : '');
+      setMaxSessionCostUsd(savedCost != null && savedCost > 0 ? String(savedCost) : '');
+      resumeRunOptions = {
+        activeAgents: validSavedAgents,
+        maxSessionCostUsd: savedCost != null && savedCost > 0 ? savedCost : null,
+        maxSessionMinutes: savedMinutes != null && savedMinutes > 0 ? savedMinutes : null,
+        attachments: promptAttachments,
+        links: parseSessionLinks(),
+      };
       void logEvent({
-        level: 'error',
-        category: 'session.resume.run_options_invalid',
-        message: 'resume aborted because UI peers/caps state is invalid',
-        context: { run_id: session.run_id, error: message },
+        level: 'info',
+        category: 'session.resume.contract_applied',
+        message: 'resume populated React state from saved session contract',
+        context: {
+          run_id: session.run_id,
+          saved_active_agents: validSavedAgents,
+          saved_initial_agent: resolvedInitial,
+          saved_max_session_cost_usd: savedCost,
+          saved_max_session_minutes: savedMinutes,
+        },
       });
-      return;
+    } else {
+      try {
+        resumeRunOptions = currentSessionRunOptions();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setOperation({
+          title: 'Retomada bloqueada',
+          progress: 0,
+          current: message,
+          eta: 'Ajuste a configuracao de peers e tente novamente.',
+          status: 'blocked',
+        });
+        void logEvent({
+          level: 'error',
+          category: 'session.resume.run_options_invalid',
+          message: 'resume aborted because UI peers/caps state is invalid',
+          context: { run_id: session.run_id, error: message },
+        });
+        return;
+      }
     }
     setOperation({
       title: 'Retomando sessao editorial',

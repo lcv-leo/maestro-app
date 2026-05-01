@@ -333,6 +333,18 @@ struct ResumableSessionInfo {
     artifact_count: usize,
     protocol_lines: usize,
     status: String,
+    /// `active_agents` from the saved session contract. Used by the frontend
+    /// to pre-populate React state on cold app open so that clicking
+    /// "Retomar" continues with the same peers selected when the session
+    /// was last saved, instead of overwriting with the cold-open default
+    /// of all 4 (B17 fix from v0.3.18).
+    saved_active_agents: Vec<String>,
+    /// `initial_agent` from the saved session contract.
+    saved_initial_agent: Option<String>,
+    /// Optional cost cap from the saved session contract.
+    saved_max_session_cost_usd: Option<f64>,
+    /// Optional time cap from the saved session contract.
+    saved_max_session_minutes: Option<u64>,
 }
 
 struct ResumeSessionState {
@@ -2007,6 +2019,8 @@ fn run_editorial_session_core(
         .as_ref()
         .map(|contract| parse_created_at(&contract.created_at))
         .unwrap_or_else(Utc::now);
+    let time_budget_anchor =
+        resolve_time_budget_anchor(created_at, resume_state.is_some(), Utc::now());
     let ai_provider_config =
         read_ai_provider_config().unwrap_or_else(|_| AiProviderConfig::default());
     let mut cost_ledger = load_cost_ledger(&session_dir, &run_id);
@@ -2165,7 +2179,7 @@ fn run_editorial_session_core(
     );
 
     if let Some(state) = resume_state {
-        agents = state.existing_agents;
+        agents = filter_existing_agents_to_active_set(state.existing_agents, &active_agent_keys);
         current_draft = state.current_draft;
         current_draft_path = state.current_draft_path;
         round = state.next_review_round.max(1);
@@ -2190,7 +2204,7 @@ fn run_editorial_session_core(
         let draft_specs = selected_editorial_agent_specs(draft_lead_key, &active_agent_keys);
 
         for spec in draft_specs {
-            if session_time_exhausted(created_at, max_session_minutes) {
+            if session_time_exhausted(time_budget_anchor, max_session_minutes) {
                 let minutes_path = session_dir.join("ata-da-sessao.md");
                 write_text_file(
                     &minutes_path,
@@ -2220,7 +2234,7 @@ fn run_editorial_session_core(
                 ));
             }
             let output_path = agent_dir.join(format!("round-001-{}-draft.md", spec.key));
-            let timeout = remaining_session_duration(created_at, max_session_minutes);
+            let timeout = remaining_session_duration(time_budget_anchor, max_session_minutes);
             let use_api_agent = api_agent_keys.contains(spec.key);
             let cost_guard = if use_api_agent {
                 provider_cost_guard_for(
@@ -2339,7 +2353,7 @@ fn run_editorial_session_core(
 
     let final_path: PathBuf;
     loop {
-        if session_time_exhausted(created_at, max_session_minutes) {
+        if session_time_exhausted(time_budget_anchor, max_session_minutes) {
             let minutes_path = session_dir.join("ata-da-sessao.md");
             write_text_file(
                 &minutes_path,
@@ -2379,7 +2393,7 @@ fn run_editorial_session_core(
                 let prompt = build_review_prompt(request, &run_id, &current_draft, &evidence.block);
                 let output_path =
                     agent_dir.join(format!("round-{round:03}-{}-review.md", spec.key));
-                let timeout = remaining_session_duration(created_at, max_session_minutes);
+                let timeout = remaining_session_duration(time_budget_anchor, max_session_minutes);
                 let use_api_agent = api_agent_keys.contains(spec.key);
                 let cost_guard = if use_api_agent {
                     provider_cost_guard_for(
@@ -2423,7 +2437,7 @@ fn run_editorial_session_core(
                     let run_id = run_id.clone();
                     let log_session = log_session.clone();
                     let ai_provider_config = ai_provider_config.clone();
-                    let timeout = remaining_session_duration(created_at, max_session_minutes);
+                    let timeout = remaining_session_duration(time_budget_anchor, max_session_minutes);
                     let use_api_agent = api_agent_keys.contains(spec.key);
                     let cost_guard = if use_api_agent {
                         provider_cost_guard_for(
@@ -2661,7 +2675,7 @@ fn run_editorial_session_core(
         let revision_specs = selected_editorial_agent_specs(draft_lead_key, &active_agent_keys);
         let mut revised = false;
         for spec in revision_specs {
-            if session_time_exhausted(created_at, max_session_minutes) {
+            if session_time_exhausted(time_budget_anchor, max_session_minutes) {
                 let minutes_path = session_dir.join("ata-da-sessao.md");
                 write_text_file(
                     &minutes_path,
@@ -2691,7 +2705,7 @@ fn run_editorial_session_core(
                 ));
             }
             let output_path = agent_dir.join(format!("round-{round:03}-{}-revision.md", spec.key));
-            let timeout = remaining_session_duration(created_at, max_session_minutes);
+            let timeout = remaining_session_duration(time_budget_anchor, max_session_minutes);
             let use_api_agent = api_agent_keys.contains(spec.key);
             let cost_guard = if use_api_agent {
                 provider_cost_guard_for(
@@ -3027,6 +3041,22 @@ fn inspect_resumable_session_dir(path: &Path) -> Result<Option<ResumableSessionI
         "aguardando primeiro rascunho".to_string()
     };
 
+    let saved_contract = load_session_contract(&session_dir);
+    let saved_active_agents = saved_contract
+        .as_ref()
+        .map(|contract| contract.active_agents.clone())
+        .unwrap_or_default();
+    let saved_initial_agent = saved_contract
+        .as_ref()
+        .map(|contract| contract.initial_agent.clone())
+        .filter(|value| !value.trim().is_empty());
+    let saved_max_session_cost_usd = saved_contract
+        .as_ref()
+        .and_then(|contract| contract.max_session_cost_usd);
+    let saved_max_session_minutes = saved_contract
+        .as_ref()
+        .and_then(|contract| contract.max_session_minutes);
+
     Ok(Some(ResumableSessionInfo {
         run_id,
         session_name: extract_saved_session_name(&prompt_text)
@@ -3043,6 +3073,10 @@ fn inspect_resumable_session_dir(path: &Path) -> Result<Option<ResumableSessionI
         artifact_count,
         protocol_lines: protocol_text.lines().count(),
         status,
+        saved_active_agents,
+        saved_initial_agent,
+        saved_max_session_cost_usd,
+        saved_max_session_minutes,
     }))
 }
 
@@ -5932,6 +5966,64 @@ fn build_active_agents_resolved_log_context(
             .and_then(|contract| contract.max_session_minutes),
         "max_session_minutes_source": max_session_minutes_source,
     })
+}
+
+/// Decide which clock to anchor `max_session_minutes` against.
+///
+/// **B18 fix (v0.3.18)**: the optional `max_session_minutes` cap counts wall-
+/// clock time from THIS session-call (resume or fresh start), not from the
+/// original session's `created_at` which may be days old. Without this anchor,
+/// an operator setting `max_minutes=5` on a session created 5 days ago would
+/// see `TIME_LIMIT_REACHED` fire instantly without any peer ever running.
+/// `created_at` remains the single source of truth for cumulative metrics and
+/// is still persisted in the session contract; only the time-budget gate
+/// switches to the per-call anchor.
+fn resolve_time_budget_anchor(
+    created_at: DateTime<Utc>,
+    is_resume: bool,
+    now: DateTime<Utc>,
+) -> DateTime<Utc> {
+    if is_resume {
+        now
+    } else {
+        created_at
+    }
+}
+
+/// Filter `existing_agents` recovered from the agent-runs/ directory on resume
+/// down to only those whose names normalize to a key in `active_agent_keys`.
+///
+/// **B19 fix (v0.3.18)**: without this filter, the "Ultimo estado" UI summary
+/// shows peers that ran in earlier sessions but were narrowed out for this
+/// run, misleading the operator into thinking the current run touched them.
+/// Older artifacts stay on disk under `agent-runs/` (operator can still
+/// inspect them); only the in-memory snapshot used for status reporting is
+/// filtered. Name normalization mirrors `normalize_active_agents` so
+/// "Claude"/"anthropic"/"claude" all map to the same key.
+fn filter_existing_agents_to_active_set(
+    existing: Vec<EditorialAgentResult>,
+    active_agent_keys: &[String],
+) -> Vec<EditorialAgentResult> {
+    let active_set: BTreeSet<String> = active_agent_keys.iter().cloned().collect();
+    existing
+        .into_iter()
+        .filter(|agent| {
+            // Mirror `normalize_active_agents` exactly: trim whitespace BEFORE
+            // lowercasing so inputs like " Claude\n" or "\tdeepseek-api" map
+            // to the same key in both the request-side normalizer and this
+            // resume-side filter (closes the v0.3.18 cross-review R2 trim
+            // asymmetry blocker raised by claude+deepseek).
+            let key = agent.name.trim().to_ascii_lowercase();
+            let normalized = match key.as_str() {
+                "claude" | "anthropic" => "claude",
+                "codex" | "openai" | "chatgpt" => "codex",
+                "gemini" | "google" => "gemini",
+                "deepseek" | "deepseek-api" => "deepseek",
+                _ => key.as_str(),
+            };
+            active_set.contains(normalized)
+        })
+        .collect()
 }
 
 /// Decide the effective active_agents list and the source label for the audit log.
@@ -8849,6 +8941,241 @@ mod tests {
             result.is_err(),
             "empty request array must be a hard error even when a saved contract exists; explicit Some([]) does not silently fall back to saved"
         );
+    }
+
+    #[test]
+    fn resolve_time_budget_anchor_returns_now_when_resuming() {
+        use chrono::TimeZone;
+        let original = Utc.with_ymd_and_hms(2026, 4, 26, 19, 28, 26).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 5, 1, 19, 0, 0).unwrap();
+        let anchor = resolve_time_budget_anchor(original, true, now);
+        assert_eq!(
+            anchor, now,
+            "resume should anchor the time budget at NOW, not the original created_at"
+        );
+    }
+
+    #[test]
+    fn resolve_time_budget_anchor_returns_created_at_when_fresh_start() {
+        use chrono::TimeZone;
+        let original = Utc.with_ymd_and_hms(2026, 5, 1, 19, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 5, 1, 19, 0, 30).unwrap();
+        let anchor = resolve_time_budget_anchor(original, false, now);
+        assert_eq!(
+            anchor, original,
+            "fresh start should anchor at created_at so the cap matches operator intent"
+        );
+    }
+
+    #[test]
+    fn filter_existing_agents_keeps_only_agents_in_active_set() {
+        let existing = vec![
+            EditorialAgentResult {
+                name: "Claude".to_string(),
+                role: "review".to_string(),
+                cli: "claude".to_string(),
+                tone: "warn".to_string(),
+                status: "NOT_READY".to_string(),
+                duration_ms: 100,
+                exit_code: Some(0),
+                output_path: "agent-runs/round-001-claude-review.md".to_string(),
+                usage_input_tokens: None,
+                usage_output_tokens: None,
+                cost_usd: None,
+                cost_estimated: None,
+            },
+            EditorialAgentResult {
+                name: "Codex".to_string(),
+                role: "review".to_string(),
+                cli: "openai-api".to_string(),
+                tone: "error".to_string(),
+                status: "PROVIDER_NETWORK_ERROR".to_string(),
+                duration_ms: 30000,
+                exit_code: None,
+                output_path: "agent-runs/round-001-codex-review.md".to_string(),
+                usage_input_tokens: None,
+                usage_output_tokens: None,
+                cost_usd: None,
+                cost_estimated: None,
+            },
+            EditorialAgentResult {
+                name: "DeepSeek".to_string(),
+                role: "review".to_string(),
+                cli: "deepseek-api".to_string(),
+                tone: "error".to_string(),
+                status: "AGENT_FAILED_EMPTY".to_string(),
+                duration_ms: 32000,
+                exit_code: Some(0),
+                output_path: "agent-runs/round-001-deepseek-review.md".to_string(),
+                usage_input_tokens: None,
+                usage_output_tokens: None,
+                cost_usd: None,
+                cost_estimated: None,
+            },
+        ];
+        let active = vec!["deepseek".to_string()];
+        let filtered = filter_existing_agents_to_active_set(existing, &active);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "DeepSeek");
+    }
+
+    #[test]
+    fn filter_existing_agents_normalizes_agent_name_aliases() {
+        let existing = vec![
+            EditorialAgentResult {
+                name: "Anthropic".to_string(),
+                role: "review".to_string(),
+                cli: "anthropic-api".to_string(),
+                tone: "ok".to_string(),
+                status: "READY".to_string(),
+                duration_ms: 100,
+                exit_code: Some(0),
+                output_path: "irrelevant.md".to_string(),
+                usage_input_tokens: None,
+                usage_output_tokens: None,
+                cost_usd: None,
+                cost_estimated: None,
+            },
+            EditorialAgentResult {
+                name: "OpenAI".to_string(),
+                role: "review".to_string(),
+                cli: "openai-api".to_string(),
+                tone: "ok".to_string(),
+                status: "READY".to_string(),
+                duration_ms: 100,
+                exit_code: Some(0),
+                output_path: "irrelevant.md".to_string(),
+                usage_input_tokens: None,
+                usage_output_tokens: None,
+                cost_usd: None,
+                cost_estimated: None,
+            },
+        ];
+        let active = vec!["claude".to_string(), "codex".to_string()];
+        let filtered = filter_existing_agents_to_active_set(existing, &active);
+        assert_eq!(filtered.len(), 2, "alias names must normalize to active keys");
+    }
+
+    #[test]
+    fn filter_existing_agents_trims_whitespace_to_match_normalize_active_agents() {
+        let existing = vec![
+            EditorialAgentResult {
+                name: " Claude\n".to_string(),
+                role: "review".to_string(),
+                cli: "claude".to_string(),
+                tone: "ok".to_string(),
+                status: "READY".to_string(),
+                duration_ms: 100,
+                exit_code: Some(0),
+                output_path: "irrelevant.md".to_string(),
+                usage_input_tokens: None,
+                usage_output_tokens: None,
+                cost_usd: None,
+                cost_estimated: None,
+            },
+            EditorialAgentResult {
+                name: "\tdeepseek-api\t".to_string(),
+                role: "review".to_string(),
+                cli: "deepseek-api".to_string(),
+                tone: "error".to_string(),
+                status: "AGENT_FAILED_EMPTY".to_string(),
+                duration_ms: 100,
+                exit_code: Some(0),
+                output_path: "irrelevant.md".to_string(),
+                usage_input_tokens: None,
+                usage_output_tokens: None,
+                cost_usd: None,
+                cost_estimated: None,
+            },
+        ];
+        let active = vec!["claude".to_string(), "deepseek".to_string()];
+        let filtered = filter_existing_agents_to_active_set(existing, &active);
+        assert_eq!(
+            filtered.len(),
+            2,
+            "whitespace-padded names must trim to canonical keys, mirroring normalize_active_agents"
+        );
+    }
+
+    #[test]
+    fn filter_existing_agents_returns_empty_when_active_set_is_empty() {
+        let existing = vec![EditorialAgentResult {
+            name: "Claude".to_string(),
+            role: "review".to_string(),
+            cli: "claude".to_string(),
+            tone: "ok".to_string(),
+            status: "READY".to_string(),
+            duration_ms: 100,
+            exit_code: Some(0),
+            output_path: "irrelevant.md".to_string(),
+            usage_input_tokens: None,
+            usage_output_tokens: None,
+            cost_usd: None,
+            cost_estimated: None,
+        }];
+        let active: Vec<String> = Vec::new();
+        let filtered = filter_existing_agents_to_active_set(existing, &active);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn inspect_resumable_session_dir_reports_saved_active_agents_for_picker() {
+        let session_dir = sessions_dir().join("run-resumable-info-saved-contract-test");
+        let _ = fs::remove_dir_all(&session_dir);
+        fs::create_dir_all(&session_dir).unwrap();
+        write_text_file(&session_dir.join("prompt.md"), "Sessao: Teste\n\nbody").unwrap();
+        write_text_file(
+            &session_dir.join("protocolo.md"),
+            &"Linha\n".repeat(120),
+        )
+        .unwrap();
+        let agent_dir = session_dir.join("agent-runs");
+        fs::create_dir_all(&agent_dir).unwrap();
+        let contract = SessionContract {
+            schema_version: 1,
+            run_id: "run-resumable-info-saved-contract-test".to_string(),
+            session_name: "Teste".to_string(),
+            created_at: "2026-04-26T19:28:26.000000+00:00".to_string(),
+            active_agents: vec!["deepseek".to_string()],
+            initial_agent: "deepseek".to_string(),
+            max_session_cost_usd: Some(7.5),
+            max_session_minutes: Some(45),
+            links: Vec::new(),
+            attachments: Vec::new(),
+        };
+        write_session_contract(&session_dir, &contract).unwrap();
+
+        let info = inspect_resumable_session_dir(&session_dir)
+            .unwrap()
+            .expect("session dir should be reported as resumable");
+        assert_eq!(info.saved_active_agents, vec!["deepseek".to_string()]);
+        assert_eq!(info.saved_initial_agent, Some("deepseek".to_string()));
+        assert_eq!(info.saved_max_session_cost_usd, Some(7.5));
+        assert_eq!(info.saved_max_session_minutes, Some(45));
+        let _ = fs::remove_dir_all(&session_dir);
+    }
+
+    #[test]
+    fn inspect_resumable_session_dir_returns_empty_saved_when_contract_missing() {
+        let session_dir = sessions_dir().join("run-resumable-info-no-contract-test");
+        let _ = fs::remove_dir_all(&session_dir);
+        fs::create_dir_all(&session_dir).unwrap();
+        write_text_file(&session_dir.join("prompt.md"), "Sessao: Teste\n\nbody").unwrap();
+        write_text_file(
+            &session_dir.join("protocolo.md"),
+            &"Linha\n".repeat(120),
+        )
+        .unwrap();
+        fs::create_dir_all(&session_dir.join("agent-runs")).unwrap();
+
+        let info = inspect_resumable_session_dir(&session_dir)
+            .unwrap()
+            .expect("session dir should be reported even without saved contract");
+        assert!(info.saved_active_agents.is_empty());
+        assert_eq!(info.saved_initial_agent, None);
+        assert_eq!(info.saved_max_session_cost_usd, None);
+        assert_eq!(info.saved_max_session_minutes, None);
+        let _ = fs::remove_dir_all(&session_dir);
     }
 
     #[test]

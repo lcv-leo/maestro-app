@@ -4,6 +4,45 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.18] - 2026-05-02
+
+Closes the 3 production bugs found in `data/logs/maestro-2026-05-01T18-56-07Z` and `19-01-53Z` running v0.3.16/v0.3.17. These were deferred from v0.3.17 per `docs/code-split-plan.md` rule "Do not combine code split with behavior changes."
+
+### Fixed
+- **B17 — saved_contract pre-select on cold-open.** v0.3.16 fix made the frontend resume invoke always send the React state. But the React state defaults to all-4 peers on cold app open, so an operator who paused with `["deepseek"]` and reopened the app saw all 4 peers re-spawn. Backend NDJSON 19:02:45 confirmed `saved_contract: ["deepseek"]`, `requested: [all 4]`, `source: "request"`. Fix: extended `ResumableSessionInfo` to expose `saved_active_agents`, `saved_initial_agent`, `saved_max_session_cost_usd`, `saved_max_session_minutes` from the inspected contract; `startResumeSession` in `App.tsx` now applies those to React state (`setActiveAgents`, `setInitialAgent`, `setMaxSessionMinutes`, `setMaxSessionCostUsd`) AND snapshots them into the runOptions passed to `runRealEditorialSession`, so the resume request reflects what the operator paused with — not the cold-open default. New NDJSON `session.resume.contract_applied` log entry surfaces the applied snapshot for audit.
+- **B18 — TIME_LIMIT_REACHED instant-fire on resume.** Operator set `max_session_minutes=5` intending to limit the resume to 5 minutes; backend computed elapsed = (now − 2026-04-26T19:28:26) ≈ 5 days ≫ 5 min and exhausted in 130ms without spawning anything. New helper `resolve_time_budget_anchor(created_at, is_resume, now) -> DateTime<Utc>` returns `now` when resuming and `created_at` otherwise. The 7 call sites of `session_time_exhausted` and `remaining_session_duration` in `run_editorial_session_inner` swap from `created_at` to `time_budget_anchor`. `created_at` remains the single source of truth for cumulative metrics and stays persisted in the session contract; only the time-budget gate switches to the per-call anchor.
+- **B19 — stale "Ultimo estado" mixing artifacts from prior runs.** When a resumed session loaded `existing_agents` from `agent-runs/`, the in-memory list included peers that ran in EARLIER sessions but were narrowed out for THIS run. Frontend "Ultimo estado" summary then showed all 4 peers as if they had run, misleading the operator. New helper `filter_existing_agents_to_active_set(existing, active_agent_keys)` filters the recovered list to only include peers in this run's effective active set, normalizing aliases (`"Anthropic"`/`"Claude"` → `"claude"`, `"OpenAI"`/`"Codex"` → `"codex"`, etc.) to mirror `normalize_active_agents`. Older artifacts stay on disk under `agent-runs/`; only the in-memory snapshot used for status reporting is filtered.
+
+### Added (testable helpers from B18/B19)
+- `resolve_time_budget_anchor(created_at, is_resume, now)` — pure function; takes `now` as a parameter for deterministic testing.
+- `filter_existing_agents_to_active_set(existing, active_agent_keys)` — pure function; alias normalization mirrors `normalize_active_agents`.
+
+### Backend `ResumableSessionInfo` extensions (B17)
+4 new fields populated by `inspect_resumable_session_dir` from the saved session contract:
+- `saved_active_agents: Vec<String>`
+- `saved_initial_agent: Option<String>` (filtered to non-empty)
+- `saved_max_session_cost_usd: Option<f64>`
+- `saved_max_session_minutes: Option<u64>`
+
+### Frontend (B17)
+- `ResumableSessionInfo` TypeScript type extended with the 4 fields.
+- `startResumeSession`:
+  - Validates `saved_active_agents` against `initialAgentOptions` keys; falls back to current React state if invalid.
+  - Calls `setActiveAgents`, `setInitialAgent`, `setMaxSessionMinutes`, `setMaxSessionCostUsd` to keep UI in sync with the saved contract.
+  - Builds `resumeRunOptions` synchronously from the validated saved contract values, bypassing the default React state.
+  - Emits `session.resume.contract_applied` info NDJSON log entry with the applied snapshot.
+
+### Validation
+- `cargo test`: 73 passed (7 new + 66 existing). New: `resolve_time_budget_anchor_returns_now_when_resuming`, `resolve_time_budget_anchor_returns_created_at_when_fresh_start`, `filter_existing_agents_keeps_only_agents_in_active_set`, `filter_existing_agents_normalizes_agent_name_aliases`, `filter_existing_agents_returns_empty_when_active_set_is_empty`, `inspect_resumable_session_dir_reports_saved_active_agents_for_picker`, `inspect_resumable_session_dir_returns_empty_saved_when_contract_missing`.
+- `npm run typecheck` clean.
+- `npm run build` clean (~1s, 2434 modules).
+- `cargo clippy --no-deps --all-targets`: 0 errors. v0.3.16's `#![deny(clippy::disallowed_methods)]` preserved.
+
+### Notes
+- `created_at` continues to anchor cumulative metrics (artifact age, cost ledger entries) and stays in the session contract.
+- The 4 new `saved_*` fields in `ResumableSessionInfo` are additive; no existing field renamed or removed.
+- `session.resume.contract_applied` is a new info-level NDJSON event; existing `session.editorial.active_agents_resolved` already logs the post-normalize effective values, so the new event is for "what the picker applied", complementing the existing "what the runtime resolved".
+
 ## [v0.3.17] - 2026-05-02
 
 Pure refactor — no behavior change. Continues `docs/code-split-plan.md` migration order step 2 ("logging and path safety"). `lib.rs` is at 9759 lines pre-split; this batch trims it by 127 lines into a new `src-tauri/src/app_paths.rs` module (220 lines with doc comments).

@@ -4,6 +4,33 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.24] - 2026-05-02
+
+Pure refactor — no behavior change. Begins migration step 5 ("editorial orchestration and artifacts") by extracting the small/standalone helpers cluster (active-agent filtering/resolution, review-complaint fingerprinting, RUNNING-artifact finalization, per-attempt running/error artifact writers) into a dedicated module. The heavy `run_editorial_session_inner` block stays in lib.rs for a follow-up batch.
+
+### Changed (extracted to `src-tauri/src/editorial_helpers.rs`, ~250 lines with doc header)
+- `pub(crate) fn filter_existing_agents_to_active_set` — resume-side filter mirroring `normalize_active_agents` alias normalization.
+- `pub(crate) fn resolve_effective_active_agents` — request/saved/default decision tree with audit-log source label.
+- `pub(crate) fn review_complaint_fingerprint` — stable u64 hash for persistent-divergence detection.
+- `pub(crate) struct FinalizeRunningArtifactsGuard` (+ impl + Drop) — RAII guard for RUNNING-placeholder cleanup on every exit path (Codex NB-2 from v0.3.15).
+- `pub(crate) fn finalize_running_agent_artifacts` — idempotent final-pass safety net.
+- `pub(crate) fn write_editorial_agent_running_artifact` — initial RUNNING placeholder before child spawn.
+- `pub(crate) fn write_editorial_agent_error_artifact` — error envelope for failed commands without structured output.
+
+### `pub(crate)` visibility upgrades in `lib.rs` (consumed by `editorial_helpers.rs`)
+- `pub(crate) fn read_text_file` (consumed by `finalize_running_agent_artifacts`).
+- `pub(crate) fn extract_stdout_block` (consumed by `review_complaint_fingerprint`).
+
+### Validation
+- `cargo test`: 74 passed, 0 failed (zero regression).
+- `npm run typecheck`: clean.
+- `npm run build`: clean (PostEditor chunk-size warning is pre-existing).
+- `lib.rs`: 7270 → 7075 lines (−195). `editorial_helpers.rs`: ~250 lines new.
+
+### Operational notes
+- Followed the now-stable "delete first, edit second" sequence: built `editorial_helpers.rs`, captured fresh line numbers, single `sed -i 4304,4498d` (195 lines), then added `mod` + `use` + `pub(crate)` upgrades.
+- Defensive `#[allow(clippy::too_many_arguments)]` added on `write_editorial_agent_running_artifact` (9 args) and `write_editorial_agent_error_artifact` (11 args), following the v0.3.22 sibling-helper convention.
+
 ## [v0.3.23] - 2026-05-02
 
 Pure refactor — no behavior change. Begins `docs/code-split-plan.md` migration step 4 ("Cloudflare D1 and Secrets Store operations") by extracting the Cloudflare client + probe + D1 + Secrets Store surface into a dedicated module.

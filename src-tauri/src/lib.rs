@@ -18,14 +18,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, OpenOptions},
+    fs::{self},
     io::{Read, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
     process::{self, Command, Output, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex, OnceLock,
+        Arc, OnceLock,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -34,6 +34,7 @@ use tauri::Manager;
 
 mod app_paths;
 mod human_logs;
+mod logging;
 mod session_controls;
 mod session_evidence;
 
@@ -47,13 +48,15 @@ use crate::app_paths::{
     is_safe_data_file_name, logs_dir, resolve_portable_app_root, safe_run_id_from_entry,
     sanitize_path_segment, sessions_dir, try_set_app_root,
 };
+use crate::logging::{create_log_session, write_log_record, LogEventInput, LogSession, LogWriteResult};
 // Items below are only referenced from `mod tests` and cargo flags them as unused
 // when compiled without the test cfg. Re-importing inside the test module avoids
 // `#[cfg(test)]` annotations on the main use list.
 
 #[cfg(test)]
 use human_logs::should_collapse_human_log_event;
-use human_logs::{human_log_summary, severity_number_for, write_human_log_projection};
+// `human_log_summary`, `severity_number_for`, `write_human_log_projection`
+// are now consumed inside `logging.rs`; lib.rs no longer needs them.
 use session_controls::{
     all_agent_keys, api_role_max_tokens, effective_draft_lead, estimate_provider_cost,
     estimate_provider_cost_from_input_chars, normalize_active_agents, provider_cost,
@@ -67,17 +70,13 @@ use session_evidence::{
     AttachmentManifestEntry, PromptAttachmentRequest,
 };
 
-static NATIVE_LOG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-// `APP_ROOT` lives in `app_paths::APP_ROOT`; access via `app_paths::app_root()`,
-// `app_paths::try_set_app_root(..)`, and `app_paths::app_root_if_initialized()`.
+// `NATIVE_LOG_SEQUENCE` lives in `logging::NATIVE_LOG_SEQUENCE`.
+// `APP_ROOT` lives in `app_paths::APP_ROOT`.
 const API_NATIVE_ATTACHMENT_MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
 
-#[derive(Clone)]
-struct LogSession {
-    id: String,
-    path: PathBuf,
-    write_lock: Arc<Mutex<()>>,
-}
+// `LogSession`, `LogEventInput`, `LogWriteResult`, `create_log_session`,
+// and `write_log_record` were moved into `logging.rs` in v0.3.19. Imports
+// land in the use list below alongside `app_paths::*`.
 
 #[derive(Clone, Deserialize, Serialize)]
 struct BootstrapConfig {
@@ -481,20 +480,6 @@ struct RuntimeProfile {
     log_session_id: String,
 }
 
-#[derive(Deserialize)]
-struct LogEventInput {
-    level: String,
-    category: String,
-    message: String,
-    context: Option<Value>,
-}
-
-#[derive(Serialize)]
-struct LogWriteResult {
-    path: String,
-    session_id: String,
-}
-
 #[tauri::command]
 fn runtime_profile(log_session: tauri::State<LogSession>) -> RuntimeProfile {
     RuntimeProfile {
@@ -516,67 +501,6 @@ fn write_log_event(
     event: LogEventInput,
 ) -> Result<LogWriteResult, String> {
     write_log_record(&log_session, event)
-}
-
-fn write_log_record(
-    log_session: &LogSession,
-    event: LogEventInput,
-) -> Result<LogWriteResult, String> {
-    let _guard = log_session
-        .write_lock
-        .lock()
-        .map_err(|_| "failed to lock log writer".to_string())?;
-    let dir = checked_data_child_path(&logs_dir())?;
-    fs::create_dir_all(&dir).map_err(|error| format!("failed to create log dir: {error}"))?;
-    let sequence = NATIVE_LOG_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
-    let log_path = checked_data_child_path(&log_session.path)?;
-
-    let timestamp = Utc::now().to_rfc3339();
-    let context = sanitize_value(event.context.unwrap_or(Value::Null), 8);
-    let human_summary = human_log_summary(&event.category, &event.message, &context);
-    let level = sanitize_short(&event.level, 16);
-    let severity_number = severity_number_for(&level);
-    let record = json!({
-        "schema_version": 2,
-        "timestamp": timestamp,
-        "native_log_sequence": sequence,
-        "level": level,
-        "severity_text": level.to_ascii_uppercase(),
-        "severity_number": severity_number,
-        "category": sanitize_short(&event.category, 80),
-        "event_name": sanitize_short(&event.category, 80),
-        "message": sanitize_text(&event.message, 500),
-        "human_summary": human_summary,
-        "context": context,
-        "app": {
-            "name": "Maestro Editorial AI",
-            "version": env!("CARGO_PKG_VERSION"),
-            "target": std::env::consts::OS,
-            "arch": std::env::consts::ARCH
-        },
-        "process": {
-            "pid": process::id(),
-            "cwd": std::env::current_dir().ok().map(|path| path.to_string_lossy().to_string()),
-            "app_root": app_root().to_string_lossy().to_string()
-        },
-        "session": {
-            "id": log_session.id.clone(),
-            "log_file": log_path.to_string_lossy().to_string()
-        }
-    });
-
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .map_err(|error| format!("failed to open log file: {error}"))?;
-    writeln!(file, "{record}").map_err(|error| format!("failed to write log record: {error}"))?;
-    let _ = write_human_log_projection(&log_session.path, &record);
-
-    Ok(LogWriteResult {
-        path: log_path.to_string_lossy().to_string(),
-        session_id: log_session.id.clone(),
-    })
 }
 
 #[tauri::command]
@@ -1372,16 +1296,6 @@ fn write_early_crash_record(payload: &str, location: Option<&str>) -> Result<(),
     let bytes = serde_json::to_vec_pretty(&record)
         .map_err(|error| format!("failed to serialize early crash log: {error}"))?;
     fs::write(&path, bytes).map_err(|error| format!("failed to write early crash log: {error}"))
-}
-
-fn create_log_session() -> LogSession {
-    let timestamp = Utc::now().format("%Y-%m-%dT%H-%M-%SZ");
-    let id = format!("{timestamp}-pid{}", process::id());
-    LogSession {
-        id: id.clone(),
-        path: logs_dir().join(format!("maestro-{id}.ndjson")),
-        write_lock: Arc::new(Mutex::new(())),
-    }
 }
 
 fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
@@ -8286,7 +8200,7 @@ fn apply_editorial_agent_environment(command: &mut Command, path: &Path) {
     }
 }
 
-fn sanitize_short(value: &str, max_len: usize) -> String {
+pub(crate) fn sanitize_short(value: &str, max_len: usize) -> String {
     sanitize_text(value, max_len)
         .chars()
         .filter(|character| {
@@ -8324,7 +8238,7 @@ pub(crate) fn truncate_text_head_tail(
     )
 }
 
-fn sanitize_value(value: Value, depth: usize) -> Value {
+pub(crate) fn sanitize_value(value: Value, depth: usize) -> Value {
     if depth == 0 {
         return Value::String("<max_depth_reached>".to_string());
     }

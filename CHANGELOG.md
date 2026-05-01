@@ -4,6 +4,39 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.19] - 2026-05-02
+
+Pure refactor — no behavior change. Continues `docs/code-split-plan.md` migration order step 2 ("logging and path safety"), which was partially completed in v0.3.17. This batch finishes the logger surface extraction.
+
+### Changed (extracted to `src-tauri/src/logging.rs`, 157 lines with doc comments)
+- `NATIVE_LOG_SEQUENCE: AtomicU64` static (process-scoped sequence stamp).
+- `LogSession` struct (`#[derive(Clone)]`, holds `id`, `path`, `Arc<Mutex<()>> write_lock`).
+- `LogEventInput` struct (`#[derive(Deserialize)]`).
+- `LogWriteResult` struct (`#[derive(Serialize)]`).
+- `create_log_session()` factory.
+- `write_log_record(&LogSession, LogEventInput) -> Result<LogWriteResult, String>`.
+
+### Stayed in `lib.rs`
+- `runtime_profile` and `write_log_event` Tauri commands (the IPC boundary uses `tauri::State<LogSession>` and stays in the `#[tauri::command]` registry).
+- `install_process_panic_hook()` and `write_early_crash_record()` (compose a separate JSON crash schema and integrate with process-level panic state).
+- `log_editorial_agent_finished/spawned/running` helpers (depend on `EditorialAgentResult` and move with the editorial orchestration batch v0.3.22).
+- Sanitization helpers (`sanitize_text`, `sanitize_short`, `sanitize_value`, `redact_secrets`, `truncate_text_head_tail`, `stable_text_fingerprint`) — planned for a separate `text_utils.rs` extraction.
+
+### Visibility upgrades (required for cross-module access)
+- `sanitize_short` and `sanitize_value` upgraded from `fn` to `pub(crate) fn` so `logging.rs` can import them. `sanitize_text` was already `pub(crate)`. No body changes.
+
+### Validation
+- `cargo test`: 74 passed (no test count change; same surface).
+- `npm run typecheck` clean.
+- `npm run build` clean.
+- `cargo clippy --no-deps --all-targets`: 0 errors. `#![deny(clippy::disallowed_methods)]` from v0.3.16 preserved.
+- `lib.rs`: 9930 → 9873 lines (−57). `logging.rs`: 157 lines new.
+
+### Next batches per `docs/code-split-plan.md`
+- v0.3.20: extract editorial provider runners (DeepSeek/OpenAI/Anthropic/Gemini API + retry helper) into `providers/` module.
+- v0.3.21: extract Cloudflare D1 + Secrets Store operations.
+- v0.3.22: extract editorial orchestration (`run_editorial_session_inner`, agent helpers, build_session_minutes, etc.).
+
 ## [v0.3.18] - 2026-05-02
 
 Closes the 3 production bugs found in `data/logs/maestro-2026-05-01T18-56-07Z` and `19-01-53Z` running v0.3.16/v0.3.17. These were deferred from v0.3.17 per `docs/code-split-plan.md` rule "Do not combine code split with behavior changes."

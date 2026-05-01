@@ -4,6 +4,27 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.29] - 2026-05-02
+
+Pure refactor — no behavior change. Continues migration step 5 by extracting the resumable-session inspection + agent-runs/* artifact reading helpers into a dedicated module.
+
+### Changed (extracted to `src-tauri/src/session_artifacts.rs`, ~330 lines with doc header, 9 functions)
+- `pub(crate) fn inspect_resumable_session_dir` — top-level entry that decides whether a session directory is resumable and enriches the result with saved-contract defaults.
+- `pub(crate) fn load_resume_session_state` — reads the latest draft + existing agent results so the orchestrator can pick up mid-session.
+- `pub(crate) fn find_latest_draft_artifact` + private `find_latest_draft_artifact_from_artifacts`, `artifact_resume_rank`.
+- `pub(crate) fn load_agent_results_from_dir`, `read_agent_artifacts` — recover the per-round agent result vector.
+- `pub(crate) fn parse_agent_artifact_name`, `parse_agent_artifact_result` — parse `round-NNN-{peer}-{role}.md` filenames + bullet-list metadata.
+
+### `pub(crate)` visibility upgrades in `lib.rs`
+- `pub(crate) struct ResumableSessionInfo` + 16 fields.
+- `pub(crate) struct ResumeSessionState` + 4 fields.
+
+### Validation
+- `cargo test`: 74 passed.
+- `npm run typecheck` + `npm run build`: clean.
+- `lib.rs`: 6398 → 6137 lines (−261 deleted via `'2961,3121d;2844,2951d'`; the SessionArtifact struct stays in lib.rs because both `session_artifacts.rs` and `session_resume.rs` consume it).
+- ZERO-line byte-parity diff vs v0.3.28 (commit 5f35960) on both ranges.
+
 ## [v0.3.28] - 2026-05-02
 
 Pure refactor — no behavior change. Continues migration step 5 by extracting session-time helpers, extract/parse utilities, and protocol-backup helpers into a dedicated module.

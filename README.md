@@ -19,12 +19,13 @@ Portable Windows editorial workbench for protocol-driven AI drafting, source ver
 
 **Status.** Functional alpha with live bootstrap, diagnostics, navigation, Cloudflare credential provisioning, AI API credential checks, PostEditor parity, link auditing, and a real background Claude/Codex/Gemini/DeepSeek editorial session path.
 
-Current project version: `v0.3.13`.
+Current project version: `v0.3.14`.
 
 The version history at a glance:
 
 | Release | Scope |
 |---|---|
+| **`v0.3.14`** | **Rigorous security/UX audit closure.** Top-level `ErrorBoundary` so render-phase exceptions no longer blank the webview silently; `useEscapeKey` hook wired on the two custom-portal dialogs (`PromptModal`, `ResumeDialog`) that lacked ESC dismissal — mirrors the same fix shipped in admin-app v02.00.00 and mainsite-app v03.22.00. Boundary forwards exceptions to the same `logEvent` NDJSON channel `installGlobalDiagnostics` uses, so the audit trail stays single-source. |
 | **`v0.3.13`** | **Session controls, API peers, attachments, and code splitting.** Added selectable peers, optional time/cost caps, UI-managed provider tariffs, real direct-API runners, provider-native attachments, human-readable logs, and lazy PostEditor loading. |
 | **`v0.3.12`** | **README organizational standardization.** Adopted the shared repository README opening pattern and added the top-level version-history table while keeping the Windows/Tauri operational details intact. |
 | **`v0.3.11`** | **DeepSeek real-peer integration.** Added DeepSeek as an API-backed editorial peer, real model-list verification, and stronger Cloudflare Secrets Store reload behavior. |

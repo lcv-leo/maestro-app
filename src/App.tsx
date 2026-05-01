@@ -24,9 +24,10 @@ import {
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import type { ChangeEvent, ComponentType } from 'react';
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import packageJson from '../package.json';
 import { logEvent } from './diagnostics';
+import { useEscapeKey } from './hooks/useEscapeKey';
 
 const PostEditor = lazy(() => import('./editor/posteditor/PostEditor'));
 
@@ -875,6 +876,17 @@ export function App() {
   const [showResumePicker, setShowResumePicker] = useState(false);
   const [isResumeLoading, setIsResumeLoading] = useState(false);
   const [useLoadedProtocolForResume, setUseLoadedProtocolForResume] = useState(false);
+
+  // v0.3.14 / audit closure (MEDIUM): ESC dismissal on the ResumeDialog at
+  // line 2574. Mirrors the existing Close button (line 2582) — no new
+  // dismissal path, no new state. Hook gated by `showResumePicker` so the
+  // window listener is detached when the dialog is hidden. In-place edit
+  // per docs/code-split-plan.md ("future splits should start with pure
+  // helpers, ... without mixing large refactors with behavior changes").
+  const handleResumeDialogEscape = useCallback(() => {
+    setShowResumePicker(false);
+  }, []);
+  useEscapeKey(handleResumeDialogEscape, showResumePicker);
 
   const readyCount = useMemo(() => agentCards.filter((agent) => agent.state === 'ready').length, [agentCards]);
   const visibleActivity = useMemo(() => {

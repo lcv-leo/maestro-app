@@ -4,6 +4,24 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.14] - 2026-05-01
+
+### Added — rigorous security/UX audit closure (parity with admin-app v02.00.00 / mainsite-app v02.18.00)
+- Top-level `ErrorBoundary` class component (`src/components/ErrorBoundary.tsx`) wired in `main.tsx` around `<App />`. Pre-fix, `installGlobalDiagnostics()` only captured `window.error` and `unhandledrejection` — both fire AFTER React's reconciler. Render-phase exceptions (throw inside JSX, useState selectors, component init) were silently unmounted by React, blanking the webview with no diagnostic trail. The boundary is strictly additive: it forwards captured exceptions to the SAME `logEvent({ level: 'error', ... })` NDJSON channel, so the audit trail stays single-source. React 19 still requires a class component for `componentDidCatch`.
+- `useEscapeKey` hook (`src/hooks/useEscapeKey.ts`) — verbatim port from admin-app v02.00.00. Wired in two custom-portal dialogs that lacked ESC dismissal (Radix-built dialogs, `SearchReplacePanel`, and `SlashCommands` already had ESC):
+  - `src/editor/posteditor/editor/PromptModal.tsx`: hook called BEFORE the early `return null` to satisfy Rules of Hooks; `enabled = modal.show` keeps the listener detached when hidden. Mirrors the existing Close button (line 43); no new dismissal path.
+  - `App.tsx` `ResumeDialog` block (around lines 2588–2640): in-place edit per `docs/code-split-plan.md` ("future splits should start with pure helpers... without mixing large refactors with behavior changes"). Mirrors the existing Close button at the dialog header — same dismissal semantics, no UX-intent change.
+
+### Calibrated out (advisor catch — regression risk > benefit)
+- `Promise.race` timeout on direct-API peers — direct-API editorial calls already have explicit per-session deadlines and 2-retry × 800ms structure; a short blanket timeout would regress legitimate long-wait operator flows.
+- `EnvSecretsSchema` Zod migration — `readSecretString` + secret-store routing in `lib.rs` is functional; adding Zod is preference, not fix.
+- TLS cert pinning on `reqwest` — relies on system trust store via `rustls-tls`; pinning is engineering preference, not a fix in single-operator desktop context.
+- Plaintext credential JSON encryption — operator already has the Cloudflare Secrets Store opt-in for keys (v0.3.11); local plaintext is a known design with OS file-permission fallback. Encrypting at rest needs master-password UX, out of scope for this cycle.
+
+### Validation
+- `npm run build` — `tsc --noEmit && vite build` — 786 ms, 2434 modules transformed (pre-existing PostEditor chunk-size warning unchanged).
+- `cargo check --locked --manifest-path src-tauri/Cargo.toml` — clean (49.65s).
+
 ## [v0.3.13] - 2026-05-01
 
 - Added per-session editorial controls: selectable active peers (1-4), optional time limits, optional direct-API cost limits, prompt attachments, and public source links.

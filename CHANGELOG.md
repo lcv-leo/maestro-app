@@ -4,6 +4,36 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.22] - 2026-05-02
+
+Pure refactor — no behavior change. Continues `docs/code-split-plan.md` migration step 3 by bundling the 3 isomorphic provider runners (OpenAI / Anthropic / Gemini) and their shared helper family into a single new module. v0.3.21 already extracted DeepSeek (the structural outlier). With v0.3.22, all 4 per-provider runners are out of `lib.rs`.
+
+### Changed (extracted to `src-tauri/src/provider_runners.rs`, ~1100 lines with doc header)
+- **Runners** (3 isomorphic): `pub(crate) fn run_openai_api_agent`, `pub(crate) fn run_anthropic_api_agent`, `pub(crate) fn run_gemini_api_agent`. Each preserves its provider-specific request body (responses-API for OpenAI; messages-API for Anthropic; generateContent for Gemini), response parser, and endpoint string byte-for-byte.
+- **Unified provider helper family**: `pub(crate) fn editorial_api_system_prompt`, `pub(crate) fn api_cost_preflight_result`, `pub(crate) fn write_provider_missing_key_result`, `pub(crate) fn write_provider_error_result`, `pub(crate) fn write_provider_failure_result`, `pub(crate) fn write_provider_success_result`, `pub(crate) fn log_provider_api_started`.
+- **Per-provider model resolvers**: `pub(crate) fn resolve_openai_model`, `pub(crate) fn resolve_anthropic_model`, `pub(crate) fn resolve_gemini_model`. Plus the private helpers they share (`choose_preferred_model`, `api_model_ids`, `gemini_model_ids`).
+- **Per-provider response parsers**: `pub(crate) fn openai_response_text`, plus the private `anthropic_response_text`, `gemini_response_text`, `gemini_usage_tokens`.
+
+### `pub(crate)` visibility upgrades in `lib.rs` (consumed from `provider_runners.rs`)
+- `fn provider_label_for_agent`, `fn provider_remote_present`, `fn provider_key_for_agent` — the last has an external caller in `should_run_agent_via_api`.
+- `fn api_input_estimate_chars` — also has unit tests in `lib.rs::tests`.
+- `fn openai_api_input`, `fn anthropic_api_user_content`, `fn gemini_api_user_parts` — all 3 have unit tests in `lib.rs::tests` covering the JSON envelope shape per provider.
+
+### Stayed in `lib.rs` (not moved this batch)
+- The 4 attachment-shape predicates (`provider_supports_native_attachment`, `openai_api_attachment_supported`, `openai_api_file_attachment_supported`, `anthropic_api_attachment_supported`, `gemini_api_attachment_supported`, `attachment_within_native_payload_cap`) — they sit beside the `*_api_input` builders that own the tests. Moving them later if the test ownership migrates first.
+- The 3 attachment-payload builders (`openai_api_input`, `anthropic_api_user_content`, `gemini_api_user_parts`) — same reason.
+- `provider_label_for_agent`/`provider_remote_present`/`provider_key_for_agent` — shared by other lib.rs code paths beyond the runners.
+
+### Validation
+- `cargo test`: 74 passed, 0 failed (zero regression).
+- `npm run typecheck`: clean.
+- `npm run build`: clean, 1.48s, 2434 modules transformed (PostEditor chunk-size warning is pre-existing).
+- `lib.rs`: 9351 → 8233 lines (−1118). `provider_runners.rs`: ~1100 lines new.
+
+### Operational notes
+- Followed the advisor's "delete first, edit second" sequence: built `provider_runners.rs` before any `lib.rs` mutation, then captured fresh line numbers immediately before a single `sed -i` deletion (range `3886,5003d`), then added `mod` + `use` + `pub(crate)` upgrades. This eliminated the line-shift class that bit v0.3.21.
+- `FUNDING.yml` URL update (operator-requested) is bundled into the same commit since it is a small documentation-only follow-up that was deferred from v0.3.21.
+
 ## [v0.3.21] - 2026-05-02
 
 Pure refactor — no behavior change. Continues `docs/code-split-plan.md` migration order step 3 ("AI provider credentials/probes, including DeepSeek"). v0.3.20 extracted the shared `provider_retry` primitives; v0.3.21 begins migrating the per-provider runners themselves, starting with DeepSeek because it is the structural outlier (custom error helper, predates the unified `write_provider_failure_result` family used by openai/anthropic/gemini). The remaining 3 isomorphic runners + their shared helper family are scheduled for v0.3.22.

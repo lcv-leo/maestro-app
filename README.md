@@ -19,12 +19,13 @@ Portable Windows editorial workbench for protocol-driven AI drafting, source ver
 
 **Status.** Functional alpha with live bootstrap, diagnostics, navigation, Cloudflare credential provisioning, AI API credential checks, PostEditor parity, link auditing, and a real background Claude/Codex/Gemini/DeepSeek editorial session path.
 
-Current project version: `v0.3.12`.
+Current project version: `v0.3.13`.
 
 The version history at a glance:
 
 | Release | Scope |
 |---|---|
+| **`v0.3.13`** | **Session controls, API peers, attachments, and code splitting.** Added selectable peers, optional time/cost caps, UI-managed provider tariffs, real direct-API runners, provider-native attachments, human-readable logs, and lazy PostEditor loading. |
 | **`v0.3.12`** | **README organizational standardization.** Adopted the shared repository README opening pattern and added the top-level version-history table while keeping the Windows/Tauri operational details intact. |
 | **`v0.3.11`** | **DeepSeek real-peer integration.** Added DeepSeek as an API-backed editorial peer, real model-list verification, and stronger Cloudflare Secrets Store reload behavior. |
 | **`v0.3.10`** | **Long-run orchestration reliability.** Fixed broken paused-session rendering, improved visible logs, removed false blocked end states, and reduced very-large prompt pipe failures. |

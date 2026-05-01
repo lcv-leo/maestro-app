@@ -4,6 +4,8 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.13] - 2026-05-01
+
 - Added per-session editorial controls: selectable active peers (1-4), optional time limits, optional direct-API cost limits, prompt attachments, and public source links.
 - Added real direct-API editorial runners for OpenAI/Codex, Anthropic/Claude, Google/Gemini, and DeepSeek, with API-only mode no longer falling back to CLIs for non-DeepSeek peers.
 - Added a UI-managed provider tariff table for per-million token rates. The session still has one optional USD cost limit; provider tariffs calculate/audit observed API usage and any API peer is blocked with a friendly message until its provider input/output rates are configured.

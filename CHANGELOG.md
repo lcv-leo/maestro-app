@@ -4,6 +4,29 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.20] - 2026-05-02
+
+Pure refactor — no behavior change. Extracts the shared provider HTTP networking primitives into `src-tauri/src/provider_retry.rs` (137 lines with doc comments). Per `docs/code-split-plan.md` migration step 3 ("AI provider credentials/probes"). The 4 provider runner functions (DeepSeek/OpenAI/Anthropic/Gemini) stay in `lib.rs` and will move in v0.3.21+ along with their request body shapes and response parsers.
+
+### Changed (extracted to `src-tauri/src/provider_retry.rs`)
+- `pub(crate) fn build_api_client(timeout: Option<Duration>) -> Result<Client, reqwest::Error>` — `reqwest::blocking::Client` factory with the Maestro user-agent.
+- `pub(crate) const PROVIDER_RETRY_MAX_ATTEMPTS: u32 = 2` — at most one retry.
+- `pub(crate) const PROVIDER_RETRY_NETWORK_BACKOFF_MS: u64 = 1500` — backoff between attempts on transient network errors.
+- `pub(crate) const PROVIDER_RETRY_429_DEFAULT_SECS: u64 = 30` — default sleep on 429 with no Retry-After header.
+- `pub(crate) const PROVIDER_RETRY_429_CAP_SECS: u64 = 120` — hard cap on Retry-After to prevent provider-driven hangs.
+- `pub(crate) fn parse_retry_after_header` — RFC 7231 delta-seconds OR RFC 2822 HTTP-date.
+- `pub(crate) fn send_with_retry<F>` — bounded retry policy on transient network errors and HTTP 429 with Retry-After respect; logs `session.provider.retry_network` and `session.provider.retry_after_429` warn entries via the v0.3.19 `logging::write_log_record`.
+
+### Stayed in `lib.rs`
+- `run_deepseek_api_agent`, `run_openai_api_agent`, `run_anthropic_api_agent`, `run_gemini_api_agent` (the 4 runners) — each with provider-specific request body shapes and response parsers; planned for v0.3.21+ batches.
+- `editorial_api_system_prompt`, `api_cost_preflight_result`, `write_provider_missing_key_result`, `write_provider_error_result`, `write_deepseek_error_result`, `api_input_estimate_chars`, `provider_key_for_agent`, `provider_remote_present`, `openai_response_text` — provider-orchestration helpers; planned for the same v0.3.21+ batches.
+
+### Validation
+- `cargo test`: 74 passed (zero regression). Tests for `parse_retry_after_header_*` (4) re-imported via `mod tests` `use crate::provider_retry::parse_retry_after_header;`.
+- `npm run typecheck` + `npm run build`: clean.
+- `cargo clippy --no-deps --all-targets`: 0 errors.
+- `lib.rs`: 9873 → 9776 lines (−97). `provider_retry.rs`: 137 lines new.
+
 ## [v0.3.19] - 2026-05-02
 
 Pure refactor — no behavior change. Continues `docs/code-split-plan.md` migration order step 2 ("logging and path safety"), which was partially completed in v0.3.17. This batch finishes the logger surface extraction.

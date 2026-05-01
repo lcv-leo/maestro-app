@@ -35,6 +35,7 @@ use tauri::Manager;
 mod app_paths;
 mod human_logs;
 mod logging;
+mod provider_retry;
 mod session_controls;
 mod session_evidence;
 
@@ -49,6 +50,7 @@ use crate::app_paths::{
     sanitize_path_segment, sessions_dir, try_set_app_root,
 };
 use crate::logging::{create_log_session, write_log_record, LogEventInput, LogSession, LogWriteResult};
+use crate::provider_retry::{build_api_client, send_with_retry};
 // Items below are only referenced from `mod tests` and cargo flags them as unused
 // when compiled without the test cfg. Re-importing inside the test module avoids
 // `#[cfg(test)]` annotations on the main use list.
@@ -4813,108 +4815,8 @@ fn write_deepseek_error_result(
     result
 }
 
-fn build_api_client(timeout: Option<Duration>) -> Result<Client, reqwest::Error> {
-    let mut client_builder = Client::builder().user_agent(format!(
-        "Maestro Editorial AI/{}",
-        env!("CARGO_PKG_VERSION")
-    ));
-    if let Some(timeout) = timeout {
-        client_builder = client_builder.timeout(timeout);
-    }
-    client_builder.build()
-}
-
-const PROVIDER_RETRY_MAX_ATTEMPTS: u32 = 2;
-const PROVIDER_RETRY_NETWORK_BACKOFF_MS: u64 = 1500;
-const PROVIDER_RETRY_429_DEFAULT_SECS: u64 = 30;
-const PROVIDER_RETRY_429_CAP_SECS: u64 = 120;
-
-/// Parse the Retry-After header per RFC 7231: either a delta-seconds integer
-/// or an HTTP-date. Returns None if absent or unparseable.
-fn parse_retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<u64> {
-    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
-    if let Ok(seconds) = value.trim().parse::<u64>() {
-        return Some(seconds);
-    }
-    if let Ok(date) = chrono::DateTime::parse_from_rfc2822(value.trim()) {
-        let now = chrono::Utc::now();
-        let delta = date.with_timezone(&chrono::Utc) - now;
-        return Some(delta.num_seconds().max(0) as u64);
-    }
-    None
-}
-
-/// Send a provider HTTP request with bounded retry on transient network errors
-/// (1 retry, 1.5s backoff) and on HTTP 429 responses (up to 2 retries respecting
-/// `Retry-After` header, capped at 120s). Non-transient errors and non-429 HTTP
-/// responses are returned unchanged.
-fn send_with_retry<F>(
-    log_session: &LogSession,
-    run_id: &str,
-    provider_label: &str,
-    mut make_request: F,
-) -> Result<reqwest::blocking::Response, reqwest::Error>
-where
-    F: FnMut() -> Result<reqwest::blocking::Response, reqwest::Error>,
-{
-    let mut attempt = 1u32;
-    loop {
-        let result = make_request();
-        match result {
-            Ok(response) => {
-                if response.status().as_u16() == 429 && attempt < PROVIDER_RETRY_MAX_ATTEMPTS {
-                    let retry_after = parse_retry_after_header(response.headers())
-                        .unwrap_or(PROVIDER_RETRY_429_DEFAULT_SECS)
-                        .min(PROVIDER_RETRY_429_CAP_SECS);
-                    let _ = write_log_record(
-                        log_session,
-                        LogEventInput {
-                            level: "warn".to_string(),
-                            category: "session.provider.retry_after_429".to_string(),
-                            message: "provider returned HTTP 429; sleeping until retry".to_string(),
-                            context: Some(json!({
-                                "run_id": run_id,
-                                "provider": provider_label,
-                                "attempt": attempt,
-                                "retry_after_seconds": retry_after,
-                                "retry_after_source": parse_retry_after_header(response.headers())
-                                    .map(|_| "header")
-                                    .unwrap_or("default"),
-                            })),
-                        },
-                    );
-                    std::thread::sleep(Duration::from_secs(retry_after));
-                    attempt += 1;
-                    continue;
-                }
-                return Ok(response);
-            }
-            Err(error) if attempt < PROVIDER_RETRY_MAX_ATTEMPTS => {
-                let _ = write_log_record(
-                    log_session,
-                    LogEventInput {
-                        level: "warn".to_string(),
-                        category: "session.provider.retry_network".to_string(),
-                        message: "provider network error; retrying after backoff".to_string(),
-                        context: Some(json!({
-                            "run_id": run_id,
-                            "provider": provider_label,
-                            "attempt": attempt,
-                            "backoff_ms": PROVIDER_RETRY_NETWORK_BACKOFF_MS,
-                            "error": sanitize_text(&error.to_string(), 240),
-                            "error_is_timeout": error.is_timeout(),
-                            "error_is_connect": error.is_connect(),
-                        })),
-                    },
-                );
-                std::thread::sleep(Duration::from_millis(PROVIDER_RETRY_NETWORK_BACKOFF_MS));
-                attempt += 1;
-                continue;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-}
+// `build_api_client`, `send_with_retry`, `parse_retry_after_header`, and
+// the `PROVIDER_RETRY_*` constants moved into `provider_retry.rs` in v0.3.20.
 
 fn editorial_api_system_prompt(agent_name: &str) -> String {
     format!(
@@ -8339,6 +8241,7 @@ mod tests {
     // Test-only path helpers (not used in non-test builds; re-imported here to
     // avoid `#[cfg(test)]` clutter on the main use list above).
     use crate::app_paths::{config_dir, portable_root_from_exe_path};
+    use crate::provider_retry::parse_retry_after_header;
 
     fn test_manifest_attachment(
         session_dir: &Path,

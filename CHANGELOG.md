@@ -4,6 +4,64 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.2] - 2026-05-02
+
+Behavior fix — B22: resume path was carrying TWO additional saved-contract fields forward over operator's request.
+
+### Operator report
+"Eu não defini tempo nem custos na última sessão, mas ele encerrou o trabalho com o tempo e custos definidos em outra sessão." Operator clicked Retomar at 17:06 BRT (2026-05-02T20:06:57Z), did NOT enter cost or time caps in the UI, but the session was killed with `COST_LIMIT_REACHED` after burning 4.91 USD against a silently-applied 5.0 USD cap from a prior session. Same session also silently inherited 10-min cap.
+
+### Empirical evidence (operator's log `maestro-2026-05-02T20-06-37Z-pid13460.ndjson`)
+- Frontend `session.editorial.requested` event correctly logs: `max_session_cost_usd: None, max_session_minutes: None` (operator's UI had no caps).
+- Backend `session.editorial.active_agents_resolved` event: `max_session_cost_usd_requested: 5.0, max_session_cost_usd_source: "request"`. **Source mislabeled** — the value WAS substituted from saved_contract but appeared in the request struct AFTER mutation, so the resolver saw it as "request".
+- Frontend also sent `requested_initial_agent: codex` but the resolver's `invalid_initial_agent` field showed `deepseek` — the saved value won.
+
+### Root cause — TWO separate bugs in [src-tauri/src/lib.rs:resume_editorial_session_blocking](src-tauri/src/lib.rs)
+
+**(1) Initial_agent priority inverted (line 1160-1162 pre-fix):**
+```rust
+let effective_initial_agent = saved_initial_agent
+    .clone()
+    .or_else(|| requested_initial_agent.clone());
+```
+The `saved_initial_agent` (extracted from saved prompt.md by `extract_saved_initial_agent`) wins over `requested_initial_agent` (operator's UI choice). Reversed semantics from the v0.3.15 B11 / v0.3.42 B20 / v0.5.1 B21 pattern.
+
+**(2) Caps `or_else(saved)` fallback (line 1248-1257 pre-fix):**
+```rust
+max_session_cost_usd: request.max_session_cost_usd.or_else(|| {
+    saved_contract.as_ref().and_then(|contract| contract.max_session_cost_usd)
+}),
+max_session_minutes: request.max_session_minutes.or_else(|| {
+    saved_contract.as_ref().and_then(|contract| contract.max_session_minutes)
+}),
+```
+This is the EXACT pattern that v0.3.42 B20 fix removed in `run_editorial_session_blocking` — but the resume path (`resume_editorial_session_blocking`) was overlooked. The v0.3.42 fix description says "saved caps no longer silently re-applied on resume", but the resume code path itself was not patched.
+
+### Fix
+- Flipped initial_agent priority: `requested_initial_agent.or_else(saved_initial_agent)` so operator's UI wins.
+- Removed `.or_else(saved...)` for `max_session_cost_usd` and `max_session_minutes` and `active_agents` (consistency). Resume path now passes operator's request values through unmodified.
+- Kept `links` `.or_else(saved.links)` because links is a content field (not a config cap) — operator typically doesn't re-enter links on resume; carrying forward saved links is the correct UX.
+
+### What stays unchanged
+- Frontend already sends correct request values (per v0.5.1 B21 + earlier).
+- Backend `resolve_effective_active_agents` resolver unchanged (already correct).
+- Backend NDJSON `session.editorial.active_agents_resolved` log unchanged.
+- `links` saved fallback preserved.
+
+### Pattern (final consolidation)
+**For all CONFIG fields (active_agents, initial_agent, max_session_cost_usd, max_session_minutes), in BOTH start AND resume paths: request is source of truth; saved is reference only.** Mirrors v0.3.42 B20 (caps in start path) + v0.5.1 B21 (peers in frontend). With v0.5.2, all three layers (frontend, run path, resume path) are aligned.
+
+### Validation
+- `cargo test --locked --lib`: **93 passed**.
+- `cargo check`: clean.
+- `npm run build`: clean.
+
+### Cross-review pré-Commit & Sync
+Cross-review-v2 quadrilateral pendente (HARD GATE 2026-04-26).
+
+### Versioning
+Patch bump (v0.5.1 → v0.5.2) — pure bugfix, no signature/dep/feature changes.
+
 ## [v0.5.1] - 2026-05-02
 
 Behavior fix — B21: resume MUST honor operator's current React state, NOT silently override with saved session contract.

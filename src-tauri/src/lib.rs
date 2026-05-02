@@ -1157,9 +1157,14 @@ fn resume_editorial_session_blocking(
     let saved_contract = load_session_contract(&session_dir);
     let saved_initial_agent = extract_saved_initial_agent(&saved_prompt);
     let requested_initial_agent = request.initial_agent.clone();
-    let effective_initial_agent = saved_initial_agent
+    // B22 fix (v0.5.2): request is source of truth. Pre-fix this was
+    // `saved_initial_agent.or_else(requested_initial_agent)`, which silently
+    // overrode the operator's UI choice with whatever was extracted from the
+    // saved prompt.md. Mirrors v0.3.42 B20 (caps) and v0.5.1 B21 (peers):
+    // saved values are reference only.
+    let effective_initial_agent = requested_initial_agent
         .clone()
-        .or_else(|| requested_initial_agent.clone());
+        .or_else(|| saved_initial_agent.clone());
     let override_protocol = request
         .protocol_text
         .as_deref()
@@ -1240,22 +1245,19 @@ fn resume_editorial_session_blocking(
         protocol_text,
         protocol_hash,
         initial_agent: effective_initial_agent,
-        active_agents: request.active_agents.clone().or_else(|| {
-            saved_contract
-                .as_ref()
-                .map(|contract| contract.active_agents.clone())
-        }),
-        max_session_cost_usd: request.max_session_cost_usd.or_else(|| {
-            saved_contract
-                .as_ref()
-                .and_then(|contract| contract.max_session_cost_usd)
-        }),
-        max_session_minutes: request.max_session_minutes.or_else(|| {
-            saved_contract
-                .as_ref()
-                .and_then(|contract| contract.max_session_minutes)
-        }),
+        // B22 fix (v0.5.2): caps are NEVER carried forward from the saved
+        // contract. Pre-fix this was `request.X.or_else(saved.X)` which
+        // silently substituted the operator's "no cap" (None) with the saved
+        // contract's prior values, matching the v0.3.42 B20 bug pattern in a
+        // path that the v0.3.42 fix missed (run_editorial_session_blocking
+        // was patched; resume_editorial_session_blocking was overlooked).
+        // Operator's request is source of truth: None means "no cap".
+        active_agents: request.active_agents.clone(),
+        max_session_cost_usd: request.max_session_cost_usd,
+        max_session_minutes: request.max_session_minutes,
         attachments: request.attachments.clone(),
+        // Links is a content field (not a cap); keep saved fallback so resume
+        // without explicit links carries the original session's links forward.
         links: request.links.clone().or_else(|| {
             saved_contract
                 .as_ref()

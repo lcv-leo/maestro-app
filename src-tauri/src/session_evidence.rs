@@ -8,9 +8,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::link_audit::is_public_http_url;
 use crate::{
-    checked_data_child_path, is_public_http_url, sanitize_path_segment, sanitize_text,
-    write_text_file, SessionContract,
+    checked_data_child_path, sanitize_path_segment, sanitize_text, write_text_file,
+    SessionContract,
 };
 
 const ATTACHMENT_MAX_FILES: usize = 8;

@@ -13,14 +13,12 @@
 
 use chrono::Utc;
 use regex::Regex;
-use reqwest::{blocking::Client, redirect::Policy, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self},
     io::{Read, Write},
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
     process::{self, Command, Output, Stdio},
     sync::{
@@ -39,6 +37,7 @@ mod editorial_helpers;
 mod editorial_inputs;
 mod editorial_prompts;
 mod human_logs;
+mod link_audit;
 mod logging;
 mod provider_deepseek;
 mod provider_retry;
@@ -75,6 +74,7 @@ use crate::editorial_inputs::{
     build_active_agents_resolved_log_context, effective_agent_input, prepare_agent_input,
     resolve_time_budget_anchor,
 };
+use crate::link_audit::run_link_audit;
 use crate::editorial_prompts::{
     build_draft_prompt, build_review_prompt, build_revision_prompt, editorial_agent_specs,
     ordered_editorial_agent_specs, resolve_initial_agent_key,
@@ -200,24 +200,24 @@ pub(crate) struct AiProviderProbeResult {
 }
 
 #[derive(Deserialize)]
-struct LinkAuditRequest {
-    text: String,
+pub(crate) struct LinkAuditRequest {
+    pub(crate) text: String,
 }
 
 #[derive(Serialize)]
-struct LinkAuditRow {
-    url: String,
-    status: String,
-    tone: String,
+pub(crate) struct LinkAuditRow {
+    pub(crate) url: String,
+    pub(crate) status: String,
+    pub(crate) tone: String,
 }
 
 #[derive(Serialize)]
-struct LinkAuditResult {
-    urls_found: usize,
-    checked: usize,
-    ok: usize,
-    failed: usize,
-    rows: Vec<LinkAuditRow>,
+pub(crate) struct LinkAuditResult {
+    pub(crate) urls_found: usize,
+    pub(crate) checked: usize,
+    pub(crate) ok: usize,
+    pub(crate) failed: usize,
+    pub(crate) rows: Vec<LinkAuditRow>,
 }
 
 #[derive(Serialize)]
@@ -3763,199 +3763,6 @@ pub(crate) fn api_error_message(body: &str) -> String {
 }
 
 
-fn run_link_audit(text: &str) -> LinkAuditResult {
-    let urls = extract_public_urls(text);
-    let client = match Client::builder()
-        .timeout(Duration::from_secs(15))
-        .redirect(Policy::limited(5))
-        .user_agent(format!(
-            "Maestro Editorial AI/{}",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .build()
-    {
-        Ok(client) => client,
-        Err(error) => {
-            return LinkAuditResult {
-                urls_found: urls.len(),
-                checked: 0,
-                ok: 0,
-                failed: urls.len(),
-                rows: vec![link_audit_row(
-                    "http-client",
-                    format!("cliente HTTP falhou: {error}"),
-                    "error",
-                )],
-            };
-        }
-    };
-
-    let rows = urls
-        .iter()
-        .map(|url| probe_public_url(&client, url))
-        .collect::<Vec<_>>();
-    let ok = rows.iter().filter(|row| row.tone == "ok").count();
-    let failed = rows
-        .iter()
-        .filter(|row| row.tone == "error" || row.tone == "blocked")
-        .count();
-
-    LinkAuditResult {
-        urls_found: urls.len(),
-        checked: rows.len(),
-        ok,
-        failed,
-        rows,
-    }
-}
-
-fn extract_public_urls(text: &str) -> Vec<String> {
-    let Some(regex) = Regex::new(r#"https?://[^\s<>"')\]]+"#).ok() else {
-        return Vec::new();
-    };
-
-    let mut urls = BTreeSet::new();
-    for matched in regex.find_iter(text).take(80) {
-        let cleaned = matched
-            .as_str()
-            .trim_end_matches(['.', ',', ';', ':'])
-            .to_string();
-        if is_public_http_url(&cleaned) {
-            urls.insert(cleaned);
-        }
-        if urls.len() >= 30 {
-            break;
-        }
-    }
-    urls.into_iter().collect()
-}
-
-pub(crate) fn is_public_http_url(value: &str) -> bool {
-    let Ok(url) = Url::parse(value) else {
-        return false;
-    };
-    if !matches!(url.scheme(), "http" | "https") {
-        return false;
-    }
-    let Some(host) = url.host_str().map(|host| host.to_ascii_lowercase()) else {
-        return false;
-    };
-
-    if matches!(host.as_str(), "localhost" | "localhost.localdomain")
-        || host.ends_with(".localhost")
-        || host.ends_with(".local")
-    {
-        return false;
-    }
-
-    let host_for_ip = host.trim_start_matches('[').trim_end_matches(']');
-    if let Ok(ip) = host_for_ip.parse::<IpAddr>() {
-        return !is_blocked_link_audit_ip(ip);
-    }
-
-    true
-}
-
-fn is_blocked_link_audit_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ipv4) => is_blocked_link_audit_ipv4(ipv4),
-        IpAddr::V6(ipv6) => is_blocked_link_audit_ipv6(ipv6),
-    }
-}
-
-fn is_blocked_link_audit_ipv4(ip: Ipv4Addr) -> bool {
-    let octets = ip.octets();
-    octets[0] == 0
-        || octets[0] == 10
-        || octets[0] == 127
-        || (octets[0] == 100 && (64..=127).contains(&octets[1]))
-        || (octets[0] == 169 && octets[1] == 254)
-        || (octets[0] == 172 && (16..=31).contains(&octets[1]))
-        || (octets[0] == 192 && octets[1] == 168)
-        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
-        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
-        || (octets[0] == 198 && (18..=19).contains(&octets[1]))
-        || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
-        || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
-        || octets[0] >= 224
-}
-
-fn is_blocked_link_audit_ipv6(ip: Ipv6Addr) -> bool {
-    if ip.is_loopback() || ip.is_unspecified() {
-        return true;
-    }
-
-    if let Some(mapped) = ip.to_ipv4_mapped() {
-        return is_blocked_link_audit_ipv4(mapped);
-    }
-
-    let segments = ip.segments();
-    if segments[0..5].iter().all(|segment| *segment == 0)
-        && (segments[5] == 0 || segments[5] == 0xffff)
-    {
-        let [a, b] = segments[6].to_be_bytes();
-        let [c, d] = segments[7].to_be_bytes();
-        return is_blocked_link_audit_ipv4(Ipv4Addr::new(a, b, c, d));
-    }
-
-    let first_segment = segments[0];
-    (first_segment & 0xfe00) == 0xfc00
-        || (first_segment & 0xffc0) == 0xfe80
-        || (first_segment & 0xff00) == 0xff00
-        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
-}
-
-fn probe_public_url(client: &Client, url: &str) -> LinkAuditRow {
-    let head = client.head(url).send();
-    match head {
-        Ok(response) if response.status().is_success() || response.status().is_redirection() => {
-            link_audit_row(url, format!("HTTP {}", response.status().as_u16()), "ok")
-        }
-        Ok(response) if response.status().as_u16() == 405 || response.status().as_u16() == 403 => {
-            probe_public_url_with_get(client, url)
-        }
-        Ok(response) => link_audit_row(
-            url,
-            format!("HTTP {}", response.status().as_u16()),
-            if response.status().is_client_error() || response.status().is_server_error() {
-                "error"
-            } else {
-                "warn"
-            },
-        ),
-        Err(_) => probe_public_url_with_get(client, url),
-    }
-}
-
-fn probe_public_url_with_get(client: &Client, url: &str) -> LinkAuditRow {
-    match client.get(url).send() {
-        Ok(response) if response.status().is_success() || response.status().is_redirection() => {
-            link_audit_row(url, format!("HTTP {}", response.status().as_u16()), "ok")
-        }
-        Ok(response) => link_audit_row(
-            url,
-            format!("HTTP {}", response.status().as_u16()),
-            if response.status().is_client_error() || response.status().is_server_error() {
-                "error"
-            } else {
-                "warn"
-            },
-        ),
-        Err(error) => link_audit_row(url, format!("falha HTTP: {error}"), "error"),
-    }
-}
-
-fn link_audit_row(
-    url: impl Into<String>,
-    status: impl Into<String>,
-    tone: impl Into<String>,
-) -> LinkAuditRow {
-    LinkAuditRow {
-        url: sanitize_text(&url.into(), 240),
-        status: sanitize_text(&status.into(), 160),
-        tone: sanitize_short(&tone.into(), 16),
-    }
-}
 
 
 fn command_check(label: &str, command: &str, args: &[&str]) -> Value {
@@ -4457,6 +4264,7 @@ mod tests {
         cloudflare_page_path, cloudflare_store_for_target_or_existing, cloudflare_verify_path,
     };
     use crate::editorial_prompts::{claude_args, gemini_args};
+    use crate::link_audit::{extract_public_urls, is_public_http_url};
     use crate::provider_retry::parse_retry_after_header;
     use crate::session_artifacts::{parse_agent_artifact_name, parse_agent_artifact_result};
     use crate::session_controls::{normalize_active_agents, provider_cost};

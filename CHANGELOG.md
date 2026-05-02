@@ -4,6 +4,29 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.31] - 2026-05-02
+
+Pure refactor — no behavior change. Continues migration step 5 by extracting public-URL extraction + audit (HEAD/GET probe + private-network IP blocklist) into a dedicated module.
+
+### Changed (extracted to `src-tauri/src/link_audit.rs`, ~232 lines with doc header, 9 functions)
+- `pub(crate) fn run_link_audit` — top-level entry with HTTP client + per-URL probe.
+- `pub(crate) fn extract_public_urls` + `pub(crate) fn is_public_http_url`.
+- `fn is_blocked_link_audit_ip`, `is_blocked_link_audit_ipv4`, `is_blocked_link_audit_ipv6` — RFC 1918/6890/4193/5737/6598 + IPv6 reserved/link-local/ULA/multicast filters.
+- `fn probe_public_url`, `probe_public_url_with_get`, `link_audit_row`.
+
+### `pub(crate)` visibility upgrades in `lib.rs`
+- `pub(crate) struct LinkAuditRequest` + 1 field, `LinkAuditRow` + 3 fields, `LinkAuditResult` + 5 fields.
+
+### Other changes
+- `session_evidence.rs`: rerouted `is_public_http_url` import from `crate::is_public_http_url` to `crate::link_audit::is_public_http_url`.
+- Cleaned up 3 unused imports in lib.rs (`reqwest::{blocking::Client, redirect::Policy, Url}`, `std::net::{IpAddr, Ipv4Addr, Ipv6Addr}`).
+
+### Validation
+- `cargo test`: 74 passed.
+- `npm run typecheck` + `npm run build`: clean.
+- `lib.rs`: 5973 → 5783 lines (−190 net; 193 deleted, 3 mod/use lines added).
+- ZERO-line byte-parity diff vs v0.3.30 (commit 91aa863).
+
 ## [v0.3.30] - 2026-05-02
 
 Pure refactor — no behavior change. Continues migration step 5 by extracting AI provider credential probes (4 providers + helpers) into a dedicated module.

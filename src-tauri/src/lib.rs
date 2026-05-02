@@ -29,6 +29,7 @@ mod app_paths;
 mod cloudflare;
 mod command_path;
 mod command_spawn;
+mod editorial_agent_runners;
 mod editorial_helpers;
 mod editorial_inputs;
 mod editorial_prompts;
@@ -73,17 +74,15 @@ use crate::cloudflare::{
 };
 use crate::command_path::{command_search_dirs, resolve_command};
 use crate::command_spawn::{
-    command_check, run_resolved_command_observed, run_resolved_command_with_timeout,
-    CommandProgressContext,
+    command_check, run_resolved_command_with_timeout, CommandProgressContext,
 };
+use crate::editorial_agent_runners::run_editorial_agent_for_spec;
 use crate::editorial_helpers::{
     filter_existing_agents_to_active_set, finalize_running_agent_artifacts,
-    resolve_effective_active_agents, review_complaint_fingerprint, write_editorial_agent_error_artifact,
-    write_editorial_agent_running_artifact, FinalizeRunningArtifactsGuard,
+    resolve_effective_active_agents, review_complaint_fingerprint, FinalizeRunningArtifactsGuard,
 };
 use crate::editorial_inputs::{
-    build_active_agents_resolved_log_context, effective_agent_input, prepare_agent_input,
-    resolve_time_budget_anchor,
+    build_active_agents_resolved_log_context, resolve_time_budget_anchor,
 };
 use crate::link_audit::run_link_audit;
 use crate::editorial_prompts::{
@@ -91,10 +90,6 @@ use crate::editorial_prompts::{
     ordered_editorial_agent_specs, resolve_initial_agent_key,
 };
 use crate::logging::{create_log_session, write_log_record, LogEventInput, LogSession, LogWriteResult};
-use crate::provider_deepseek::run_deepseek_api_agent;
-use crate::provider_runners::{
-    run_anthropic_api_agent, run_gemini_api_agent, run_openai_api_agent, write_provider_error_result,
-};
 use crate::session_artifacts::{inspect_resumable_session_dir, load_resume_session_state};
 use crate::session_persistence::{
     append_agent_cost_to_ledger, load_cost_ledger, load_session_contract, write_session_contract,
@@ -113,8 +108,7 @@ use human_logs::should_collapse_human_log_event;
 // are now consumed inside `logging.rs`; lib.rs no longer needs them.
 use session_controls::{
     all_agent_keys, effective_draft_lead, provider_cost_guard_for, sanitize_optional_positive_f64,
-    sanitize_optional_positive_u64, selected_editorial_agent_specs, ProviderCostGuard,
-    ProviderCostRates,
+    sanitize_optional_positive_u64, selected_editorial_agent_specs, ProviderCostRates,
 };
 use session_evidence::{
     attachment_base64, attachment_data_url, attachment_payload_base64_chars, is_audio_attachment,
@@ -1608,7 +1602,7 @@ fn api_provider_for_agent(agent_key: &str) -> Option<&'static str> {
     }
 }
 
-fn api_cli_for_agent(agent_key: &str) -> &'static str {
+pub(crate) fn api_cli_for_agent(agent_key: &str) -> &'static str {
     match agent_key {
         "claude" => "anthropic-api",
         "codex" => "openai-api",
@@ -2866,117 +2860,6 @@ pub(crate) struct SessionArtifact {
 
 
 
-fn run_editorial_agent_for_spec(
-    log_session: &LogSession,
-    run_id: &str,
-    spec: EditorialAgentSpec,
-    role: &str,
-    stdin_text: String,
-    attachments: &[AttachmentManifestEntry],
-    output_path: &Path,
-    timeout: Option<Duration>,
-    config: &AiProviderConfig,
-    cost_guard: Option<ProviderCostGuard>,
-    use_api_agent: bool,
-) -> EditorialAgentResult {
-    if use_api_agent {
-        return run_provider_api_agent(
-            log_session,
-            run_id,
-            spec,
-            role,
-            stdin_text,
-            attachments,
-            output_path,
-            timeout,
-            config,
-            cost_guard,
-        );
-    }
-
-    run_editorial_agent(
-        log_session,
-        run_id,
-        spec.name,
-        role,
-        spec.command,
-        (spec.args)(),
-        stdin_text,
-        output_path,
-        timeout,
-    )
-}
-
-fn run_provider_api_agent(
-    log_session: &LogSession,
-    run_id: &str,
-    spec: EditorialAgentSpec,
-    role: &str,
-    prompt: String,
-    attachments: &[AttachmentManifestEntry],
-    output_path: &Path,
-    timeout: Option<Duration>,
-    config: &AiProviderConfig,
-    cost_guard: Option<ProviderCostGuard>,
-) -> EditorialAgentResult {
-    match spec.key {
-        "claude" => run_anthropic_api_agent(
-            log_session,
-            run_id,
-            role,
-            prompt,
-            attachments,
-            output_path,
-            timeout,
-            config,
-            cost_guard,
-        ),
-        "codex" => run_openai_api_agent(
-            log_session,
-            run_id,
-            role,
-            prompt,
-            attachments,
-            output_path,
-            timeout,
-            config,
-            cost_guard,
-        ),
-        "gemini" => run_gemini_api_agent(
-            log_session,
-            run_id,
-            role,
-            prompt,
-            attachments,
-            output_path,
-            timeout,
-            config,
-            cost_guard,
-        ),
-        "deepseek" => run_deepseek_api_agent(
-            log_session,
-            run_id,
-            role,
-            prompt,
-            output_path,
-            timeout,
-            config,
-            cost_guard,
-        ),
-        _ => write_provider_error_result(
-            log_session,
-            run_id,
-            spec.name,
-            api_cli_for_agent(spec.key),
-            "unknown",
-            role,
-            output_path,
-            "unknown",
-            "API_PROVIDER_NOT_SUPPORTED",
-            0,
-        ),
-    }
-}
 
 pub(crate) fn api_input_estimate_chars(
     prompt: &str,
@@ -3120,248 +3003,6 @@ pub(crate) fn gemini_api_user_parts(
     Ok(parts)
 }
 
-fn run_editorial_agent(
-    log_session: &LogSession,
-    run_id: &str,
-    name: &str,
-    role: &str,
-    command: &str,
-    args: Vec<String>,
-    stdin_text: String,
-    output_path: &Path,
-    timeout: Option<Duration>,
-) -> EditorialAgentResult {
-    let started = Instant::now();
-    let working_dir = command_working_dir_for_output(output_path);
-    let prepared_input = prepare_agent_input(name, role, &stdin_text, output_path);
-    let effective_input = effective_agent_input(command, args, &prepared_input);
-    let _ = write_log_record(
-        log_session,
-        LogEventInput {
-            level: "info".to_string(),
-            category: "session.agent.started".to_string(),
-            message: "editorial agent process starting".to_string(),
-            context: Some(json!({
-                "run_id": sanitize_short(run_id, 120),
-                "agent": name,
-                "role": role,
-                "cli": command,
-                "stdin_chars": effective_input.stdin_chars,
-                "original_prompt_chars": prepared_input.original_chars,
-                "input_path": prepared_input
-                    .input_path
-                    .as_ref()
-                    .map(|path| path.to_string_lossy().to_string()),
-                "input_delivery": effective_input.delivery,
-                "timeout_seconds": timeout.map(|value| value.as_secs()),
-                "timeout_policy": if timeout.is_some() { "diagnostic_or_limited" } else { "none_editorial_session" },
-                "working_dir": working_dir.to_string_lossy().to_string(),
-                "output_path": output_path.to_string_lossy().to_string()
-            })),
-        },
-    );
-    let Some(path) = resolve_command(command) else {
-        let _ = write_text_file(
-            output_path,
-            &format!(
-                "# {name} - {role}\n\n- CLI: `{command}`\n- Status: `CLI_NOT_FOUND`\n- PATH dirs checked: `{}`\n\nCLI nao encontrada no PATH efetivo.\n",
-                command_search_dirs().len()
-            ),
-        );
-        let result = EditorialAgentResult {
-            name: name.to_string(),
-            role: role.to_string(),
-            cli: command.to_string(),
-            tone: "blocked".to_string(),
-            status: "CLI_NOT_FOUND".to_string(),
-            duration_ms: started.elapsed().as_millis(),
-            exit_code: None,
-            output_path: output_path.to_string_lossy().to_string(),
-            usage_input_tokens: None,
-            usage_output_tokens: None,
-            cost_usd: None,
-            cost_estimated: None,
-        };
-        log_editorial_agent_finished(log_session, run_id, &result, None, None, None, false);
-        return result;
-    };
-
-    let _ = write_editorial_agent_running_artifact(
-        output_path,
-        name,
-        role,
-        command,
-        &path,
-        &effective_input.args,
-        effective_input.stdin_chars,
-        prepared_input.original_chars,
-        prepared_input.input_path.as_deref(),
-    );
-
-    let progress = CommandProgressContext {
-        log_session,
-        run_id,
-        agent: name,
-        role,
-        cli: command,
-        output_path,
-    };
-    let command_result = run_resolved_command_observed(
-        &path,
-        &effective_input.args,
-        timeout,
-        effective_input.stdin_text.as_deref(),
-        Some(progress),
-    );
-
-    match command_result {
-        Ok(result) => {
-            let stdout = String::from_utf8_lossy(&result.output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&result.output.stderr).to_string();
-            let exit_code = result.output.status.code();
-            let status = if role == "review" {
-                if stdout.trim().is_empty() {
-                    if result.output.status.success() {
-                        "AGENT_FAILED_EMPTY"
-                    } else {
-                        "AGENT_FAILED_NO_OUTPUT"
-                    }
-                } else {
-                    extract_maestro_status(&stdout).unwrap_or("NOT_READY")
-                }
-            } else if stdout.trim().is_empty() {
-                "EMPTY_DRAFT"
-            } else {
-                "DRAFT_CREATED"
-            };
-            let tone = if result.timed_out
-                || status == "AGENT_FAILED_EMPTY"
-                || status == "AGENT_FAILED_NO_OUTPUT"
-            {
-                "error"
-            } else if result.output.status.success()
-                && (status == "READY" || status == "DRAFT_CREATED")
-            {
-                "ok"
-            } else if result.output.status.success() {
-                "warn"
-            } else {
-                "error"
-            };
-            let note = if status == "AGENT_FAILED_NO_OUTPUT" {
-                "\n> O agente encerrou sem entregar avaliacao editorial em stdout. Este arquivo e diagnostico operacional, nao parecer de revisao.\n"
-            } else if status == "AGENT_FAILED_EMPTY" {
-                "\n> O agente encerrou com exit code 0 mas devolveu stdout vazio. Tratado como falha operacional (NAO READY), nao como parecer editorial.\n"
-            } else {
-                ""
-            };
-            let input_line = prepared_input
-                .input_path
-                .as_ref()
-                .map(|input_path| format!("- Input file: `{}`\n", input_path.to_string_lossy()))
-                .unwrap_or_else(|| "- Input file: `inline stdin`\n".to_string());
-            let pipe_diagnostic_line = if result.stdout_pipe_error.is_some()
-                || result.stderr_pipe_error.is_some()
-            {
-                format!(
-                    "- Stdout pipe error: `{}`\n- Stderr pipe error: `{}`\n",
-                    result
-                        .stdout_pipe_error
-                        .as_deref()
-                        .unwrap_or("none"),
-                    result
-                        .stderr_pipe_error
-                        .as_deref()
-                        .unwrap_or("none"),
-                )
-            } else {
-                String::new()
-            };
-            let artifact = format!(
-                "# {name} - {role}\n\n- CLI: `{command}`\n- Resolved path: `{}`\n- Args: `{}`\n- Status: `{status}`\n- Exit code: `{}`\n- Duration ms: `{}`\n- Timed out: `{}`\n- Stdin chars: `{}`\n- Original prompt chars: `{}`\n{input_line}- Stdout chars: `{}`\n- Stderr chars: `{}`\n{pipe_diagnostic_line}{note}\n## Stdout\n\n```text\n{}\n```\n\n## Stderr\n\n```text\n{}\n```\n",
-                path.to_string_lossy(),
-                sanitize_text(&effective_input.args.join(" "), 1000),
-                exit_code
-                    .map(|code| code.to_string())
-                    .unwrap_or_else(|| "unknown".to_string()),
-                result.duration_ms,
-                result.timed_out,
-                effective_input.stdin_chars,
-                prepared_input.original_chars,
-                stdout.chars().count(),
-                stderr.chars().count(),
-                stdout,
-                truncate_text_head_tail(&stderr, 1024, 60 * 1024)
-            );
-            let _ = write_text_file(output_path, &artifact);
-
-            let agent_result = EditorialAgentResult {
-                name: name.to_string(),
-                role: role.to_string(),
-                cli: command.to_string(),
-                tone: tone.to_string(),
-                status: status.to_string(),
-                duration_ms: result.duration_ms,
-                exit_code,
-                output_path: output_path.to_string_lossy().to_string(),
-                usage_input_tokens: None,
-                usage_output_tokens: None,
-                cost_usd: None,
-                cost_estimated: None,
-            };
-            log_editorial_agent_finished(
-                log_session,
-                run_id,
-                &agent_result,
-                Some(stdout.chars().count()),
-                Some(stderr.chars().count()),
-                Some(path.to_string_lossy().to_string()),
-                result.timed_out,
-            );
-            agent_result
-        }
-        Err(error) => {
-            let status = sanitize_text(&format!("EXEC_ERROR: {error}"), 240);
-            let _ = write_editorial_agent_error_artifact(
-                output_path,
-                name,
-                role,
-                command,
-                &path,
-                &effective_input.args,
-                &status,
-                started.elapsed().as_millis(),
-                effective_input.stdin_chars,
-                prepared_input.original_chars,
-                prepared_input.input_path.as_deref(),
-            );
-            let agent_result = EditorialAgentResult {
-                name: name.to_string(),
-                role: role.to_string(),
-                cli: command.to_string(),
-                tone: "error".to_string(),
-                status,
-                duration_ms: started.elapsed().as_millis(),
-                exit_code: None,
-                output_path: output_path.to_string_lossy().to_string(),
-                usage_input_tokens: None,
-                usage_output_tokens: None,
-                cost_usd: None,
-                cost_estimated: None,
-            };
-            log_editorial_agent_finished(
-                log_session,
-                run_id,
-                &agent_result,
-                None,
-                None,
-                Some(path.to_string_lossy().to_string()),
-                false,
-            );
-            agent_result
-        }
-    }
-}
 
 
 /// Filter `existing_agents` recovered from the agent-runs/ directory on resume
@@ -3788,6 +3429,7 @@ mod tests {
         cloudflare_page_path, cloudflare_store_for_target_or_existing, cloudflare_verify_path,
     };
     use crate::command_spawn::{apply_editorial_agent_environment, classify_pipe_error};
+    use crate::editorial_inputs::{effective_agent_input, prepare_agent_input};
     use crate::editorial_prompts::{claude_args, gemini_args};
     use crate::link_audit::{extract_public_urls, is_public_http_url};
     use crate::provider_retry::parse_retry_after_header;

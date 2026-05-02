@@ -4,6 +4,27 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.36] - 2026-05-02
+
+Pure refactor — no behavior change. Continues migration step 5 by extracting the per-spec agent dispatchers + the CLI-path editorial agent runner.
+
+### Changed (extracted to `src-tauri/src/editorial_agent_runners.rs`, ~433 lines with doc header, 3 functions)
+- `pub(crate) fn run_editorial_agent_for_spec` — top-level dispatcher (API peer vs CLI runner).
+- `fn run_provider_api_agent` (private) — match-by-spec.key dispatcher to the 4 API peer runners.
+- `fn run_editorial_agent` (private) — CLI-path runner with sidecar input prep (>48 KB), CLI_NOT_FOUND short-circuit, RUNNING placeholder, spawn-via-`run_resolved_command_observed`, status classification (READY / NOT_READY / DRAFT_CREATED / EMPTY_DRAFT / AGENT_FAILED_EMPTY / AGENT_FAILED_NO_OUTPUT / EXEC_ERROR), artifact emission.
+
+### `pub(crate)` visibility upgrades in `lib.rs`
+- `pub(crate) fn api_cli_for_agent` (consumed by `run_provider_api_agent` for the `API_PROVIDER_NOT_SUPPORTED` fallback).
+
+### Defensive additions
+- Two `#[allow(clippy::too_many_arguments)]` annotations on `run_editorial_agent_for_spec` (11 args) and `run_provider_api_agent` (10 args) following the v0.3.22 sibling convention.
+
+### Validation
+- `cargo test`: 74 passed.
+- `npm run typecheck` + `npm run build`: clean.
+- `lib.rs`: 5302 → 4956 lines (−346 net; 353 sed-deleted via `'3123,3364d;2869,2979d'`).
+- 2-range byte-parity diff vs v0.3.35 (commit 05a7a0f): both ranges exit=0 after stripping defensive `#[allow]` and pub(crate) prefix.
+
 ## [v0.3.35] - 2026-05-02
 
 Pure refactor — no behavior change. Continues migration step 5 by extracting the child-process spawn machinery (timeout, progress logging, pipe readers, command builders, environment policy) into a dedicated module.

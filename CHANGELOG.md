@@ -4,6 +4,59 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.6] - 2026-05-02
+
+Pure refactor batch — extracted [src-tauri/src/tauri_commands.rs](src-tauri/src/tauri_commands.rs) (11 Tauri commands, ~341 lines incl. doc header) per `docs/code-split-plan.md`. No behavior change. Largest single split batch since v0.4.0.
+
+### Extracted from lib.rs (11 #[tauri::command] items)
+**Config CRUD (4)**: `read_bootstrap_config`, `write_bootstrap_config`, `read_ai_provider_config`, `write_ai_provider_config`.
+
+**Diagnostics + observability (3)**: `runtime_profile`, `write_log_event`, `diagnostics_snapshot`.
+
+**Editorial utilities (4)**: `verify_ai_provider_credentials`, `audit_links`, `open_data_file`, `run_cli_adapter_smoke`.
+
+### Visibility upgrade
+`RuntimeProfile` struct in lib.rs upgraded from private to `pub(crate)` (with all 7 fields `pub(crate)`) for cross-module access.
+
+### Re-export shim in lib.rs
+```rust
+use crate::tauri_commands::{
+    audit_links, diagnostics_snapshot, open_data_file, read_ai_provider_config,
+    read_bootstrap_config, run_cli_adapter_smoke, runtime_profile, verify_ai_provider_credentials,
+    write_ai_provider_config, write_bootstrap_config, write_log_event,
+};
+```
+Tauri's `generate_handler!` macro in `pub fn run()` resolves the 11 command identifiers from this `use` statement.
+
+### Cleanup in lib.rs (massive)
+The following imports were used only by the 11 extracted commands and are now removed from lib.rs (consumed only inside `tauri_commands.rs`):
+- `serde_json::Value` (gated `#[cfg(test)]` — only test uses remain)
+- `crate::ai_probes::run_ai_provider_probe`
+- `crate::app_paths::{ai_provider_config_path, bootstrap_config_path, data_dir}`
+- `crate::cli_adapter::{cli_adapter_specs, run_cli_adapter_probe}`
+- `crate::config_persistence::{enrich_ai_provider_config_from_cloudflare, persist_ai_provider_cloudflare_marker, persist_ai_provider_config, persist_ai_provider_config_to_cloudflare, persist_bootstrap_config}` re-export removed
+- `crate::link_audit::run_link_audit`
+- `crate::logging::LogWriteResult`
+- `crate::provider_config::{merge_ai_provider_env_values, normalize_cloudflare_token_source, normalize_storage_mode}` re-export removed (still pub(crate) in provider_config.rs for direct imports)
+
+`persist_ai_provider_cloudflare_marker` re-imported `#[cfg(test)]`-gated for the existing test in `lib.rs::tests`.
+
+### Out of scope (deferred to next batches)
+Session orchestration commands (`run_editorial_session`, `resume_editorial_session`, `list_resumable_sessions`, `stop_editorial_session`) stay in lib.rs because they are tightly coupled with the `*_blocking` helpers and `run_editorial_session_core` (~880 lines of orchestration logic still in lib.rs).
+
+### Validation
+- `cargo test --locked --lib`: **93 passed** (zero regressions vs v0.5.5).
+- `cargo clippy --locked --no-deps --all-targets`: **0 lib + 0 test warnings** (maintained baseline).
+- `npm run build`: clean.
+- Function-body byte-parity diff vs v0.5.5 (commit 0744639): clean.
+- lib.rs: 3729 → 3460 lines (−269 net). tauri_commands.rs: 341 lines new.
+
+### Cross-review pré-Commit & Sync
+Cross-review-v2 quadrilateral pendente (HARD GATE 2026-04-26).
+
+### Versioning
+Patch bump (v0.5.5 → v0.5.6) — pure refactor.
+
 ## [v0.5.5] - 2026-05-02
 
 Pure refactor batch — extracted [src-tauri/src/cloudflare_commands.rs](src-tauri/src/cloudflare_commands.rs) (~153 lines incl. doc header) per `docs/code-split-plan.md`. No behavior change.

@@ -13,7 +13,9 @@
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
+#[cfg(test)]
+use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self},
@@ -31,6 +33,7 @@ mod app_paths;
 mod cloudflare_commands;
 mod editorial_io;
 mod session_cancel;
+mod tauri_commands;
 mod cli_adapter;
 mod cloudflare;
 mod command_path;
@@ -72,20 +75,17 @@ pub(crate) use crate::sanitize::{redact_secrets, should_redact_key};
 // (`normalize_provider_mode`, `provider_env_value`, `sanitize_optional_cost_rate`,
 // `sanitize_optional_secret`) are not re-exported here.
 pub(crate) use crate::provider_config::{
-    api_provider_for_agent, merge_ai_provider_env_values, normalize_cloudflare_token_source,
-    normalize_storage_mode, provider_cost_rates_from_config, sanitize_ai_provider_config,
+    api_provider_for_agent, provider_cost_rates_from_config, sanitize_ai_provider_config,
     should_run_agent_via_api,
 };
+#[cfg(test)]
+use crate::config_persistence::persist_ai_provider_cloudflare_marker;
 
 // Re-export the config_persistence surface so existing
 // `crate::persist_ai_provider_config` and similar unqualified call sites in
 // lib.rs continue to resolve. v0.3.41. Helpers consumed only inside
 // config_persistence.rs (`json_find_first_string`,
 // `read_ai_provider_cloudflare_metadata`) are not re-exported here.
-pub(crate) use crate::config_persistence::{
-    enrich_ai_provider_config_from_cloudflare, persist_ai_provider_cloudflare_marker,
-    persist_ai_provider_config, persist_ai_provider_config_to_cloudflare, persist_bootstrap_config,
-};
 
 // Re-export the provider_routing surface so existing `crate::api_cli_for_agent`
 // and similar unqualified call sites across sibling modules (ai_probes.rs,
@@ -117,14 +117,12 @@ use crate::api_payloads::API_NATIVE_ATTACHMENT_MAX_FILE_BYTES;
 // keep their pre-extraction call sites (`sessions_dir()`, `app_root()`, etc.)
 // untouched; only the home of the implementation moved per
 // `docs/code-split-plan.md`. See `app_paths.rs` for documentation.
-use crate::ai_probes::run_ai_provider_probe;
 use crate::app_paths::{
-    ai_provider_config_path, app_root, bootstrap_config_path, checked_data_child_path, data_dir,
-    human_log_path_for, logs_dir, safe_run_id_from_entry, sanitize_path_segment, sessions_dir,
+    app_root, checked_data_child_path, human_log_path_for, logs_dir, safe_run_id_from_entry,
+    sanitize_path_segment, sessions_dir,
 };
 #[cfg(test)]
 use crate::app_paths::active_or_early_logs_dir;
-use crate::cli_adapter::{cli_adapter_specs, run_cli_adapter_probe};
 #[cfg(test)]
 use crate::cloudflare::ai_provider_secret_values;
 use crate::command_path::{command_search_dirs, resolve_command};
@@ -138,12 +136,11 @@ use crate::editorial_helpers::finalize_running_agent_artifacts;
 use crate::editorial_inputs::{
     build_active_agents_resolved_log_context, resolve_time_budget_anchor,
 };
-use crate::link_audit::run_link_audit;
 use crate::editorial_prompts::{
     build_draft_prompt, build_review_prompt, build_revision_prompt, editorial_agent_specs,
     ordered_editorial_agent_specs, resolve_initial_agent_key,
 };
-use crate::logging::{create_log_session, write_log_record, LogEventInput, LogSession, LogWriteResult};
+use crate::logging::{create_log_session, write_log_record, LogEventInput, LogSession};
 use crate::session_artifacts::{inspect_resumable_session_dir, load_resume_session_state};
 use crate::session_minutes::build_session_minutes;
 use crate::session_persistence::{
@@ -568,292 +565,26 @@ impl Default for AiProviderConfig {
 }
 
 #[derive(Serialize)]
-struct RuntimeProfile {
-    app_name: &'static str,
-    storage_policy: &'static str,
-    target_platform: &'static str,
-    log_dir: String,
-    log_file: String,
-    human_log_file: String,
-    log_session_id: String,
+pub(crate) struct RuntimeProfile {
+    pub(crate) app_name: &'static str,
+    pub(crate) storage_policy: &'static str,
+    pub(crate) target_platform: &'static str,
+    pub(crate) log_dir: String,
+    pub(crate) log_file: String,
+    pub(crate) human_log_file: String,
+    pub(crate) log_session_id: String,
 }
 
-#[tauri::command]
-fn runtime_profile(log_session: tauri::State<LogSession>) -> RuntimeProfile {
-    RuntimeProfile {
-        app_name: "Maestro Editorial AI",
-        storage_policy: "app-folder-json-only",
-        target_platform: "Windows 11+",
-        log_dir: logs_dir().to_string_lossy().to_string(),
-        log_file: log_session.path.to_string_lossy().to_string(),
-        human_log_file: human_log_path_for(&log_session.path)
-            .to_string_lossy()
-            .to_string(),
-        log_session_id: log_session.id.clone(),
-    }
-}
-
-#[tauri::command]
-fn write_log_event(
-    log_session: tauri::State<LogSession>,
-    event: LogEventInput,
-) -> Result<LogWriteResult, String> {
-    write_log_record(&log_session, event)
-}
-
-#[tauri::command]
-fn diagnostics_snapshot(log_session: tauri::State<LogSession>) -> Value {
-    let dir = match checked_data_child_path(&logs_dir()) {
-        Ok(dir) => dir,
-        Err(error) => {
-            return json!({
-                "error": sanitize_text(&error, 240),
-                "hint": "Maestro could not validate its diagnostic log directory."
-            });
-        }
-    };
-    let files = fs::read_dir(&dir)
-        .ok()
-        .into_iter()
-        .flat_map(|entries| entries.filter_map(Result::ok))
-        .filter_map(|entry| {
-            let metadata = entry.metadata().ok()?;
-            Some(json!({
-                "name": entry.file_name().to_string_lossy(),
-                "path": entry.path().to_string_lossy(),
-                "bytes": metadata.len(),
-                "modified": metadata.modified().ok()
-                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|duration| duration.as_secs())
-            }))
-        })
-        .collect::<Vec<_>>();
-
-    json!({
-        "log_dir": dir.to_string_lossy(),
-        "active_log_file": log_session.path.to_string_lossy(),
-        "active_human_log_file": human_log_path_for(&log_session.path).to_string_lossy(),
-        "log_session_id": log_session.id.clone(),
-        "files": files,
-        "hint": "Attach the newest data/logs/maestro-*.ndjson file for machine diagnosis; use data/logs/human/*.log for quick human reading."
-    })
-}
-
-#[tauri::command]
-fn read_bootstrap_config() -> Result<BootstrapConfig, String> {
-    let path = checked_data_child_path(&bootstrap_config_path())?;
-    if !path.exists() {
-        let config = BootstrapConfig::default();
-        persist_bootstrap_config(&path, &config)?;
-        return Ok(config);
-    }
-
-    let text = fs::read_to_string(&path)
-        .map_err(|error| format!("failed to read bootstrap config: {error}"))?;
-    let mut config: BootstrapConfig = serde_json::from_str(&text)
-        .map_err(|error| format!("failed to parse bootstrap config: {error}"))?;
-    config.credential_storage_mode =
-        normalize_storage_mode(&config.credential_storage_mode).to_string();
-    Ok(config)
-}
-
-#[tauri::command]
-fn write_bootstrap_config(config: BootstrapConfig) -> Result<BootstrapConfig, String> {
-    let path = bootstrap_config_path();
-    let account_id = config
-        .cloudflare_account_id
-        .map(|value| sanitize_text(value.trim(), 160))
-        .filter(|value| !value.is_empty());
-    let sanitized = BootstrapConfig {
-        schema_version: 1,
-        credential_storage_mode: normalize_storage_mode(&config.credential_storage_mode)
-            .to_string(),
-        cloudflare_account_id: account_id,
-        cloudflare_api_token_source: normalize_cloudflare_token_source(
-            &config.cloudflare_api_token_source,
-        )
-        .to_string(),
-        cloudflare_api_token_env_var: sanitize_short(&config.cloudflare_api_token_env_var, 80),
-        cloudflare_persistence_database: sanitize_short(
-            &config.cloudflare_persistence_database,
-            80,
-        ),
-        cloudflare_secret_store: sanitize_short(&config.cloudflare_secret_store, 80),
-        windows_env_prefix: sanitize_short(&config.windows_env_prefix, 80),
-        updated_at: Utc::now().to_rfc3339(),
-    };
-
-    persist_bootstrap_config(&path, &sanitized)?;
-    Ok(sanitized)
-}
-
-#[tauri::command]
-fn read_ai_provider_config() -> Result<AiProviderConfig, String> {
-    let path = checked_data_child_path(&ai_provider_config_path())?;
-    if !path.exists() {
-        let config = AiProviderConfig {
-            credential_storage_mode: read_bootstrap_config()
-                .map(|config| config.credential_storage_mode)
-                .unwrap_or_else(|_| "local_json".to_string()),
-            ..AiProviderConfig::default()
-        };
-        persist_ai_provider_config(&path, &config)?;
-        return Ok(merge_ai_provider_env_values(config));
-    }
-
-    let text = fs::read_to_string(&path)
-        .map_err(|error| format!("failed to read AI provider config: {error}"))?;
-    let mut config: AiProviderConfig = serde_json::from_str(&text)
-        .map_err(|error| format!("failed to parse AI provider config: {error}"))?;
-    if let Ok(bootstrap) = read_bootstrap_config() {
-        config.credential_storage_mode =
-            normalize_storage_mode(&bootstrap.credential_storage_mode).to_string();
-        if config.credential_storage_mode == "cloudflare" {
-            config = enrich_ai_provider_config_from_cloudflare(config, &bootstrap);
-        }
-    }
-    Ok(merge_ai_provider_env_values(sanitize_ai_provider_config(
-        config,
-    )))
-}
-
-#[tauri::command]
-fn write_ai_provider_config(
-    config: AiProviderConfig,
-    cloudflare: Option<CloudflareProviderStorageRequest>,
-) -> Result<AiProviderConfig, String> {
-    let path = ai_provider_config_path();
-    let sanitized = sanitize_ai_provider_config(config);
-    if sanitized.credential_storage_mode == "cloudflare" {
-        let cloudflare = cloudflare.ok_or_else(|| {
-            "configuracao Cloudflare ausente para salvar APIs no Secrets Store".to_string()
-        })?;
-        persist_ai_provider_config_to_cloudflare(&sanitized, &cloudflare)?;
-        persist_ai_provider_cloudflare_marker(&path, &sanitized)?;
-    } else {
-        persist_ai_provider_config(&path, &sanitized)?;
-    }
-    Ok(sanitized)
-}
-
-#[tauri::command]
-fn verify_ai_provider_credentials(config: AiProviderConfig) -> AiProviderProbeResult {
-    run_ai_provider_probe(&sanitize_ai_provider_config(config))
-}
-
-#[tauri::command]
-fn audit_links(request: LinkAuditRequest) -> LinkAuditResult {
-    run_link_audit(&request.text)
-}
-
-#[tauri::command]
-fn open_data_file(path: String) -> Result<String, String> {
-    let requested = PathBuf::from(path.trim());
-    let absolute = if requested.is_absolute() {
-        requested
-    } else {
-        data_dir().join(requested)
-    };
-    let checked = checked_data_child_path(&absolute)?;
-    if !checked.exists() {
-        return Err("arquivo nao encontrado na pasta de dados do Maestro".to_string());
-    }
-
-    #[cfg(windows)]
-    {
-        let mut command = hidden_command("explorer.exe");
-        command.arg(&checked);
-        command
-            .spawn()
-            .map_err(|error| format!("falha ao abrir arquivo: {error}"))?;
-    }
-
-    #[cfg(not(windows))]
-    {
-        let mut command = hidden_command("xdg-open");
-        command.arg(&checked);
-        command
-            .spawn()
-            .map_err(|error| format!("failed to open file: {error}"))?;
-    }
-
-    Ok(checked.to_string_lossy().to_string())
-}
 
 use crate::cloudflare_commands::{
     cloudflare_env_snapshot, dependency_preflight, verify_cloudflare_credentials,
 };
+use crate::tauri_commands::{
+    audit_links, diagnostics_snapshot, open_data_file, read_ai_provider_config,
+    read_bootstrap_config, run_cli_adapter_smoke, runtime_profile, verify_ai_provider_credentials,
+    write_ai_provider_config, write_bootstrap_config, write_log_event,
+};
 
-#[tauri::command]
-fn run_cli_adapter_smoke(
-    log_session: tauri::State<LogSession>,
-    request: CliAdapterSmokeRequest,
-) -> CliAdapterSmokeResult {
-    let _ = write_log_record(
-        &log_session,
-        LogEventInput {
-            level: "info".to_string(),
-            category: "session.cli_adapters.smoke_started".to_string(),
-            message: "CLI adapter smoke started".to_string(),
-            context: Some(json!({
-                "run_id": sanitize_short(&request.run_id, 120),
-                "prompt_chars": request.prompt_chars,
-                "protocol_name": sanitize_text(&request.protocol_name, 160),
-                "protocol_lines": request.protocol_lines,
-                "protocol_hash_prefix": sanitize_short(&request.protocol_hash, 16),
-                "agents": ["claude", "codex", "gemini", "deepseek"]
-            })),
-        },
-    );
-
-    let handles = cli_adapter_specs(&request)
-        .into_iter()
-        .map(|spec| thread::spawn(move || run_cli_adapter_probe(spec)))
-        .collect::<Vec<_>>();
-    let agents = handles
-        .into_iter()
-        .map(|handle| {
-            handle.join().unwrap_or_else(|_| CliAdapterProbeResult {
-                name: "Unknown".to_string(),
-                cli: "unknown".to_string(),
-                tone: "error".to_string(),
-                status: "thread do adaptador falhou".to_string(),
-                duration_ms: 0,
-                exit_code: None,
-                marker_found: false,
-            })
-        })
-        .collect::<Vec<_>>();
-    let all_ready = agents.iter().all(|agent| agent.tone == "ok");
-    let result = CliAdapterSmokeResult {
-        run_id: sanitize_short(&request.run_id, 120),
-        all_ready,
-        agents,
-    };
-
-    let _ = write_log_record(
-        &log_session,
-        LogEventInput {
-            level: if all_ready { "info" } else { "warn" }.to_string(),
-            category: "session.cli_adapters.smoke_completed".to_string(),
-            message: "CLI adapter smoke completed".to_string(),
-            context: Some(json!({
-                "run_id": result.run_id,
-                "all_ready": result.all_ready,
-                "agents": result.agents.iter().map(|agent| json!({
-                    "name": agent.name,
-                    "cli": agent.cli,
-                    "tone": agent.tone,
-                    "duration_ms": agent.duration_ms,
-                    "exit_code": agent.exit_code,
-                    "marker_found": agent.marker_found
-                })).collect::<Vec<_>>()
-            })),
-        },
-    );
-
-    result
-}
 
 #[tauri::command]
 async fn list_resumable_sessions(

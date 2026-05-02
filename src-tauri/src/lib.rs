@@ -18,7 +18,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self},
     path::{Path, PathBuf},
-    process::{self, Command, Output},
+    process::Output,
     thread,
     time::Duration,
 };
@@ -26,6 +26,7 @@ use tauri::Manager;
 
 mod ai_probes;
 mod api_payloads;
+mod app_init;
 mod app_paths;
 mod cli_adapter;
 mod cloudflare;
@@ -115,11 +116,11 @@ use crate::api_payloads::API_NATIVE_ATTACHMENT_MAX_FILE_BYTES;
 // `docs/code-split-plan.md`. See `app_paths.rs` for documentation.
 use crate::ai_probes::run_ai_provider_probe;
 use crate::app_paths::{
-    active_or_early_logs_dir, ai_provider_config_path, app_root, app_root_if_initialized,
-    bootstrap_config_path, checked_data_child_path, data_dir, human_log_path_for, logs_dir,
-    resolve_portable_app_root, safe_run_id_from_entry, sanitize_path_segment, sessions_dir,
-    try_set_app_root,
+    ai_provider_config_path, app_root, bootstrap_config_path, checked_data_child_path, data_dir,
+    human_log_path_for, logs_dir, safe_run_id_from_entry, sanitize_path_segment, sessions_dir,
 };
+#[cfg(test)]
+use crate::app_paths::active_or_early_logs_dir;
 use crate::cli_adapter::{cli_adapter_specs, run_cli_adapter_probe};
 use crate::cloudflare::{run_cloudflare_probe, token_source_label};
 #[cfg(test)]
@@ -1323,93 +1324,11 @@ fn list_resumable_sessions_blocking(
     Ok(sessions)
 }
 
-fn initialize_app_root(app: &tauri::App) -> Result<(), String> {
-    let _ = app;
-    let root = resolve_portable_app_root()?;
-    try_set_app_root(root);
-    Ok(())
-}
-
-fn install_process_panic_hook() {
-    std::panic::set_hook(Box::new(|panic_info| {
-        let payload = panic_info
-            .payload()
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| {
-                panic_info
-                    .payload()
-                    .downcast_ref::<String>()
-                    .map(String::as_str)
-            })
-            .unwrap_or("unknown panic payload");
-        let location = panic_info.location().map(|location| {
-            format!(
-                "{}:{}:{}",
-                location.file(),
-                location.line(),
-                location.column()
-            )
-        });
-        let _ = write_early_crash_record(payload, location.as_deref());
-    }));
-}
-
-fn write_early_crash_record(payload: &str, location: Option<&str>) -> Result<(), String> {
-    let dir = active_or_early_logs_dir();
-    fs::create_dir_all(&dir)
-        .map_err(|error| format!("failed to create early crash log dir: {error}"))?;
-    let timestamp = Utc::now().format("%Y-%m-%dT%H-%M-%SZ");
-    let path = dir.join(format!(
-        "maestro-crash-{timestamp}-pid{}.json",
-        process::id()
-    ));
-    let record = json!({
-        "schema_version": 1,
-        "timestamp": Utc::now().to_rfc3339(),
-        "level": "fatal",
-        "category": "native.panic",
-        "message": "native panic captured before normal diagnostic logger completed startup",
-        "panic": {
-            "payload": sanitize_text(payload, 1000),
-            "location": location.map(|value| sanitize_text(value, 500))
-        },
-        "app": {
-            "name": "Maestro Editorial AI",
-            "version": env!("CARGO_PKG_VERSION"),
-            "target": std::env::consts::OS,
-            "arch": std::env::consts::ARCH
-        },
-        "process": {
-            "pid": process::id(),
-            "cwd": std::env::current_dir().ok().map(|path| path.to_string_lossy().to_string()),
-            "current_exe": std::env::current_exe().ok().map(|path| path.to_string_lossy().to_string()),
-            "app_root": app_root_if_initialized().map(|path| path.to_string_lossy().to_string())
-        }
-    });
-    let bytes = serde_json::to_vec_pretty(&record)
-        .map_err(|error| format!("failed to serialize early crash log: {error}"))?;
-    fs::write(&path, bytes).map_err(|error| format!("failed to write early crash log: {error}"))
-}
-
-pub(crate) fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
-    // SAFE-FUNNEL: this is the single allowed Command::new call site for editorial spawns.
-    // See `clippy.toml` and the `#![warn(clippy::disallowed_methods)]` at the top of this file.
-    #[allow(clippy::disallowed_methods)]
-    let mut command = Command::new(program);
-    apply_hidden_window_policy(&mut command);
-    command
-}
-
-#[cfg(windows)]
-fn apply_hidden_window_policy(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-    command.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn apply_hidden_window_policy(_command: &mut Command) {}
+pub(crate) use crate::app_init::{
+    hidden_command, initialize_app_root, install_process_panic_hook,
+};
+#[cfg(test)]
+use crate::app_init::write_early_crash_record;
 
 
 

@@ -4,6 +4,37 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.48] - 2026-05-02
+
+Pure refactor batch continuing `docs/code-split-plan.md` migration step 2 ("logging and path safety" tail items deferred from v0.3.17). No behavior change.
+
+### Extracted to `src-tauri/src/app_init.rs` (~140 lines incl. doc header, 5 items)
+- `initialize_app_root(app: &tauri::App) -> Result<(), String>` — invoked from `pub fn run()` Tauri `setup` hook; resolves portable root via `app_paths::resolve_portable_app_root` and stores it in the `OnceLock` via `try_set_app_root`.
+- `install_process_panic_hook()` — installs `std::panic::set_hook` that forwards every native panic to `write_early_crash_record` so crash trail exists even if normal NDJSON logger has not finished startup.
+- `write_early_crash_record(payload, location)` — writes `data/logs/maestro-crash-<timestamp>-pid<pid>.json` with payload + location + app/process metadata. Cap-limited via `sanitize_text` (1000 char payload, 500 char location). Schema unchanged from v0.3.47 (`schema_version: 1`, `category: native.panic`, `level: fatal`).
+- `hidden_command(program)` — the SAFE-FUNNEL `Command::new` allowed by `clippy.toml` `disallowed-methods`. Always passes through `apply_hidden_window_policy`.
+- `apply_hidden_window_policy(command)` (module-private) — Windows-only `creation_flags(CREATE_NO_WINDOW = 0x08000000)`; no-op on non-Windows. So editorial peer spawns never flash a console window.
+
+### Re-export shim in lib.rs
+`pub(crate) use crate::app_init::{hidden_command, initialize_app_root, install_process_panic_hook};` preserves all unqualified call sites in `pub fn run()` and sibling modules. `write_early_crash_record` is re-imported `#[cfg(test)]`-gated for the existing `tests::writes_early_crash_record_before_normal_logger` invariant.
+
+### Cleanup in lib.rs
+- `app_paths` import block trimmed: `active_or_early_logs_dir`, `app_root_if_initialized`, `resolve_portable_app_root`, `try_set_app_root` removed (now consumed inside `app_init.rs`); `active_or_early_logs_dir` re-imported `#[cfg(test)]`-gated for the same crash-record test.
+- `std::process::{self, Command, Output}` → `std::process::Output` (process and Command now consumed only inside `app_init.rs`).
+
+### What stays in lib.rs
+- `pub fn run()` — Tauri 2 binary entry point with `#[cfg_attr(mobile, tauri::mobile_entry_point)]` attribute, which prefers to live in lib.rs.
+
+### Validation
+- `cargo test --locked --lib`: **88 passed** (zero regressions vs v0.3.47).
+- `cargo clippy --locked --no-deps --all-targets`: **7 lib + 8 test warnings**, same shape as v0.3.47 (no new warnings; remaining 7 are deferred architectural set: `too_many_arguments` × 7 + `items_after_test_module` × 1).
+- `npm run build`: clean.
+- Function-body byte-parity diff vs v0.3.47 (commit 4b56e0d): clean.
+- lib.rs: 4035 → ~3942 lines (−93 net). app_init.rs: 138 lines new.
+
+### Cross-review pré-Commit & Sync
+Cross-review-v2 quadrilateral pendente (HARD GATE 2026-04-26).
+
 ## [v0.3.47] - 2026-05-02
 
 Bundled hardening pass closing the remaining P1 set from Codex's audit (#2 DOCX/paste sanitization + CSP allowlist, #3 Cloudflare Secrets Store mode UI clarification) plus the trivial half of Gemini's clippy hygiene findings (5 of 7 fixes; the architectural ones — `too_many_arguments` × 7 and `items_after_test_module` — stay deferred for v0.4.0 with documented rationale).

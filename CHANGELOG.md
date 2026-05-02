@@ -4,6 +4,30 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.32] - 2026-05-02
+
+Behavior fix (operator-reported B20): on resume, time and cost caps must NOT be carried forward from the previous session.
+
+### Fixed (B20)
+Operator report (2026-05-02): "Encontrei um comportamento indesejado do maestro-app. Quando a sessão é retomada, ele traz de volta o tempo e o custo configurados na sessão anterior. Cada nova sessão, mesmo que seja sessão retomada, deve ser livre para que o usuário defina novos valores ou não. Tempo e custo de sessão não devem ser carregados de sessões passadas."
+
+Root cause: the v0.3.18 B17 fix (cold-open peer pre-population from saved contract) bundled cost/minutes pre-population alongside peer pre-population in `startResumeSession`. Operator's intent was peer continuity only; cost/minutes carry-over was an unintended side-effect.
+
+Fix in `src/App.tsx::startResumeSession`:
+- Removed `setMaxSessionMinutes(...)` and `setMaxSessionCostUsd(...)` calls that read from `session.saved_max_session_minutes` / `session.saved_max_session_cost_usd`.
+- Removed cap injection from saved contract into `resumeRunOptions`.
+- Now reads cost/minutes from `currentSessionRunOptions()` (the operator's current UI input), so resume respects whatever the operator has typed (empty = unlimited).
+- Updated `session.resume.contract_applied` NDJSON payload to log `requested_max_session_cost_usd` / `requested_max_session_minutes` (current-UI values) instead of `saved_max_session_cost_usd` / `saved_max_session_minutes`.
+
+### Stayed
+- Peer continuity (active_agents, initial_agent) still pre-populated from saved contract — that was the intended B17 behavior and is preserved.
+- The Rust-side `ResumableSessionInfo` struct still exposes `saved_max_session_cost_usd` and `saved_max_session_minutes` for inspection (no breaking change to the Tauri command shape).
+
+### Validation
+- `npm run typecheck`: clean.
+- `npm run build`: clean (1.17s, 2434 modules).
+- `cargo test`: 74 passed (no Rust-side change in this batch).
+
 ## [v0.3.31] - 2026-05-02
 
 Pure refactor — no behavior change. Continues migration step 5 by extracting public-URL extraction + audit (HEAD/GET probe + private-network IP blocklist) into a dedicated module.

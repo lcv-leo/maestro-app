@@ -1619,13 +1619,18 @@ export function App() {
     setSessionName(session.session_name);
     const protocolOverride = resumeProtocolOptions(useLoadedProtocol);
 
-    // B17 fix (v0.3.18): pre-populate React state from the saved session
-    // contract before building resumeRunOptions, so that clicking "Retomar"
-    // continues with the same peers and caps that were active when the
-    // session paused — not the cold-open default of all 4 peers.
-    // currentSessionRunOptions() reads React state synchronously, so we
-    // must update the state and snapshot the contract values into a local
-    // `runOptionsOverride` instead of relying on a re-render.
+    // B17 fix (v0.3.18): pre-populate React state for ACTIVE_AGENTS and
+    // INITIAL_AGENT from the saved session contract before building
+    // resumeRunOptions, so that clicking "Retomar" continues with the same
+    // peers that were active when the session paused — not the cold-open
+    // default of all 4.
+    //
+    // B20 fix (v0.3.32, operator-reported): time and cost caps are NOT
+    // carried forward from the saved session. Each new session — including
+    // a resume — must let the operator define new caps OR leave them
+    // unlimited. The picker's saved_max_session_* fields stay in
+    // ResumableSessionInfo for backward compat / inspection but are NOT
+    // applied to React state and NOT injected into resumeRunOptions.
     const validSavedAgents = session.saved_active_agents.filter((agent) =>
       initialAgentOptions.some((option) => option.key === agent),
     ) as InitialAgentKey[];
@@ -1637,27 +1642,28 @@ export function App() {
         ? candidateInitial
         : (validSavedAgents[0] as InitialAgentKey);
       setInitialAgent(resolvedInitial);
-      const savedMinutes = session.saved_max_session_minutes;
-      const savedCost = session.saved_max_session_cost_usd;
-      setMaxSessionMinutes(savedMinutes != null && savedMinutes > 0 ? String(savedMinutes) : '');
-      setMaxSessionCostUsd(savedCost != null && savedCost > 0 ? String(savedCost) : '');
+      // B20: read whatever cost/minutes the operator currently has in the UI
+      // (may be empty = unlimited). Do NOT pre-populate from saved session.
+      const currentRunOptions = currentSessionRunOptions();
       resumeRunOptions = {
         activeAgents: validSavedAgents,
-        maxSessionCostUsd: savedCost != null && savedCost > 0 ? savedCost : null,
-        maxSessionMinutes: savedMinutes != null && savedMinutes > 0 ? savedMinutes : null,
+        maxSessionCostUsd: currentRunOptions.maxSessionCostUsd,
+        maxSessionMinutes: currentRunOptions.maxSessionMinutes,
         attachments: promptAttachments,
         links: parseSessionLinks(),
       };
       void logEvent({
         level: 'info',
         category: 'session.resume.contract_applied',
-        message: 'resume populated React state from saved session contract',
+        message: 'resume populated React state from saved session contract (peers only; B20: caps come from current UI)',
         context: {
           run_id: session.run_id,
           saved_active_agents: validSavedAgents,
           saved_initial_agent: resolvedInitial,
-          saved_max_session_cost_usd: savedCost,
-          saved_max_session_minutes: savedMinutes,
+          // B20: caps explicitly read from current UI state, not from saved
+          // contract. The saved_max_session_* fields are inspection-only.
+          requested_max_session_cost_usd: currentRunOptions.maxSessionCostUsd,
+          requested_max_session_minutes: currentRunOptions.maxSessionMinutes,
         },
       });
     } else {

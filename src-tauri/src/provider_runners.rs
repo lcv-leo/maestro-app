@@ -39,9 +39,12 @@ use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
+use tokio_util::sync::CancellationToken;
 
 use crate::logging::{write_log_record, LogEventInput, LogSession};
-use crate::provider_retry::{build_api_client, send_with_retry};
+use crate::provider_retry::{
+    build_api_client, build_api_client_async, send_with_retry_async, ProviderRequestOutcome,
+};
 use crate::session_controls::{
     api_role_max_tokens, estimate_provider_cost_from_input_chars, provider_cost, usage_tokens,
     ProviderCostGuard,
@@ -341,7 +344,10 @@ pub(crate) fn log_provider_api_started(
     );
 }
 
-pub(crate) fn run_openai_api_agent(request: EditorialAgentRequest) -> EditorialAgentResult {
+pub(crate) async fn run_openai_api_agent(
+    request: EditorialAgentRequest<'_>,
+    cancel_token: &CancellationToken,
+) -> EditorialAgentResult {
     let EditorialAgentRequest {
         log_session,
         run_id,
@@ -387,7 +393,10 @@ pub(crate) fn run_openai_api_agent(request: EditorialAgentRequest) -> EditorialA
         return result;
     }
 
-    let client = match build_api_client(timeout) {
+    // Two clients: blocking for the short `/models` resolve probe, async for
+    // the main editorial request whose in-flight HTTP future must yield to
+    // the cancellation token via `tokio::select!`.
+    let blocking_client = match build_api_client(timeout) {
         Ok(client) => client,
         Err(error) => {
             let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
@@ -399,7 +408,19 @@ pub(crate) fn run_openai_api_agent(request: EditorialAgentRequest) -> EditorialA
             );
         }
     };
-    let model = resolve_openai_model(&client, &api_key);
+    let async_client = match build_api_client_async(timeout) {
+        Ok(client) => client,
+        Err(error) => {
+            let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
+            return write_provider_error_result(
+                &invocation,
+                model_hint,
+                &status,
+                started.elapsed().as_millis(),
+            );
+        }
+    };
+    let model = resolve_openai_model(&blocking_client, &api_key);
     let input = match openai_api_input(&prompt, attachments) {
         Ok(input) => input,
         Err(error) => {
@@ -433,82 +454,116 @@ pub(crate) fn run_openai_api_agent(request: EditorialAgentRequest) -> EditorialA
         "max_output_tokens": max_tokens,
         "store": false
     });
-    let response = send_with_retry(log_session, run_id, "openai", || {
-        client
-            .post("https://api.openai.com/v1/responses")
-            .bearer_auth(&api_key)
-            .json(&body)
-            .send()
-    });
-    match response {
-        Ok(response) => {
-            let endpoint = "https://api.openai.com/v1/responses";
-            let http_status = response.status();
-            let body = response.text().unwrap_or_default();
-            if !http_status.is_success() {
-                let status = sanitize_text(
-                    &format!(
-                        "PROVIDER_ERROR_HTTP_{}: {}",
-                        http_status.as_u16(),
-                        api_error_message(&body)
-                    ),
-                    240,
-                );
-                return write_provider_error_result(
-                    &invocation,
-                    &model,
-                    &status,
-                    started.elapsed().as_millis(),
-                );
-            }
-
-            let parsed: Value = serde_json::from_str(&body).unwrap_or_else(|_| json!({}));
-            let stdout = openai_response_text(&parsed)
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| body.trim().to_string());
-            let (usage_input_tokens, usage_output_tokens) = usage_tokens(&parsed);
-            let cost_usd = cost_guard.as_ref().and_then(|guard| {
-                usage_input_tokens
-                    .zip(usage_output_tokens)
-                    .map(|(input, output)| provider_cost(input, output, guard.rates))
-            });
-            let model_reported = parsed
-                .get("model")
-                .and_then(Value::as_str)
-                .unwrap_or(&model);
-            write_provider_success_result(
-                log_session,
-                run_id,
-                name,
-                cli,
-                provider,
-                role,
-                output_path,
+    let endpoint = "https://api.openai.com/v1/responses";
+    let request_builder = async_client
+        .post(endpoint)
+        .bearer_auth(&api_key)
+        .json(&body);
+    let response = match send_with_retry_async(
+        log_session,
+        run_id,
+        "openai",
+        cancel_token,
+        request_builder,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(ProviderRequestOutcome::Cancelled) => {
+            return write_provider_failure_result(
+                &invocation,
                 &model,
-                model_reported,
-                &key_source,
-                &stdout,
-                usage_input_tokens,
-                usage_output_tokens,
-                cost_usd,
+                "STOPPED_BY_USER",
+                "blocked",
+                "Sessao parada pelo operador antes da resposta do provedor.",
                 started.elapsed().as_millis(),
-                prompt.chars().count(),
-                endpoint,
-            )
+                None,
+            );
         }
-        Err(error) => {
+        Err(ProviderRequestOutcome::Network(error)) => {
             let status = sanitize_text(&format!("PROVIDER_NETWORK_ERROR: {error}"), 240);
-            write_provider_error_result(
+            return write_provider_error_result(
                 &invocation,
                 &model,
                 &status,
                 started.elapsed().as_millis(),
-            )
+            );
         }
+    };
+
+    let http_status = response.status();
+    let body_text = tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => {
+            return write_provider_failure_result(
+                &invocation,
+                &model,
+                "STOPPED_BY_USER",
+                "blocked",
+                "Sessao parada pelo operador durante leitura da resposta do provedor.",
+                started.elapsed().as_millis(),
+                None,
+            );
+        }
+        r = response.text() => r.unwrap_or_default(),
+    };
+
+    if !http_status.is_success() {
+        let status = sanitize_text(
+            &format!(
+                "PROVIDER_ERROR_HTTP_{}: {}",
+                http_status.as_u16(),
+                api_error_message(&body_text)
+            ),
+            240,
+        );
+        return write_provider_error_result(
+            &invocation,
+            &model,
+            &status,
+            started.elapsed().as_millis(),
+        );
     }
+
+    let parsed: Value = serde_json::from_str(&body_text).unwrap_or_else(|_| json!({}));
+    let stdout = openai_response_text(&parsed)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| body_text.trim().to_string());
+    let (usage_input_tokens, usage_output_tokens) = usage_tokens(&parsed);
+    let cost_usd = cost_guard.as_ref().and_then(|guard| {
+        usage_input_tokens
+            .zip(usage_output_tokens)
+            .map(|(input, output)| provider_cost(input, output, guard.rates))
+    });
+    let model_reported = parsed
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(&model);
+    write_provider_success_result(
+        log_session,
+        run_id,
+        name,
+        cli,
+        provider,
+        role,
+        output_path,
+        &model,
+        model_reported,
+        &key_source,
+        &stdout,
+        usage_input_tokens,
+        usage_output_tokens,
+        cost_usd,
+        started.elapsed().as_millis(),
+        prompt.chars().count(),
+        endpoint,
+    )
 }
 
-pub(crate) fn run_anthropic_api_agent(request: EditorialAgentRequest) -> EditorialAgentResult {
+pub(crate) async fn run_anthropic_api_agent(
+    request: EditorialAgentRequest<'_>,
+    cancel_token: &CancellationToken,
+) -> EditorialAgentResult {
     let EditorialAgentRequest {
         log_session,
         run_id,
@@ -554,7 +609,7 @@ pub(crate) fn run_anthropic_api_agent(request: EditorialAgentRequest) -> Editori
         return result;
     }
 
-    let client = match build_api_client(timeout) {
+    let blocking_client = match build_api_client(timeout) {
         Ok(client) => client,
         Err(error) => {
             let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
@@ -566,7 +621,19 @@ pub(crate) fn run_anthropic_api_agent(request: EditorialAgentRequest) -> Editori
             );
         }
     };
-    let model = resolve_anthropic_model(&client, &api_key);
+    let async_client = match build_api_client_async(timeout) {
+        Ok(client) => client,
+        Err(error) => {
+            let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
+            return write_provider_error_result(
+                &invocation,
+                model_hint,
+                &status,
+                started.elapsed().as_millis(),
+            );
+        }
+    };
+    let model = resolve_anthropic_model(&blocking_client, &api_key);
     let content = match anthropic_api_user_content(&prompt, attachments) {
         Ok(content) => content,
         Err(error) => {
@@ -601,83 +668,117 @@ pub(crate) fn run_anthropic_api_agent(request: EditorialAgentRequest) -> Editori
             { "role": "user", "content": content }
         ]
     });
-    let response = send_with_retry(log_session, run_id, "anthropic", || {
-        client
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", &api_key)
-            .header("anthropic-version", "2023-06-01")
-            .json(&body)
-            .send()
-    });
-    match response {
-        Ok(response) => {
-            let endpoint = "https://api.anthropic.com/v1/messages";
-            let http_status = response.status();
-            let body = response.text().unwrap_or_default();
-            if !http_status.is_success() {
-                let status = sanitize_text(
-                    &format!(
-                        "PROVIDER_ERROR_HTTP_{}: {}",
-                        http_status.as_u16(),
-                        api_error_message(&body)
-                    ),
-                    240,
-                );
-                return write_provider_error_result(
-                    &invocation,
-                    &model,
-                    &status,
-                    started.elapsed().as_millis(),
-                );
-            }
-
-            let parsed: Value = serde_json::from_str(&body).unwrap_or_else(|_| json!({}));
-            let stdout = anthropic_response_text(&parsed)
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| body.trim().to_string());
-            let (usage_input_tokens, usage_output_tokens) = usage_tokens(&parsed);
-            let cost_usd = cost_guard.as_ref().and_then(|guard| {
-                usage_input_tokens
-                    .zip(usage_output_tokens)
-                    .map(|(input, output)| provider_cost(input, output, guard.rates))
-            });
-            let model_reported = parsed
-                .get("model")
-                .and_then(Value::as_str)
-                .unwrap_or(&model);
-            write_provider_success_result(
-                log_session,
-                run_id,
-                name,
-                cli,
-                provider,
-                role,
-                output_path,
+    let endpoint = "https://api.anthropic.com/v1/messages";
+    let request_builder = async_client
+        .post(endpoint)
+        .header("x-api-key", &api_key)
+        .header("anthropic-version", "2023-06-01")
+        .json(&body);
+    let response = match send_with_retry_async(
+        log_session,
+        run_id,
+        "anthropic",
+        cancel_token,
+        request_builder,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(ProviderRequestOutcome::Cancelled) => {
+            return write_provider_failure_result(
+                &invocation,
                 &model,
-                model_reported,
-                &key_source,
-                &stdout,
-                usage_input_tokens,
-                usage_output_tokens,
-                cost_usd,
+                "STOPPED_BY_USER",
+                "blocked",
+                "Sessao parada pelo operador antes da resposta do provedor.",
                 started.elapsed().as_millis(),
-                prompt.chars().count(),
-                endpoint,
-            )
+                None,
+            );
         }
-        Err(error) => {
+        Err(ProviderRequestOutcome::Network(error)) => {
             let status = sanitize_text(&format!("PROVIDER_NETWORK_ERROR: {error}"), 240);
-            write_provider_error_result(
+            return write_provider_error_result(
                 &invocation,
                 &model,
                 &status,
                 started.elapsed().as_millis(),
-            )
+            );
         }
+    };
+
+    let http_status = response.status();
+    let body_text = tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => {
+            return write_provider_failure_result(
+                &invocation,
+                &model,
+                "STOPPED_BY_USER",
+                "blocked",
+                "Sessao parada pelo operador durante leitura da resposta do provedor.",
+                started.elapsed().as_millis(),
+                None,
+            );
+        }
+        r = response.text() => r.unwrap_or_default(),
+    };
+
+    if !http_status.is_success() {
+        let status = sanitize_text(
+            &format!(
+                "PROVIDER_ERROR_HTTP_{}: {}",
+                http_status.as_u16(),
+                api_error_message(&body_text)
+            ),
+            240,
+        );
+        return write_provider_error_result(
+            &invocation,
+            &model,
+            &status,
+            started.elapsed().as_millis(),
+        );
     }
+
+    let parsed: Value = serde_json::from_str(&body_text).unwrap_or_else(|_| json!({}));
+    let stdout = anthropic_response_text(&parsed)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| body_text.trim().to_string());
+    let (usage_input_tokens, usage_output_tokens) = usage_tokens(&parsed);
+    let cost_usd = cost_guard.as_ref().and_then(|guard| {
+        usage_input_tokens
+            .zip(usage_output_tokens)
+            .map(|(input, output)| provider_cost(input, output, guard.rates))
+    });
+    let model_reported = parsed
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(&model);
+    write_provider_success_result(
+        log_session,
+        run_id,
+        name,
+        cli,
+        provider,
+        role,
+        output_path,
+        &model,
+        model_reported,
+        &key_source,
+        &stdout,
+        usage_input_tokens,
+        usage_output_tokens,
+        cost_usd,
+        started.elapsed().as_millis(),
+        prompt.chars().count(),
+        endpoint,
+    )
 }
 
-pub(crate) fn run_gemini_api_agent(request: EditorialAgentRequest) -> EditorialAgentResult {
+pub(crate) async fn run_gemini_api_agent(
+    request: EditorialAgentRequest<'_>,
+    cancel_token: &CancellationToken,
+) -> EditorialAgentResult {
     let EditorialAgentRequest {
         log_session,
         run_id,
@@ -723,7 +824,7 @@ pub(crate) fn run_gemini_api_agent(request: EditorialAgentRequest) -> EditorialA
         return result;
     }
 
-    let client = match build_api_client(timeout) {
+    let blocking_client = match build_api_client(timeout) {
         Ok(client) => client,
         Err(error) => {
             let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
@@ -735,7 +836,19 @@ pub(crate) fn run_gemini_api_agent(request: EditorialAgentRequest) -> EditorialA
             );
         }
     };
-    let model = resolve_gemini_model(&client, &api_key);
+    let async_client = match build_api_client_async(timeout) {
+        Ok(client) => client,
+        Err(error) => {
+            let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
+            return write_provider_error_result(
+                &invocation,
+                model_hint,
+                &status,
+                started.elapsed().as_millis(),
+            );
+        }
+    };
+    let model = resolve_gemini_model(&blocking_client, &api_key);
     let parts = match gemini_api_user_parts(&prompt, attachments) {
         Ok(parts) => parts,
         Err(error) => {
@@ -778,78 +891,109 @@ pub(crate) fn run_gemini_api_agent(request: EditorialAgentRequest) -> EditorialA
             "maxOutputTokens": max_tokens
         }
     });
-    let response = send_with_retry(log_session, run_id, "gemini", || {
-        client
-            .post(&endpoint)
-            .query(&[("key", &api_key)])
-            .json(&body)
-            .send()
-    });
-    match response {
-        Ok(response) => {
-            let http_status = response.status();
-            let body = response.text().unwrap_or_default();
-            if !http_status.is_success() {
-                let status = sanitize_text(
-                    &format!(
-                        "PROVIDER_ERROR_HTTP_{}: {}",
-                        http_status.as_u16(),
-                        api_error_message(&body)
-                    ),
-                    240,
-                );
-                return write_provider_error_result(
-                    &invocation,
-                    &model,
-                    &status,
-                    started.elapsed().as_millis(),
-                );
-            }
-
-            let parsed: Value = serde_json::from_str(&body).unwrap_or_else(|_| json!({}));
-            let stdout = gemini_response_text(&parsed)
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| body.trim().to_string());
-            let (usage_input_tokens, usage_output_tokens) = gemini_usage_tokens(&parsed);
-            let cost_usd = cost_guard.as_ref().and_then(|guard| {
-                usage_input_tokens
-                    .zip(usage_output_tokens)
-                    .map(|(input, output)| provider_cost(input, output, guard.rates))
-            });
-            let model_reported = parsed
-                .pointer("/modelVersion")
-                .and_then(Value::as_str)
-                .unwrap_or(&model);
-            write_provider_success_result(
-                log_session,
-                run_id,
-                name,
-                cli,
-                provider,
-                role,
-                output_path,
+    let request_builder = async_client
+        .post(&endpoint)
+        .query(&[("key", &api_key)])
+        .json(&body);
+    let response = match send_with_retry_async(
+        log_session,
+        run_id,
+        "gemini",
+        cancel_token,
+        request_builder,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(ProviderRequestOutcome::Cancelled) => {
+            return write_provider_failure_result(
+                &invocation,
                 &model,
-                model_reported,
-                &key_source,
-                &stdout,
-                usage_input_tokens,
-                usage_output_tokens,
-                cost_usd,
+                "STOPPED_BY_USER",
+                "blocked",
+                "Sessao parada pelo operador antes da resposta do provedor.",
                 started.elapsed().as_millis(),
-                prompt.chars().count(),
-                &endpoint,
-            )
+                None,
+            );
         }
-        Err(error) => {
+        Err(ProviderRequestOutcome::Network(error)) => {
             let status = sanitize_text(&format!("PROVIDER_NETWORK_ERROR: {error}"), 240);
-            write_provider_error_result(
+            return write_provider_error_result(
                 &invocation,
                 &model,
                 &status,
                 started.elapsed().as_millis(),
-            )
+            );
         }
+    };
+
+    let http_status = response.status();
+    let body_text = tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => {
+            return write_provider_failure_result(
+                &invocation,
+                &model,
+                "STOPPED_BY_USER",
+                "blocked",
+                "Sessao parada pelo operador durante leitura da resposta do provedor.",
+                started.elapsed().as_millis(),
+                None,
+            );
+        }
+        r = response.text() => r.unwrap_or_default(),
+    };
+
+    if !http_status.is_success() {
+        let status = sanitize_text(
+            &format!(
+                "PROVIDER_ERROR_HTTP_{}: {}",
+                http_status.as_u16(),
+                api_error_message(&body_text)
+            ),
+            240,
+        );
+        return write_provider_error_result(
+            &invocation,
+            &model,
+            &status,
+            started.elapsed().as_millis(),
+        );
     }
+
+    let parsed: Value = serde_json::from_str(&body_text).unwrap_or_else(|_| json!({}));
+    let stdout = gemini_response_text(&parsed)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| body_text.trim().to_string());
+    let (usage_input_tokens, usage_output_tokens) = gemini_usage_tokens(&parsed);
+    let cost_usd = cost_guard.as_ref().and_then(|guard| {
+        usage_input_tokens
+            .zip(usage_output_tokens)
+            .map(|(input, output)| provider_cost(input, output, guard.rates))
+    });
+    let model_reported = parsed
+        .pointer("/modelVersion")
+        .and_then(Value::as_str)
+        .unwrap_or(&model);
+    write_provider_success_result(
+        log_session,
+        run_id,
+        name,
+        cli,
+        provider,
+        role,
+        output_path,
+        &model,
+        model_reported,
+        &key_source,
+        &stdout,
+        usage_input_tokens,
+        usage_output_tokens,
+        cost_usd,
+        started.elapsed().as_millis(),
+        prompt.chars().count(),
+        &endpoint,
+    )
 }
 
 pub(crate) fn resolve_openai_model(client: &Client, api_key: &str) -> String {

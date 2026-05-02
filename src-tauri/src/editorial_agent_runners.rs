@@ -67,6 +67,7 @@ use crate::provider_runners::{
     run_anthropic_api_agent, run_gemini_api_agent, run_openai_api_agent, write_provider_error_result,
     EditorialAgentRequest, ProviderInvocation,
 };
+use tokio_util::sync::CancellationToken;
 use crate::session_controls::ProviderCostGuard;
 use crate::session_evidence::AttachmentManifestEntry;
 use crate::{
@@ -88,6 +89,7 @@ pub(crate) fn run_editorial_agent_for_spec(
     config: &AiProviderConfig,
     cost_guard: Option<ProviderCostGuard>,
     use_api_agent: bool,
+    cancel_token: &CancellationToken,
 ) -> EditorialAgentResult {
     if use_api_agent {
         return run_provider_api_agent(
@@ -101,6 +103,7 @@ pub(crate) fn run_editorial_agent_for_spec(
             timeout,
             config,
             cost_guard,
+            cancel_token,
         );
     }
 
@@ -114,6 +117,7 @@ pub(crate) fn run_editorial_agent_for_spec(
         stdin_text,
         output_path,
         timeout,
+        cancel_token,
     )
 }
 
@@ -129,6 +133,7 @@ fn run_provider_api_agent(
     timeout: Option<Duration>,
     config: &AiProviderConfig,
     cost_guard: Option<ProviderCostGuard>,
+    cancel_token: &CancellationToken,
 ) -> EditorialAgentResult {
     let request = EditorialAgentRequest {
         log_session,
@@ -142,10 +147,10 @@ fn run_provider_api_agent(
         cost_guard,
     };
     match spec.key {
-        "claude" => run_anthropic_api_agent(request),
-        "codex" => run_openai_api_agent(request),
-        "gemini" => run_gemini_api_agent(request),
-        "deepseek" => run_deepseek_api_agent(request),
+        "claude" => tauri::async_runtime::block_on(run_anthropic_api_agent(request, cancel_token)),
+        "codex" => tauri::async_runtime::block_on(run_openai_api_agent(request, cancel_token)),
+        "gemini" => tauri::async_runtime::block_on(run_gemini_api_agent(request, cancel_token)),
+        "deepseek" => tauri::async_runtime::block_on(run_deepseek_api_agent(request, cancel_token)),
         _ => {
             let invocation = ProviderInvocation {
                 log_session: request.log_session,
@@ -162,6 +167,7 @@ fn run_provider_api_agent(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn run_editorial_agent(
     log_session: &LogSession,
     run_id: &str,
@@ -172,6 +178,7 @@ fn run_editorial_agent(
     stdin_text: String,
     output_path: &Path,
     timeout: Option<Duration>,
+    cancel_token: &CancellationToken,
 ) -> EditorialAgentResult {
     let started = Instant::now();
     let working_dir = command_working_dir_for_output(output_path);
@@ -254,6 +261,7 @@ fn run_editorial_agent(
         timeout,
         effective_input.stdin_text.as_deref(),
         Some(progress),
+        Some(cancel_token),
     );
 
     match command_result {

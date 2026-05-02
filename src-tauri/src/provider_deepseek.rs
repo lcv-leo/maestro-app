@@ -21,9 +21,12 @@ use std::time::Instant;
 
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
+use tokio_util::sync::CancellationToken;
 
 use crate::logging::{write_log_record, LogEventInput, LogSession};
-use crate::provider_retry::send_with_retry;
+use crate::provider_retry::{
+    build_api_client_async, send_with_retry_async, ProviderRequestOutcome,
+};
 use crate::provider_runners::EditorialAgentRequest;
 use crate::session_controls::{
     api_role_max_tokens, estimate_provider_cost, provider_cost, usage_tokens,
@@ -34,7 +37,10 @@ use crate::{
     EditorialAgentResult,
 };
 
-pub(crate) fn run_deepseek_api_agent(request: EditorialAgentRequest) -> EditorialAgentResult {
+pub(crate) async fn run_deepseek_api_agent(
+    request: EditorialAgentRequest<'_>,
+    cancel_token: &CancellationToken,
+) -> EditorialAgentResult {
     let EditorialAgentRequest {
         log_session,
         run_id,
@@ -146,14 +152,31 @@ pub(crate) fn run_deepseek_api_agent(request: EditorialAgentRequest) -> Editoria
         }
     }
 
-    let mut client_builder = Client::builder().user_agent(format!(
+    // Two clients: blocking for resolve_deepseek_model (short /models call),
+    // async for the main editorial request supporting tokio cancellation.
+    let mut blocking_builder = Client::builder().user_agent(format!(
         "Maestro Editorial AI/{}",
         env!("CARGO_PKG_VERSION")
     ));
     if let Some(timeout) = timeout {
-        client_builder = client_builder.timeout(timeout);
+        blocking_builder = blocking_builder.timeout(timeout);
     }
-    let client = match client_builder.build() {
+    let blocking_client = match blocking_builder.build() {
+        Ok(client) => client,
+        Err(error) => {
+            let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
+            return write_deepseek_error_result(
+                log_session,
+                run_id,
+                role,
+                output_path,
+                &model_hint,
+                &status,
+                started.elapsed().as_millis(),
+            );
+        }
+    };
+    let async_client = match build_api_client_async(timeout) {
         Ok(client) => client,
         Err(error) => {
             let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
@@ -169,7 +192,7 @@ pub(crate) fn run_deepseek_api_agent(request: EditorialAgentRequest) -> Editoria
         }
     };
 
-    let model = resolve_deepseek_model(&client, &api_key);
+    let model = resolve_deepseek_model(&blocking_client, &api_key);
     let _ = write_log_record(
         log_session,
         LogEventInput {
@@ -205,52 +228,97 @@ pub(crate) fn run_deepseek_api_agent(request: EditorialAgentRequest) -> Editoria
         "stream": false,
         "max_tokens": max_tokens
     });
-    let response = send_with_retry(log_session, run_id, "deepseek", || {
-        client
-            .post("https://api.deepseek.com/chat/completions")
-            .bearer_auth(&api_key)
-            .json(&body)
-            .send()
-    });
+    let request_builder = async_client
+        .post("https://api.deepseek.com/chat/completions")
+        .bearer_auth(&api_key)
+        .json(&body);
+    let response = match send_with_retry_async(
+        log_session,
+        run_id,
+        "deepseek",
+        cancel_token,
+        request_builder,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(ProviderRequestOutcome::Cancelled) => {
+            return write_deepseek_error_result(
+                log_session,
+                run_id,
+                role,
+                output_path,
+                &model,
+                "STOPPED_BY_USER",
+                started.elapsed().as_millis(),
+            );
+        }
+        Err(ProviderRequestOutcome::Network(error)) => {
+            let status = sanitize_text(&format!("PROVIDER_NETWORK_ERROR: {error}"), 240);
+            return write_deepseek_error_result(
+                log_session,
+                run_id,
+                role,
+                output_path,
+                &model,
+                &status,
+                started.elapsed().as_millis(),
+            );
+        }
+    };
 
-    match response {
-        Ok(response) => {
-            let http_status = response.status();
-            let body = response.text().unwrap_or_default();
-            if !http_status.is_success() {
-                let status = sanitize_text(
-                    &format!(
-                        "PROVIDER_ERROR_HTTP_{}: {}",
-                        http_status.as_u16(),
-                        api_error_message(&body)
-                    ),
-                    240,
-                );
-                return write_deepseek_error_result(
-                    log_session,
-                    run_id,
-                    role,
-                    output_path,
-                    &model,
-                    &status,
-                    started.elapsed().as_millis(),
-                );
-            }
+    let http_status = response.status();
+    let body_text = tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => {
+            return write_deepseek_error_result(
+                log_session,
+                run_id,
+                role,
+                output_path,
+                &model,
+                "STOPPED_BY_USER",
+                started.elapsed().as_millis(),
+            );
+        }
+        r = response.text() => r.unwrap_or_default(),
+    };
 
-            let parsed: Value = serde_json::from_str(&body).unwrap_or_else(|_| json!({}));
-            let (usage_input_tokens, usage_output_tokens) = usage_tokens(&parsed);
-            let cost_usd = cost_guard.as_ref().and_then(|guard| {
-                usage_input_tokens
-                    .zip(usage_output_tokens)
-                    .map(|(input, output)| provider_cost(input, output, guard.rates))
-            });
-            let stdout = parsed
-                .pointer("/choices/0/message/content")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(body.trim())
-                .to_string();
+    {
+        if !http_status.is_success() {
+            let status = sanitize_text(
+                &format!(
+                    "PROVIDER_ERROR_HTTP_{}: {}",
+                    http_status.as_u16(),
+                    api_error_message(&body_text)
+                ),
+                240,
+            );
+            return write_deepseek_error_result(
+                log_session,
+                run_id,
+                role,
+                output_path,
+                &model,
+                &status,
+                started.elapsed().as_millis(),
+            );
+        }
+
+        let parsed: Value = serde_json::from_str(&body_text).unwrap_or_else(|_| json!({}));
+        let (usage_input_tokens, usage_output_tokens) = usage_tokens(&parsed);
+        let cost_usd = cost_guard.as_ref().and_then(|guard| {
+            usage_input_tokens
+                .zip(usage_output_tokens)
+                .map(|(input, output)| provider_cost(input, output, guard.rates))
+        });
+        let stdout = parsed
+            .pointer("/choices/0/message/content")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(body_text.trim())
+            .to_string();
             let model_reported = parsed
                 .get("model")
                 .and_then(Value::as_str)
@@ -307,29 +375,16 @@ pub(crate) fn run_deepseek_api_agent(request: EditorialAgentRequest) -> Editoria
                 cost_usd,
                 cost_estimated: cost_usd.map(|_| true),
             };
-            log_editorial_agent_finished(
-                log_session,
-                run_id,
-                &result,
-                Some(stdout.chars().count()),
-                Some(0),
-                Some("https://api.deepseek.com/chat/completions".to_string()),
-                false,
-            );
-            result
-        }
-        Err(error) => {
-            let status = sanitize_text(&format!("PROVIDER_NETWORK_ERROR: {error}"), 240);
-            write_deepseek_error_result(
-                log_session,
-                run_id,
-                role,
-                output_path,
-                &model,
-                &status,
-                started.elapsed().as_millis(),
-            )
-        }
+        log_editorial_agent_finished(
+            log_session,
+            run_id,
+            &result,
+            Some(stdout.chars().count()),
+            Some(0),
+            Some("https://api.deepseek.com/chat/completions".to_string()),
+            false,
+        );
+        result
     }
 }
 

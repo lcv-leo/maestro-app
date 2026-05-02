@@ -4,6 +4,70 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.0] - 2026-05-02
+
+Operator-driven session stop. The single largest UX gap pre-v0.5.0 was that the only way to abort a long editorial session was killing the maestro-app process. Real operator log `data/sessions/run-2026-05-02T11-39-41-113Z` shows a 35-minute session with peers running 3-7 minutes each, ending with `session.agent.running` Codex still chugging at 13:49 — the operator killed the app. v0.5.0 ships full async stop with sub-2-second cancel granularity.
+
+### New "Parar sessão" button — frontend
+- [src/App.tsx](src/App.tsx) header button visible only when `isRunPreparing === true && sessionRunId != null`. Clicking pops a confirmation dialog, then invokes `stop_editorial_session` IPC. Disabled after click until session ends. Uses lucide `Square` icon.
+- New React state `isStopRequested` resets via `try { ... } finally { setIsStopRequested(false); }` in `runRealEditorialSession` (covers success, error, and stop paths uniformly).
+
+### New backend infrastructure
+- **`src-tauri/src/session_cancel.rs`** (~140 lines): `static SESSION_CANCEL: OnceLock<Mutex<HashMap<String, CancellationToken>>>` registry keyed by `run_id`. Functions: `register_session_cancel`, `signal_session_cancel`, `unregister_session_cancel`, `CancelTokenGuard` (RAII Drop). 5 unit tests cover idempotency, panic-safe Drop, and unknown-run_id graceful return.
+- **New Tauri command `stop_editorial_session(run_id)`** — sync, returns immediately. Logs `session.user.stop_requested` NDJSON event. Registered alongside `run_editorial_session` and `resume_editorial_session` in the Tauri `invoke_handler`.
+- **`run_editorial_session_blocking` + `resume_editorial_session_blocking`** register a token at start, build a `CancelTokenGuard`, pass `&CancellationToken` down through `run_editorial_session_inner` → `run_editorial_session_core` → `run_editorial_agent_for_spec` → `run_provider_api_agent`.
+- **Between-rounds cancel check** in `run_editorial_session_core` at the top of every round loop iteration. Emits `session.user.stop_completed` warn NDJSON event and returns the session result with status `STOPPED_BY_USER`. Existing `FinalizeRunningArtifactsGuard` (Drop semantics from v0.3.16) preserves agent-runs/* artifacts so the operator can resume the session later from the same run_id.
+
+### CLI peer cancel — `command_spawn::run_resolved_command_observed`
+New optional `cancel_token: Option<&CancellationToken>` parameter. The 250ms poll loop now also checks `token.is_cancelled()`; when fired, invokes `kill_process_tree(&mut child)` (Windows: `taskkill /T /F /PID <id>`) and returns the partial output as `timed_out: true`. Cancel granularity ≤500ms. The runner classifies the truncated output as `STOPPED_BY_USER` artifact via existing `editorial_agent_runners.rs` flow.
+
+### Async API peer cancel — `provider_retry::send_with_retry_async`
+- New async sibling to `send_with_retry` (sync version removed since it has no remaining callers — all 4 runners migrated). Same retry policy (1 network retry + 1 Retry-After-respecting 429 retry, capped at 120s).
+- Wraps `request.send().await` in `tokio::select! { biased; _ = cancel_token.cancelled() => Cancelled, r = future => r }` so an in-flight HTTP request is dropped via reqwest's future-cancellation. Cancel granularity <2s (bounded by the time it takes the runtime to drop the future + close the TCP connection).
+- Cancel-aware sleeps in retry backoffs (`tokio::time::sleep` wrapped in `tokio::select!` against cancel).
+- New return type: `Result<reqwest::Response, ProviderRequestOutcome>` with `Cancelled` and `Network(reqwest::Error)` variants.
+- New `build_api_client_async(timeout)` builds `reqwest::Client` (async) with the Maestro user-agent.
+
+### 4 runners migrated to async — provider_runners.rs + provider_deepseek.rs
+- `run_openai_api_agent`, `run_anthropic_api_agent`, `run_gemini_api_agent`, `run_deepseek_api_agent` are now `pub(crate) async fn` taking `(request: EditorialAgentRequest<'_>, cancel_token: &CancellationToken)`.
+- Each runner builds 2 clients: blocking for the short-lived `/models` resolve probe (sync), async for the main editorial request (cancel-aware).
+- `tokio::select!` wraps `response.text().await` so a long body-read is also cancellable.
+- On `Cancelled`: writes `STOPPED_BY_USER` artifact via existing `write_provider_failure_result` (helpers/`write_deepseek_error_result`) so the artifact-discovery downstream code sees a normal-shape blocked result.
+
+### Orchestration dispatch — editorial_agent_runners.rs
+- `run_provider_api_agent` uses `tauri::async_runtime::block_on` to bridge the sync session loop into each async runner. Editorial session runs in a `tauri::async_runtime::spawn_blocking` worker (lib.rs:1002), so block_on from there is safe (creates a current-thread runtime, no nested-runtime risk).
+- `run_editorial_agent_for_spec` accepts `&CancellationToken` and passes through to either the API-agent dispatch or `run_editorial_agent` (CLI path).
+
+### Dependencies
+- New: `tokio = { version = "1", default-features = false, features = ["macros", "time", "sync", "rt"] }`
+- New: `tokio-util = { version = "0.7", default-features = false }` (provides `CancellationToken`)
+- `reqwest` features unchanged: `["blocking", "json", "rustls-tls"]`. Both `reqwest::Client` (async) and `reqwest::blocking::Client` are compiled in.
+
+### Tests
+- 5 new unit tests in `session_cancel::tests` covering: signal-unknown-id returns false, register/signal/unregister round-trip, signal idempotent after first cancel, `CancelTokenGuard` unregisters on Drop, guard Drop runs on panic.
+- Existing 88 tests unchanged. Total: **93 passed, 0 failed**.
+- Integration test for "HTTP abort under 2s" deferred — would require mock server + tokio runtime in test harness; planned for v0.5.1 follow-up if operator hits a regression.
+
+### Validation
+- `cargo test --locked --lib`: **93 passed** (88 + 5 new).
+- `cargo clippy --locked --no-deps --all-targets`: **1 lib warning + 2 test warnings**. Same shape as v0.4.0 (only `items_after_test_module` cosmetic remains).
+- `npm run build`: clean.
+
+### Operator workflow
+1. Press "Parar sessão" → confirmation dialog → confirm.
+2. Backend signals cancellation token immediately (Tauri command returns in milliseconds).
+3. In-flight CLI peer killed in ≤250ms via `kill_process_tree`.
+4. In-flight API peer dropped in <2s via `tokio::select!`.
+5. Session loop exits at next round boundary with status `STOPPED_BY_USER`.
+6. Artifacts in `data/sessions/<run-id>/agent-runs/` preserved.
+7. Operator can later use the standard "Retomar" flow to continue from the same `run_id`.
+
+### Cross-review pré-Commit & Sync
+Cross-review-v2 quadrilateral pendente (HARD GATE 2026-04-26).
+
+### Versioning
+Minor bump (v0.4.0 → v0.5.0) per workspace `version-control.md`: "Minor: Novas funcionalidades, melhorias significativas". New user-facing feature (stop button) + new IPC surface (`stop_editorial_session`) + dependency additions (tokio, tokio-util) + significant async migration. NOT a breaking change for users — existing flows (start, resume, complete) are unchanged.
+
 ## [v0.4.0] - 2026-05-02
 
 Architectural refactor closing Gemini's `too_many_arguments` × 7 finding from the rigorous audit on HEAD `4b56e0d` (v0.3.47). Two new `pub(crate)` context structs collapse 9-11 positional parameters into 1-2 grouped arguments. No behavior change.

@@ -19,6 +19,7 @@ import {
   Search,
   Settings,
   ShieldCheck,
+  Square,
   Upload,
   Globe2,
 } from 'lucide-react';
@@ -861,6 +862,10 @@ export function App() {
   const [sessionRunId, setSessionRunId] = useState<string | null>(null);
   const [lastSessionMinutesPath, setLastSessionMinutesPath] = useState<string | null>(null);
   const [operation, setOperation] = useState<OperationSnapshot>(idleOperation);
+  // True after the operator confirms the "Parar sessao" button until the
+  // backend's session loop observes the cancellation token and returns
+  // STOPPED_BY_USER. Disables the button to prevent duplicate signals.
+  const [isStopRequested, setIsStopRequested] = useState(false);
   const [phaseItems, setPhaseItems] = useState<PhaseItem[]>(idlePhases);
   const [activityItems, setActivityItems] = useState<ActivityItem[]>(idleActivityFeed);
   const [discussionItems, setDiscussionItems] = useState<DiscussionRound[]>(initialDiscussionRounds);
@@ -2103,6 +2108,7 @@ export function App() {
       eta: `Inicio: ${startedAtLabel}`,
       status: 'running',
     });
+    setIsStopRequested(false);
     setPhaseItems([
       { label: 'Protocolo', detail: 'registrado', state: 'done' },
       { label: 'Verificacoes', detail: 'concluidas', state: 'done' },
@@ -2356,6 +2362,46 @@ export function App() {
         category: 'session.editorial.invoke_failed',
         message: 'native real editorial session invoke failed',
         context: { run_id: runId, error },
+      });
+    } finally {
+      // Reset stop-button state regardless of how the session ended (success,
+      // failure, or operator-stop). Backend STOPPED_BY_USER status arrives
+      // through the same try/await branch as success/error.
+      setIsStopRequested(false);
+    }
+  }
+
+  // Operator-driven stop: confirm + invoke `stop_editorial_session`. The
+  // backend signals the cancellation token; the in-flight CLI peer is killed
+  // by `kill_process_tree` (cancel granularity 250ms via the
+  // `run_resolved_command_observed` poll loop) and the in-flight API peer
+  // future is dropped via `tokio::select!` in `send_with_retry_async`
+  // (cancel <2s). The session loop exits with `STOPPED_BY_USER` status; the
+  // existing run-completion branch handles UI cleanup.
+  async function handleStopSession() {
+    if (!sessionRunId) return;
+    if (isStopRequested) return;
+    const confirmed = window.confirm(
+      'Parar a sessao atual? Drafts em andamento ficam preservados como artifacts mas sem convergencia.\n\nVoce pode retomar a sessao depois pelo botao "Continuar".',
+    );
+    if (!confirmed) return;
+    setIsStopRequested(true);
+    try {
+      await invoke<boolean>('stop_editorial_session', { runId: sessionRunId });
+      void logEvent({
+        level: 'info',
+        category: 'session.user.stop_requested',
+        message: 'operator clicked stop session',
+        context: { run_id: sessionRunId },
+      });
+    } catch (error) {
+      // Reset on failed invoke so operator can retry.
+      setIsStopRequested(false);
+      void logEvent({
+        level: 'error',
+        category: 'session.user.stop_failed',
+        message: 'stop_editorial_session invoke failed',
+        context: { run_id: sessionRunId, error: String(error) },
       });
     }
   }
@@ -2702,6 +2748,19 @@ export function App() {
               <Play size={18} />
               {isRunPreparing ? 'Preparando' : runActionLabel}
             </button>
+            {isRunPreparing && sessionRunId && (
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={handleStopSession}
+                disabled={isStopRequested}
+                aria-busy={isStopRequested}
+                title="Para a sessao em andamento (CLI peer cancela em ~250ms; API peer cancela em <2s)."
+              >
+                <Square size={18} />
+                {isStopRequested ? 'Parando…' : 'Parar sessao'}
+              </button>
+            )}
           </div>
         </header>
 

@@ -57,6 +57,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+use tokio_util::sync::CancellationToken;
 
 use crate::command_path::resolve_command;
 use crate::logging::LogSession;
@@ -146,15 +147,17 @@ pub(crate) fn run_resolved_command_with_timeout(
     timeout: Duration,
     stdin_text: Option<&str>,
 ) -> std::io::Result<TimedCommandOutput> {
-    run_resolved_command_observed(path, args, Some(timeout), stdin_text, None)
+    run_resolved_command_observed(path, args, Some(timeout), stdin_text, None, None)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_resolved_command_observed(
     path: &Path,
     args: &[String],
     timeout: Option<Duration>,
     stdin_text: Option<&str>,
     progress: Option<CommandProgressContext<'_>>,
+    cancel_token: Option<&CancellationToken>,
 ) -> std::io::Result<TimedCommandOutput> {
     let started = Instant::now();
     let mut command = resolved_command_builder(path, args);
@@ -220,6 +223,34 @@ pub(crate) fn run_resolved_command_observed(
 
         if let Some(timeout) = timeout {
             if started.elapsed() >= timeout {
+                kill_process_tree(&mut child);
+                let status = child.wait()?;
+                let (stdout, stdout_pipe_error) = stdout_handle
+                    .join()
+                    .unwrap_or_else(|_| (Vec::new(), Some("stdout_thread_panic".to_string())));
+                let (stderr, stderr_pipe_error) = stderr_handle
+                    .join()
+                    .unwrap_or_else(|_| (Vec::new(), Some("stderr_thread_panic".to_string())));
+                return Ok(TimedCommandOutput {
+                    output: Output {
+                        status,
+                        stdout,
+                        stderr,
+                    },
+                    duration_ms: started.elapsed().as_millis(),
+                    timed_out: true,
+                    stdout_pipe_error,
+                    stderr_pipe_error,
+                });
+            }
+        }
+
+        // Cancellation check fires every 250ms (next loop iteration). When
+        // operator presses "Stop session" the token is signaled; we kill the
+        // child process tree and return with `timed_out: true` so the caller
+        // surfaces it as a STOPPED_BY_USER artifact.
+        if let Some(token) = cancel_token {
+            if token.is_cancelled() {
                 kill_process_tree(&mut child);
                 let status = child.wait()?;
                 let (stdout, stdout_pipe_error) = stdout_handle

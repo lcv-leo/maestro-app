@@ -28,6 +28,7 @@ mod ai_probes;
 mod api_payloads;
 mod app_init;
 mod app_paths;
+mod session_cancel;
 mod cli_adapter;
 mod cloudflare;
 mod command_path;
@@ -1005,6 +1006,34 @@ async fn run_editorial_session(
     .map_err(|error| format!("editorial worker join failed: {error}"))?
 }
 
+/// Operator-driven session stop. Returns `true` when a matching active
+/// run_id was found and signaled, `false` when no matching run is active
+/// (already finished, never started, or unknown id). Idempotent: repeated
+/// calls on a still-running id keep returning `true`. Sync command —
+/// returns immediately even if the session loop is mid-API-call; the loop
+/// observes the cancellation token at its next checkpoint (between rounds
+/// or inside `tokio::select!` for in-flight HTTP requests).
+#[tauri::command]
+fn stop_editorial_session(
+    log_session: tauri::State<'_, LogSession>,
+    run_id: String,
+) -> Result<bool, String> {
+    let signaled = session_cancel::signal_session_cancel(&run_id);
+    let _ = write_log_record(
+        log_session.inner(),
+        LogEventInput {
+            level: "info".to_string(),
+            category: "session.user.stop_requested".to_string(),
+            message: "operator requested editorial session stop".to_string(),
+            context: Some(json!({
+                "run_id": sanitize_short(&run_id, 120),
+                "signaled": signaled
+            })),
+        },
+    );
+    Ok(signaled)
+}
+
 fn run_editorial_session_blocking(
     log_session: LogSession,
     request: EditorialSessionRequest,
@@ -1034,7 +1063,13 @@ fn run_editorial_session_blocking(
         },
     );
 
-    let result = match run_editorial_session_inner(&request, &log_session) {
+    // Register cancellation token before entering the orchestration loop. The
+    // RAII guard drops it when this function returns (success, error, panic),
+    // so the static map does not grow unbounded across many sessions.
+    let cancel_token = session_cancel::register_session_cancel(&request.run_id);
+    let _cancel_guard = session_cancel::CancelTokenGuard::new(request.run_id.clone());
+
+    let result = match run_editorial_session_inner(&request, &log_session, &cancel_token) {
         Ok(result) => result,
         Err(error) => {
             let _ = write_log_record(
@@ -1228,7 +1263,15 @@ fn resume_editorial_session_blocking(
         }),
     };
 
-    let result = match run_editorial_session_core(&request, &log_session, Some(resume_state)) {
+    let cancel_token = session_cancel::register_session_cancel(&request.run_id);
+    let _cancel_guard = session_cancel::CancelTokenGuard::new(request.run_id.clone());
+
+    let result = match run_editorial_session_core(
+        &request,
+        &log_session,
+        Some(resume_state),
+        &cancel_token,
+    ) {
         Ok(result) => result,
         Err(error) => {
             let _ = write_log_record(
@@ -1339,14 +1382,16 @@ use crate::app_init::write_early_crash_record;
 fn run_editorial_session_inner(
     request: &EditorialSessionRequest,
     log_session: &LogSession,
+    cancel_token: &tokio_util::sync::CancellationToken,
 ) -> Result<EditorialSessionResult, String> {
-    run_editorial_session_core(request, log_session, None)
+    run_editorial_session_core(request, log_session, None, cancel_token)
 }
 
 fn run_editorial_session_core(
     request: &EditorialSessionRequest,
     log_session: &LogSession,
     resume_state: Option<ResumeSessionState>,
+    cancel_token: &tokio_util::sync::CancellationToken,
 ) -> Result<EditorialSessionResult, String> {
     let run_id = sanitize_path_segment(&request.run_id, 120);
     if run_id.is_empty() {
@@ -1651,6 +1696,7 @@ fn run_editorial_session_core(
                 &ai_provider_config,
                 cost_guard,
                 use_api_agent,
+                cancel_token,
             );
             agents.push(draft_run.clone());
             append_agent_cost_to_ledger(&session_dir, &mut cost_ledger, &draft_run)?;
@@ -1747,6 +1793,53 @@ fn run_editorial_session_core(
 
     let final_path: PathBuf;
     loop {
+        // Operator-driven stop check at the top of every round. Granularity
+        // is "between rounds" for the orchestration; in-flight CLI peer is
+        // killed via `command_spawn::run_resolved_command_observed` 250ms
+        // poll; in-flight API peer is dropped via `tokio::select!` in
+        // `provider_retry::send_with_retry_async`.
+        if cancel_token.is_cancelled() {
+            let _ = write_log_record(
+                log_session,
+                LogEventInput {
+                    level: "warn".to_string(),
+                    category: "session.user.stop_completed".to_string(),
+                    message: "editorial session stopped by operator between rounds".to_string(),
+                    context: Some(json!({
+                        "run_id": run_id.clone(),
+                        "round": round,
+                        "agents_so_far": agents.len()
+                    })),
+                },
+            );
+            let minutes_path = session_dir.join("ata-da-sessao.md");
+            write_text_file(
+                &minutes_path,
+                &build_session_minutes(request, &run_id, &agents, false, None),
+            )?;
+            let context = SessionResultContext {
+                run_id: &run_id,
+                session_dir: &session_dir,
+                prompt_path: &prompt_path,
+                protocol_path: &protocol_path,
+                active_agents: &active_agent_keys,
+                max_session_cost_usd,
+                max_session_minutes,
+                observed_cost_usd: cost_ledger.total_observed_cost_usd,
+                links_path: evidence.links_path.as_ref(),
+                attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
+                human_log_path: &human_log_path,
+            };
+            return Ok(editorial_session_result(
+                &context,
+                None,
+                &minutes_path,
+                current_draft_path,
+                agents,
+                false,
+                "STOPPED_BY_USER",
+            ));
+        }
         if session_time_exhausted(time_budget_anchor, max_session_minutes) {
             let minutes_path = session_dir.join("ata-da-sessao.md");
             write_text_file(
@@ -1810,6 +1903,7 @@ fn run_editorial_session_core(
                     &ai_provider_config,
                     cost_guard,
                     use_api_agent,
+                    cancel_token,
                 );
                 let cost_limit_reached = result.status == "COST_LIMIT_REACHED";
                 round_results.push(result.clone());
@@ -1842,6 +1936,7 @@ fn run_editorial_session_core(
                     } else {
                         None
                     };
+                    let thread_cancel = cancel_token.clone();
                     thread::spawn(move || {
                         run_editorial_agent_for_spec(
                             &log_session,
@@ -1855,6 +1950,7 @@ fn run_editorial_session_core(
                             &ai_provider_config,
                             cost_guard,
                             use_api_agent,
+                            &thread_cancel,
                         )
                     })
                 })
@@ -2122,6 +2218,7 @@ fn run_editorial_session_core(
                 &ai_provider_config,
                 cost_guard,
                 use_api_agent,
+                cancel_token,
             );
             agents.push(revision_run.clone());
             append_agent_cost_to_ledger(&session_dir, &mut cost_ledger, &revision_run)?;
@@ -3947,7 +4044,8 @@ pub fn run() {
             run_cli_adapter_smoke,
             list_resumable_sessions,
             resume_editorial_session,
-            run_editorial_session
+            run_editorial_session,
+            stop_editorial_session
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Maestro Editorial AI");

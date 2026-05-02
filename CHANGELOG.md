@@ -4,6 +4,31 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.35] - 2026-05-02
+
+Pure refactor — no behavior change. Continues migration step 5 by extracting the child-process spawn machinery (timeout, progress logging, pipe readers, command builders, environment policy) into a dedicated module.
+
+### Changed (extracted to `src-tauri/src/command_spawn.rs`, ~349 lines with doc header, 8 items)
+- `pub(crate) fn command_check` — diagnostic helper called by `dependency_preflight`.
+- `pub(crate) struct CommandProgressContext<'a>` + 6 fields.
+- `pub(crate) fn run_resolved_command_with_timeout`, `run_resolved_command_observed` — spawn loop with 250ms poll, 30s progress emit, optional timeout.
+- `fn read_pipe_to_end_counting_classified` (private) — pipe reader with shared atomic byte counter.
+- `pub(crate) fn classify_pipe_error` — Windows-aware classifier (raw_os_error 109/232/233 + std `ErrorKind` variants).
+- `fn resolved_command_builder` (private) — Windows: `.cmd`/`.bat` → `cmd.exe /C`; `.ps1` → `powershell.exe -NoProfile -ExecutionPolicy Bypass -File`; else direct.
+- `pub(crate) fn apply_editorial_agent_environment` — UTF-8 env (`PYTHONIOENCODING`/`PYTHONUTF8`/`LC_ALL`/`LANG`) + `GEMINI_CLI_TRUST_WORKSPACE` for gemini stem (B1 from v0.3.15).
+
+### `pub(crate)` visibility upgrades in `lib.rs`
+- `pub(crate) struct TimedCommandOutput` + 5 fields (output / duration_ms / timed_out / stdout_pipe_error / stderr_pipe_error).
+- `pub(crate) fn hidden_command` — only entry that funnels through `apply_hidden_window_policy` per the v0.3.16 `clippy.toml` `disallowed-methods` policy.
+- `pub(crate) fn command_working_dir_for_output` — wrapper around the output_path's parent dir.
+- `pub(crate) fn log_editorial_agent_spawned`, `log_editorial_agent_running` — NDJSON helpers tightly coupled with the editorial orchestration log schema.
+
+### Validation
+- `cargo test`: 74 passed.
+- `npm run typecheck` + `npm run build`: clean.
+- `lib.rs`: 5581 → 5302 lines (−279 net; 282 sed-deleted, 5 mod/use/import lines added).
+- ZERO-line byte-parity diff vs v0.3.34 (commit e00538e).
+
 ## [v0.3.34] - 2026-05-02
 
 Pure refactor — no behavior change. Continues migration step 5 by extracting the foundational text-sanitization + secret-redaction helpers into a dedicated module.

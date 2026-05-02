@@ -17,13 +17,8 @@ use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self},
-    io::{Read, Write},
     path::{Path, PathBuf},
-    process::{self, Command, Output, Stdio},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    process::{self, Command, Output},
     thread,
     time::{Duration, Instant},
 };
@@ -33,6 +28,7 @@ mod ai_probes;
 mod app_paths;
 mod cloudflare;
 mod command_path;
+mod command_spawn;
 mod editorial_helpers;
 mod editorial_inputs;
 mod editorial_prompts;
@@ -76,6 +72,10 @@ use crate::cloudflare::{
     token_source_label, upsert_ai_provider_secrets, write_ai_provider_metadata_to_cloudflare,
 };
 use crate::command_path::{command_search_dirs, resolve_command};
+use crate::command_spawn::{
+    command_check, run_resolved_command_observed, run_resolved_command_with_timeout,
+    CommandProgressContext,
+};
 use crate::editorial_helpers::{
     filter_existing_agents_to_active_set, finalize_running_agent_artifacts,
     resolve_effective_active_agents, review_complaint_fingerprint, write_editorial_agent_error_artifact,
@@ -469,12 +469,12 @@ struct CliAdapterSpec {
     timeout: Duration,
 }
 
-struct TimedCommandOutput {
-    output: Output,
-    duration_ms: u128,
-    timed_out: bool,
-    stdout_pipe_error: Option<String>,
-    stderr_pipe_error: Option<String>,
+pub(crate) struct TimedCommandOutput {
+    pub(crate) output: Output,
+    pub(crate) duration_ms: u128,
+    pub(crate) timed_out: bool,
+    pub(crate) stdout_pipe_error: Option<String>,
+    pub(crate) stderr_pipe_error: Option<String>,
 }
 
 impl Default for BootstrapConfig {
@@ -1351,7 +1351,7 @@ fn write_early_crash_record(payload: &str, location: Option<&str>) -> Result<(),
     fs::write(&path, bytes).map_err(|error| format!("failed to write early crash log: {error}"))
 }
 
-fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+pub(crate) fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     // SAFE-FUNNEL: this is the single allowed Command::new call site for editorial spawns.
     // See `clippy.toml` and the `#![warn(clippy::disallowed_methods)]` at the top of this file.
     #[allow(clippy::disallowed_methods)]
@@ -3419,14 +3419,14 @@ pub(crate) fn log_editorial_agent_finished(
     );
 }
 
-fn command_working_dir_for_output(output_path: &Path) -> PathBuf {
+pub(crate) fn command_working_dir_for_output(output_path: &Path) -> PathBuf {
     output_path
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(app_root)
 }
 
-fn log_editorial_agent_spawned(
+pub(crate) fn log_editorial_agent_spawned(
     progress: &CommandProgressContext<'_>,
     child_id: u32,
     path: &Path,
@@ -3452,7 +3452,7 @@ fn log_editorial_agent_spawned(
     );
 }
 
-fn log_editorial_agent_running(
+pub(crate) fn log_editorial_agent_running(
     progress: &CommandProgressContext<'_>,
     child_id: u32,
     elapsed: Duration,
@@ -3776,288 +3776,6 @@ pub(crate) fn api_error_message(body: &str) -> String {
 
 
 
-fn command_check(label: &str, command: &str, args: &[&str]) -> Value {
-    let Some(path) = resolve_command(command) else {
-        return json!({
-            "label": label,
-            "value": "nao encontrado no PATH efetivo",
-            "tone": "blocked"
-        });
-    };
-    let args = args
-        .iter()
-        .map(|arg| (*arg).to_string())
-        .collect::<Vec<_>>();
-    let output = run_resolved_command_with_timeout(&path, &args, Duration::from_secs(12), None);
-
-    match output {
-        Ok(result) if result.timed_out => json!({
-            "label": label,
-            "value": sanitize_text("diagnostico excedeu 12s; CLI pode exigir login ou inicializacao lenta", 220),
-            "tone": "warn"
-        }),
-        Ok(result) if result.output.status.success() => {
-            let stdout = String::from_utf8_lossy(&result.output.stdout);
-            let stderr = String::from_utf8_lossy(&result.output.stderr);
-            let detail = stdout
-                .lines()
-                .chain(stderr.lines())
-                .find(|line| !line.trim().is_empty())
-                .unwrap_or("detectado")
-                .trim();
-            let resolved_note = format!(" via {}", path.to_string_lossy());
-            json!({
-                "label": label,
-                "value": sanitize_text(&format!("{detail}{resolved_note}"), 220),
-                "tone": "ok"
-            })
-        }
-        Ok(result) => {
-            let stderr = String::from_utf8_lossy(&result.output.stderr);
-            let stdout = String::from_utf8_lossy(&result.output.stdout);
-            let detail = stderr
-                .lines()
-                .chain(stdout.lines())
-                .find(|line| !line.trim().is_empty())
-                .unwrap_or("comando retornou falha")
-                .trim();
-            json!({
-                "label": label,
-                "value": sanitize_text(detail, 220),
-                "tone": "warn"
-            })
-        }
-        Err(error) => json!({
-            "label": label,
-            "value": sanitize_text(&format!("nao encontrado/executado: {error}"), 220),
-            "tone": "blocked"
-        }),
-    }
-}
-
-
-struct CommandProgressContext<'a> {
-    log_session: &'a LogSession,
-    run_id: &'a str,
-    agent: &'a str,
-    role: &'a str,
-    cli: &'a str,
-    output_path: &'a Path,
-}
-
-fn run_resolved_command_with_timeout(
-    path: &Path,
-    args: &[String],
-    timeout: Duration,
-    stdin_text: Option<&str>,
-) -> std::io::Result<TimedCommandOutput> {
-    run_resolved_command_observed(path, args, Some(timeout), stdin_text, None)
-}
-
-fn run_resolved_command_observed(
-    path: &Path,
-    args: &[String],
-    timeout: Option<Duration>,
-    stdin_text: Option<&str>,
-    progress: Option<CommandProgressContext<'_>>,
-) -> std::io::Result<TimedCommandOutput> {
-    let started = Instant::now();
-    let mut command = resolved_command_builder(path, args);
-    let working_dir = progress
-        .as_ref()
-        .map(|progress| command_working_dir_for_output(progress.output_path))
-        .unwrap_or_else(app_root);
-    command
-        .current_dir(&working_dir)
-        .stdin(if stdin_text.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn()?;
-    let child_id = child.id();
-    if let Some(progress) = progress.as_ref() {
-        log_editorial_agent_spawned(progress, child_id, path, &working_dir);
-    }
-    if let Some(text) = stdin_text {
-        if let Some(mut stdin) = child.stdin.take() {
-            if let Err(error) = stdin.write_all(text.as_bytes()) {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error);
-            }
-        }
-    }
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let stdout_bytes = Arc::new(AtomicU64::new(0));
-    let stderr_bytes = Arc::new(AtomicU64::new(0));
-    let stdout_counter = Arc::clone(&stdout_bytes);
-    let stderr_counter = Arc::clone(&stderr_bytes);
-    let stdout_handle =
-        thread::spawn(move || read_pipe_to_end_counting_classified(stdout, stdout_counter));
-    let stderr_handle =
-        thread::spawn(move || read_pipe_to_end_counting_classified(stderr, stderr_counter));
-    let mut last_progress = Instant::now();
-
-    loop {
-        if let Some(status) = child.try_wait()? {
-            let (stdout, stdout_pipe_error) = stdout_handle
-                .join()
-                .unwrap_or_else(|_| (Vec::new(), Some("stdout_thread_panic".to_string())));
-            let (stderr, stderr_pipe_error) = stderr_handle
-                .join()
-                .unwrap_or_else(|_| (Vec::new(), Some("stderr_thread_panic".to_string())));
-            return Ok(TimedCommandOutput {
-                output: Output {
-                    status,
-                    stdout,
-                    stderr,
-                },
-                duration_ms: started.elapsed().as_millis(),
-                timed_out: false,
-                stdout_pipe_error,
-                stderr_pipe_error,
-            });
-        }
-
-        if let Some(timeout) = timeout {
-            if started.elapsed() >= timeout {
-                let _ = child.kill();
-                let status = child.wait()?;
-                let (stdout, stdout_pipe_error) = stdout_handle
-                    .join()
-                    .unwrap_or_else(|_| (Vec::new(), Some("stdout_thread_panic".to_string())));
-                let (stderr, stderr_pipe_error) = stderr_handle
-                    .join()
-                    .unwrap_or_else(|_| (Vec::new(), Some("stderr_thread_panic".to_string())));
-                return Ok(TimedCommandOutput {
-                    output: Output {
-                        status,
-                        stdout,
-                        stderr,
-                    },
-                    duration_ms: started.elapsed().as_millis(),
-                    timed_out: true,
-                    stdout_pipe_error,
-                    stderr_pipe_error,
-                });
-            }
-        }
-
-        if last_progress.elapsed() >= Duration::from_secs(30) {
-            if let Some(progress) = progress.as_ref() {
-                log_editorial_agent_running(
-                    progress,
-                    child_id,
-                    started.elapsed(),
-                    stdout_bytes.load(Ordering::Relaxed),
-                    stderr_bytes.load(Ordering::Relaxed),
-                );
-            }
-            last_progress = Instant::now();
-        }
-
-        thread::sleep(Duration::from_millis(250));
-    }
-}
-
-fn read_pipe_to_end_counting_classified(
-    pipe: Option<impl Read>,
-    byte_counter: Arc<AtomicU64>,
-) -> (Vec<u8>, Option<String>) {
-    let mut buffer = Vec::new();
-    let mut chunk = [0u8; 8192];
-    let mut pipe_error: Option<String> = None;
-    if let Some(mut pipe) = pipe {
-        loop {
-            match pipe.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(count) => {
-                    byte_counter.fetch_add(count as u64, Ordering::Relaxed);
-                    buffer.extend_from_slice(&chunk[..count]);
-                }
-                Err(error) => {
-                    pipe_error = Some(classify_pipe_error(&error));
-                    break;
-                }
-            }
-        }
-    }
-    (buffer, pipe_error)
-}
-
-fn classify_pipe_error(error: &std::io::Error) -> String {
-    let raw = error.raw_os_error();
-    let kind = error.kind();
-    let label = match (raw, kind) {
-        (Some(109), _) => "windows_error_109_broken_pipe",
-        (Some(232), _) => "windows_error_232_pipe_closing",
-        (Some(233), _) => "windows_error_233_pipe_no_listener",
-        (_, std::io::ErrorKind::BrokenPipe) => "broken_pipe",
-        (_, std::io::ErrorKind::UnexpectedEof) => "unexpected_eof",
-        (_, std::io::ErrorKind::Interrupted) => "interrupted",
-        (_, std::io::ErrorKind::TimedOut) => "timed_out",
-        _ => "other",
-    };
-    let raw_label = raw
-        .map(|code| code.to_string())
-        .unwrap_or_else(|| "none".to_string());
-    format!("{label} (kind={kind:?}, raw_os_error={raw_label})")
-}
-
-fn resolved_command_builder(path: &Path, args: &[String]) -> Command {
-    let extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-
-    #[cfg(windows)]
-    {
-        if extension == "cmd" || extension == "bat" {
-            let mut command =
-                hidden_command(std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string()));
-            command.arg("/C").arg(path).args(args);
-            apply_editorial_agent_environment(&mut command, path);
-            return command;
-        }
-
-        if extension == "ps1" {
-            let mut command = hidden_command("powershell.exe");
-            command
-                .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
-                .arg(path)
-                .args(args);
-            apply_editorial_agent_environment(&mut command, path);
-            return command;
-        }
-    }
-
-    let mut command = hidden_command(path);
-    command.args(args);
-    apply_editorial_agent_environment(&mut command, path);
-    command
-}
-
-fn apply_editorial_agent_environment(command: &mut Command, path: &Path) {
-    command
-        .env("PYTHONIOENCODING", "utf-8")
-        .env("PYTHONUTF8", "1")
-        .env("LC_ALL", "C.UTF-8")
-        .env("LANG", "C.UTF-8");
-
-    let stem = path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if stem == "gemini" {
-        command.env("GEMINI_CLI_TRUST_WORKSPACE", "true");
-    }
-}
 
 
 #[cfg(test)]
@@ -4069,6 +3787,7 @@ mod tests {
     use crate::cloudflare::{
         cloudflare_page_path, cloudflare_store_for_target_or_existing, cloudflare_verify_path,
     };
+    use crate::command_spawn::{apply_editorial_agent_environment, classify_pipe_error};
     use crate::editorial_prompts::{claude_args, gemini_args};
     use crate::link_audit::{extract_public_urls, is_public_http_url};
     use crate::provider_retry::parse_retry_after_header;

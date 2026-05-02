@@ -4,6 +4,24 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.33] - 2026-05-02
+
+Pure refactor — no behavior change. Continues migration step 5 by extracting PATH-resolution helpers for child command spawn.
+
+### Changed (extracted to `src-tauri/src/command_path.rs`, ~107 lines with doc header, 3 functions)
+- `pub(crate) fn resolve_command` — locates a CLI by name on the effective PATH (absolute and relative paths bypass the search).
+- `fn command_candidate_paths` — Windows: expands bare stem into `[<command>.exe, .cmd, .bat, .ps1, <command>]`; POSIX: returns unchanged.
+- `pub(crate) fn command_search_dirs` — assembles process PATH + Windows install locations, deduplicated case-insensitively.
+
+### Stayed in `lib.rs`
+- The spawn machinery (`run_resolved_command_with_timeout`, `run_resolved_command_observed`, `read_pipe_to_end_counting_classified`, `classify_pipe_error`, `resolved_command_builder`, `apply_editorial_agent_environment`, `command_check`) — tightly coupled with `CommandProgressContext` / `TimedCommandOutput` / `log_editorial_agent_*`. Planned for a follow-up batch with editorial orchestration extraction.
+
+### Validation
+- `cargo test`: 74 passed.
+- `npm run typecheck` + `npm run build`: clean.
+- `lib.rs`: 5783 → 5712 lines (−71 net; 73 sed-deleted).
+- ZERO-line byte-parity diff vs v0.3.32 (commit e149e9c).
+
 ## [v0.3.32] - 2026-05-02
 
 Behavior fix (operator-reported B20): on resume, time and cost caps must NOT be carried forward from the previous session.

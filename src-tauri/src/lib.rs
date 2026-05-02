@@ -33,6 +33,7 @@ use tauri::Manager;
 mod ai_probes;
 mod app_paths;
 mod cloudflare;
+mod command_path;
 mod editorial_helpers;
 mod editorial_inputs;
 mod editorial_prompts;
@@ -65,6 +66,7 @@ use crate::cloudflare::{
     ensure_cloudflare_d1_database, ensure_cloudflare_secret_store, run_cloudflare_probe,
     token_source_label, upsert_ai_provider_secrets, write_ai_provider_metadata_to_cloudflare,
 };
+use crate::command_path::{command_search_dirs, resolve_command};
 use crate::editorial_helpers::{
     filter_existing_agents_to_active_set, finalize_running_agent_artifacts,
     resolve_effective_active_agents, review_complaint_fingerprint, write_editorial_agent_error_artifact,
@@ -3824,79 +3826,6 @@ fn command_check(label: &str, command: &str, args: &[&str]) -> Value {
     }
 }
 
-fn resolve_command(command: &str) -> Option<PathBuf> {
-    let command_path = Path::new(command);
-    if command_path.is_absolute() || command.contains('\\') || command.contains('/') {
-        return command_candidate_paths(command_path)
-            .into_iter()
-            .find(|path| path.is_file());
-    }
-
-    command_search_dirs()
-        .into_iter()
-        .flat_map(|dir| command_candidate_paths(&dir.join(command)))
-        .find(|path| path.is_file())
-}
-
-fn command_candidate_paths(path: &Path) -> Vec<PathBuf> {
-    if path.extension().is_some() {
-        return vec![path.to_path_buf()];
-    }
-
-    #[cfg(windows)]
-    {
-        ["exe", "cmd", "bat", "ps1", ""]
-            .into_iter()
-            .map(|ext| {
-                if ext.is_empty() {
-                    path.to_path_buf()
-                } else {
-                    path.with_extension(ext)
-                }
-            })
-            .collect()
-    }
-
-    #[cfg(not(windows))]
-    {
-        vec![path.to_path_buf()]
-    }
-}
-
-fn command_search_dirs() -> Vec<PathBuf> {
-    let mut dirs = std::env::var_os("PATH")
-        .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
-        .unwrap_or_default();
-
-    #[cfg(windows)]
-    {
-        if let Some(user_profile) = std::env::var_os("USERPROFILE") {
-            let user_profile = PathBuf::from(user_profile);
-            dirs.push(user_profile.join(".cargo").join("bin"));
-        }
-        if let Some(app_data) = std::env::var_os("APPDATA") {
-            dirs.push(PathBuf::from(app_data).join("npm"));
-        }
-        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-            let local_app_data = PathBuf::from(local_app_data);
-            dirs.push(local_app_data.join("Programs").join("nodejs"));
-            dirs.push(
-                local_app_data
-                    .join("Microsoft")
-                    .join("WinGet")
-                    .join("Links"),
-            );
-        }
-        dirs.push(PathBuf::from(r"C:\Program Files\nodejs"));
-        dirs.push(PathBuf::from(r"C:\nvm4w\nodejs"));
-        dirs.push(PathBuf::from(r"C:\Program Files\GitHub CLI"));
-    }
-
-    let mut seen = BTreeSet::new();
-    dirs.into_iter()
-        .filter(|dir| seen.insert(dir.to_string_lossy().to_ascii_lowercase()))
-        .collect()
-}
 
 struct CommandProgressContext<'a> {
     log_session: &'a LogSession,

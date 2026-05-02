@@ -167,7 +167,6 @@ fn run_provider_api_agent(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn run_editorial_agent(
     log_session: &LogSession,
     run_id: &str,
@@ -269,7 +268,18 @@ fn run_editorial_agent(
             let stdout = String::from_utf8_lossy(&result.output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&result.output.stderr).to_string();
             let exit_code = result.output.status.code();
-            let status = if role == "review" {
+            // CLI cancel artifact status refinement (v0.5.3, deepseek follow-up
+            // from v0.5.0 R1): when the run completed via timed_out + cancel
+            // signaled, classify the agent artifact as `STOPPED_BY_USER`
+            // explicitly instead of routing through the generic
+            // `EMPTY_DRAFT`/`AGENT_FAILED_NO_OUTPUT` path. Differentiates real
+            // session-deadline timeouts (cancel_token never fired) from
+            // operator-driven stops (cancel_token cancelled, then poll loop
+            // killed the child).
+            let stopped_by_user = result.timed_out && cancel_token.is_cancelled();
+            let status = if stopped_by_user {
+                "STOPPED_BY_USER"
+            } else if role == "review" {
                 if stdout.trim().is_empty() {
                     let base = if result.output.status.success() {
                         "AGENT_FAILED_EMPTY"
@@ -285,7 +295,9 @@ fn run_editorial_agent(
             } else {
                 "DRAFT_CREATED"
             };
-            let tone = if result.timed_out
+            let tone = if status == "STOPPED_BY_USER" {
+                "blocked"
+            } else if result.timed_out
                 || status == "AGENT_FAILED_EMPTY"
                 || status == "AGENT_FAILED_NO_OUTPUT"
                 || status == "CODEX_WINDOWS_SANDBOX_UPSTREAM"
@@ -301,7 +313,9 @@ fn run_editorial_agent(
             } else {
                 "error"
             };
-            let note = if status == "CODEX_WINDOWS_SANDBOX_UPSTREAM" {
+            let note = if status == "STOPPED_BY_USER" {
+                "\n> Sessao interrompida pelo operador via botao 'Parar sessao'. CLI peer foi encerrado com `taskkill /T /F`; partial output preservado abaixo. Retome a sessao via `Retomar` para continuar do mesmo run_id.\n"
+            } else if status == "CODEX_WINDOWS_SANDBOX_UPSTREAM" {
                 "\n> Codex CLI 0.128.0+ no Windows roda o sandbox em PowerShell ConstrainedLanguage e trava ao desmontar o tree de processos (stderr mostra `ConstrainedLanguage`, `Cannot set property` ou `ERRO: o processo` do taskkill). Bug upstream conhecido (rastreado no cross-review-mcp v1.5.0+). Tente outro peer ou ambiente sem o sandbox.\n"
             } else if status == "GEMINI_WORKSPACE_VIOLATION" {
                 "\n> Gemini CLI bloqueou uma chamada de ferramenta porque o agente tentou acessar caminho fora do workspace (`Path not in workspace` / `resolves outside the allowed workspace directories`). Esperado quando o protocolo pede recursos no diretorio pai. Tente outro peer.\n"

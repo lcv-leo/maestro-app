@@ -4,6 +4,33 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.3] - 2026-05-02
+
+Operator-driven hardening pass: D (proactive sweep) + B subset (items_after_test_module fix + CLI cancel artifact status refinement + duplicate `#[allow]` cleanup).
+
+### (D) Proactive `or_else(saved)` sweep — completed clean
+After 4 saved-contract leak bugs in sequence (v0.3.38 provider mode, v0.3.42 caps, v0.5.1 peers, v0.5.2 initial_agent + caps in resume), grep'd `lib.rs` for any remaining `or_else` patterns where saved fallbacks could silently override request values. **All 5 remaining `or_else` patterns are intentional and content-not-config**: `prompt` (extract_saved_prompt fallback to saved_prompt body), `session_name` (fallback to "Sessao {run_id}" placeholder), `protocol_text` (override fallback to saved protocol body), `effective_initial_agent` (already fixed in v0.5.2 B22 with correct request-first priority), `links` (already retained intentionally as content). Pattern fully consolidated. No additional fixes needed.
+
+### (B) `items_after_test_module` fix
+[src-tauri/src/lib.rs](src-tauri/src/lib.rs) `pub fn run()` (88 lines, the Tauri 2 binary entry with `#[cfg_attr(mobile, tauri::mobile_entry_point)]`) moved from after `#[cfg(test)] mod tests {}` (line ~3967) to before it (now line ~2541, just above mod tests). Resolves Gemini's last clippy warning. Function body byte-identical; only position changed. The `mod tests` block remains the very last item in the file, matching Rust convention.
+
+### (B) CLI cancel artifact status refinement
+[src-tauri/src/editorial_agent_runners.rs](src-tauri/src/editorial_agent_runners.rs) `run_editorial_agent` now detects the operator-cancel branch explicitly: `let stopped_by_user = result.timed_out && cancel_token.is_cancelled();`. When true, the agent artifact is classified with status `STOPPED_BY_USER` (tone `blocked`) instead of routing through the generic `EMPTY_DRAFT`/`AGENT_FAILED_NO_OUTPUT` path. Differentiates real session-deadline timeouts (cancel_token never fired) from operator-driven stops (cancel_token cancelled, then poll loop killed the child via `kill_process_tree`). Closes deepseek's R1 follow-up #1 from v0.5.0 cross-review. New artifact note explains the operator-stop cause and the resume path. Aligns CLI cancel artifact-level status with API cancel artifact-level status (already STOPPED_BY_USER explicit since v0.5.0).
+
+### Cleanup — duplicate `#[allow]`
+[src-tauri/src/editorial_agent_runners.rs:169-170](src-tauri/src/editorial_agent_runners.rs#L169) had two consecutive `#[allow(clippy::too_many_arguments)]` attributes on `run_editorial_agent` (introduced inadvertently during the v0.5.0 cancel_token plumbing). Removed the duplicate.
+
+### Validation
+- `cargo test --locked --lib`: **93 passed** (no test changes; existing classify_upstream_cli_failure_* tests cover the upstream-bug branches; no new tests for STOPPED_BY_USER classification at agent level since the logic is a 1-line `&&` check).
+- `cargo clippy --locked --no-deps --all-targets`: **0 lib warnings + 0 test warnings**. The `items_after_test_module` warning is resolved; the `duplicated attribute` warning is resolved.
+- `npm run build`: clean.
+
+### Cross-review pré-Commit & Sync
+Cross-review-v2 quadrilateral pendente (HARD GATE 2026-04-26).
+
+### Versioning
+Patch bump (v0.5.2 → v0.5.3) — 3 small focused changes (sweep audit + 2 bugfix/hygiene); no signature/dep/feature changes.
+
 ## [v0.5.2] - 2026-05-02
 
 Behavior fix — B22: resume path was carrying TWO additional saved-contract fields forward over operator's request.

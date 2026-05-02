@@ -2556,6 +2556,95 @@ pub(crate) fn api_error_message(body: &str) -> String {
 
 
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    install_process_panic_hook();
+    tauri::Builder::default()
+        .setup(|app| {
+            initialize_app_root(app)?;
+            app.manage(create_log_session());
+            let log_session = app.state::<LogSession>();
+            let panic_log_session = log_session.inner().clone();
+            std::panic::set_hook(Box::new(move |panic_info| {
+                let payload = panic_info
+                    .payload()
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| panic_info.payload().downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("unknown panic payload");
+                let location = panic_info.location().map(|location| {
+                    format!(
+                        "{}:{}:{}",
+                        location.file(),
+                        location.line(),
+                        location.column()
+                    )
+                });
+                let _ = write_log_record(
+                    &panic_log_session,
+                    LogEventInput {
+                        level: "fatal".to_string(),
+                        category: "native.panic".to_string(),
+                        message: "native panic captured".to_string(),
+                        context: Some(json!({
+                            "payload": sanitize_text(payload, 1000),
+                            "location": location
+                        })),
+                    },
+                );
+            }));
+            let _ = write_log_record(
+                &log_session,
+                LogEventInput {
+                    level: "info".to_string(),
+                    category: "app.lifecycle".to_string(),
+                    message: "native runtime started".to_string(),
+                    context: Some(json!({
+                        "app_root": app_root().to_string_lossy(),
+                        "log_dir": logs_dir().to_string_lossy(),
+                        "log_file": log_session.path.to_string_lossy(),
+                        "log_session_id": log_session.id.clone(),
+                        "current_exe": std::env::current_exe().ok().map(|path| path.to_string_lossy().to_string()),
+                        "args_count": std::env::args().count(),
+                        "path_entries": command_search_dirs().len(),
+                        "resolved_commands": {
+                            "claude": resolve_command("claude").map(|path| path.to_string_lossy().to_string()),
+                            "codex": resolve_command("codex").map(|path| path.to_string_lossy().to_string()),
+                            "gemini": resolve_command("gemini").map(|path| path.to_string_lossy().to_string()),
+                            "node": resolve_command("node").map(|path| path.to_string_lossy().to_string()),
+                            "npm": resolve_command("npm").map(|path| path.to_string_lossy().to_string()),
+                            "cargo": resolve_command("cargo").map(|path| path.to_string_lossy().to_string()),
+                            "gh": resolve_command("gh").map(|path| path.to_string_lossy().to_string())
+                        }
+                    })),
+                },
+            );
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            runtime_profile,
+            write_log_event,
+            diagnostics_snapshot,
+            read_bootstrap_config,
+            write_bootstrap_config,
+            read_ai_provider_config,
+            write_ai_provider_config,
+            verify_ai_provider_credentials,
+            audit_links,
+            open_data_file,
+            cloudflare_env_snapshot,
+            dependency_preflight,
+            verify_cloudflare_credentials,
+            run_cli_adapter_smoke,
+            list_resumable_sessions,
+            resume_editorial_session,
+            run_editorial_session,
+            stop_editorial_session
+        ])
+        .run(tauri::generate_context!())
+        .expect("failed to run Maestro Editorial AI");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3962,93 +4051,4 @@ mod tests {
         assert!(should_redact_key("authorization"));
         assert!(should_redact_key("private_key"));
     }
-}
-
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    install_process_panic_hook();
-    tauri::Builder::default()
-        .setup(|app| {
-            initialize_app_root(app)?;
-            app.manage(create_log_session());
-            let log_session = app.state::<LogSession>();
-            let panic_log_session = log_session.inner().clone();
-            std::panic::set_hook(Box::new(move |panic_info| {
-                let payload = panic_info
-                    .payload()
-                    .downcast_ref::<&str>()
-                    .copied()
-                    .or_else(|| panic_info.payload().downcast_ref::<String>().map(String::as_str))
-                    .unwrap_or("unknown panic payload");
-                let location = panic_info.location().map(|location| {
-                    format!(
-                        "{}:{}:{}",
-                        location.file(),
-                        location.line(),
-                        location.column()
-                    )
-                });
-                let _ = write_log_record(
-                    &panic_log_session,
-                    LogEventInput {
-                        level: "fatal".to_string(),
-                        category: "native.panic".to_string(),
-                        message: "native panic captured".to_string(),
-                        context: Some(json!({
-                            "payload": sanitize_text(payload, 1000),
-                            "location": location
-                        })),
-                    },
-                );
-            }));
-            let _ = write_log_record(
-                &log_session,
-                LogEventInput {
-                    level: "info".to_string(),
-                    category: "app.lifecycle".to_string(),
-                    message: "native runtime started".to_string(),
-                    context: Some(json!({
-                        "app_root": app_root().to_string_lossy(),
-                        "log_dir": logs_dir().to_string_lossy(),
-                        "log_file": log_session.path.to_string_lossy(),
-                        "log_session_id": log_session.id.clone(),
-                        "current_exe": std::env::current_exe().ok().map(|path| path.to_string_lossy().to_string()),
-                        "args_count": std::env::args().count(),
-                        "path_entries": command_search_dirs().len(),
-                        "resolved_commands": {
-                            "claude": resolve_command("claude").map(|path| path.to_string_lossy().to_string()),
-                            "codex": resolve_command("codex").map(|path| path.to_string_lossy().to_string()),
-                            "gemini": resolve_command("gemini").map(|path| path.to_string_lossy().to_string()),
-                            "node": resolve_command("node").map(|path| path.to_string_lossy().to_string()),
-                            "npm": resolve_command("npm").map(|path| path.to_string_lossy().to_string()),
-                            "cargo": resolve_command("cargo").map(|path| path.to_string_lossy().to_string()),
-                            "gh": resolve_command("gh").map(|path| path.to_string_lossy().to_string())
-                        }
-                    })),
-                },
-            );
-            Ok(())
-        })
-        .invoke_handler(tauri::generate_handler![
-            runtime_profile,
-            write_log_event,
-            diagnostics_snapshot,
-            read_bootstrap_config,
-            write_bootstrap_config,
-            read_ai_provider_config,
-            write_ai_provider_config,
-            verify_ai_provider_credentials,
-            audit_links,
-            open_data_file,
-            cloudflare_env_snapshot,
-            dependency_preflight,
-            verify_cloudflare_credentials,
-            run_cli_adapter_smoke,
-            list_resumable_sessions,
-            resume_editorial_session,
-            run_editorial_session,
-            stop_editorial_session
-        ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Maestro Editorial AI");
 }

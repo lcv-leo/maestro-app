@@ -20,12 +20,13 @@ use std::{
     path::{Path, PathBuf},
     process::{self, Command, Output},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tauri::Manager;
 
 mod ai_probes;
 mod app_paths;
+mod cli_adapter;
 mod cloudflare;
 mod command_path;
 mod command_spawn;
@@ -67,6 +68,7 @@ use crate::app_paths::{
     resolve_portable_app_root, safe_run_id_from_entry, sanitize_path_segment, sessions_dir,
     try_set_app_root,
 };
+use crate::cli_adapter::{cli_adapter_specs, run_cli_adapter_probe};
 use crate::cloudflare::{
     ai_provider_secret_values, cloudflare_client, cloudflare_get, cloudflare_post_json,
     cloudflare_result_id_for_name, cloudflare_token_from_provider_request,
@@ -74,9 +76,7 @@ use crate::cloudflare::{
     token_source_label, upsert_ai_provider_secrets, write_ai_provider_metadata_to_cloudflare,
 };
 use crate::command_path::{command_search_dirs, resolve_command};
-use crate::command_spawn::{
-    command_check, run_resolved_command_with_timeout, CommandProgressContext,
-};
+use crate::command_spawn::{command_check, CommandProgressContext};
 use crate::editorial_agent_runners::run_editorial_agent_for_spec;
 use crate::editorial_helpers::{
     filter_existing_agents_to_active_set, finalize_running_agent_artifacts,
@@ -260,30 +260,30 @@ pub(crate) struct CloudflareProbeResult {
 }
 
 #[derive(Clone, Deserialize)]
-struct CliAdapterSmokeRequest {
-    run_id: String,
-    prompt_chars: usize,
-    protocol_name: String,
-    protocol_lines: usize,
-    protocol_hash: String,
+pub(crate) struct CliAdapterSmokeRequest {
+    pub(crate) run_id: String,
+    pub(crate) prompt_chars: usize,
+    pub(crate) protocol_name: String,
+    pub(crate) protocol_lines: usize,
+    pub(crate) protocol_hash: String,
 }
 
 #[derive(Serialize)]
-struct CliAdapterSmokeResult {
-    run_id: String,
-    agents: Vec<CliAdapterProbeResult>,
-    all_ready: bool,
+pub(crate) struct CliAdapterSmokeResult {
+    pub(crate) run_id: String,
+    pub(crate) agents: Vec<CliAdapterProbeResult>,
+    pub(crate) all_ready: bool,
 }
 
 #[derive(Serialize)]
-struct CliAdapterProbeResult {
-    name: String,
-    cli: String,
-    tone: String,
-    status: String,
-    duration_ms: u128,
-    exit_code: Option<i32>,
-    marker_found: bool,
+pub(crate) struct CliAdapterProbeResult {
+    pub(crate) name: String,
+    pub(crate) cli: String,
+    pub(crate) tone: String,
+    pub(crate) status: String,
+    pub(crate) duration_ms: u128,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) marker_found: bool,
 }
 
 #[derive(Clone, Deserialize)]
@@ -457,12 +457,12 @@ pub(crate) struct CostLedgerEntry {
 }
 
 #[derive(Clone)]
-struct CliAdapterSpec {
-    name: &'static str,
-    command: &'static str,
-    marker: &'static str,
-    args: Vec<String>,
-    timeout: Duration,
+pub(crate) struct CliAdapterSpec {
+    pub(crate) name: &'static str,
+    pub(crate) command: &'static str,
+    pub(crate) marker: &'static str,
+    pub(crate) args: Vec<String>,
+    pub(crate) timeout: Duration,
 }
 
 pub(crate) struct TimedCommandOutput {
@@ -3145,120 +3145,6 @@ pub(crate) fn extract_stdout_block(artifact: &str) -> Option<&str> {
     let end = rest.find("\n```\n\n## Stderr")?;
     Some(rest[..end].trim())
 }
-
-
-fn cli_adapter_specs(request: &CliAdapterSmokeRequest) -> Vec<CliAdapterSpec> {
-    let run_id = sanitize_short(&request.run_id, 120);
-    let protocol_name = sanitize_text(&request.protocol_name, 160);
-    let protocol_hash_prefix = sanitize_short(&request.protocol_hash, 16);
-    let prompt_base = format!(
-        "Maestro Editorial AI adapter smoke. Run {run_id}. Prompt chars: {}. Protocol: {protocol_name}; lines: {}; hash prefix: {protocol_hash_prefix}. Do not use tools. Reply only with the exact marker requested.",
-        request.prompt_chars, request.protocol_lines
-    );
-
-    vec![
-        CliAdapterSpec {
-            name: "Claude",
-            command: "claude",
-            marker: "MAESTRO_CLI_SMOKE_CLAUDE_READY",
-            args: vec![
-                "--print".to_string(),
-                "--output-format".to_string(),
-                "text".to_string(),
-                "--permission-mode".to_string(),
-                "dontAsk".to_string(),
-                format!("{prompt_base} Marker: MAESTRO_CLI_SMOKE_CLAUDE_READY"),
-            ],
-            timeout: Duration::from_secs(90),
-        },
-        CliAdapterSpec {
-            name: "Codex",
-            command: "codex",
-            marker: "MAESTRO_CLI_SMOKE_CODEX_READY",
-            args: vec![
-                "--ask-for-approval".to_string(),
-                "never".to_string(),
-                "exec".to_string(),
-                "--skip-git-repo-check".to_string(),
-                "--sandbox".to_string(),
-                "read-only".to_string(),
-                "--color".to_string(),
-                "never".to_string(),
-                format!("{prompt_base} Marker: MAESTRO_CLI_SMOKE_CODEX_READY"),
-            ],
-            timeout: Duration::from_secs(90),
-        },
-        CliAdapterSpec {
-            name: "Gemini",
-            command: "gemini",
-            marker: "MAESTRO_CLI_SMOKE_GEMINI_READY",
-            args: vec![
-                "--prompt".to_string(),
-                format!("{prompt_base} Marker: MAESTRO_CLI_SMOKE_GEMINI_READY"),
-                "--output-format".to_string(),
-                "text".to_string(),
-                "--approval-mode".to_string(),
-                "yolo".to_string(),
-                "--skip-trust".to_string(),
-            ],
-            timeout: Duration::from_secs(90),
-        },
-    ]
-}
-
-fn run_cli_adapter_probe(spec: CliAdapterSpec) -> CliAdapterProbeResult {
-    let started = Instant::now();
-    let Some(path) = resolve_command(spec.command) else {
-        return CliAdapterProbeResult {
-            name: spec.name.to_string(),
-            cli: spec.command.to_string(),
-            tone: "blocked".to_string(),
-            status: "CLI nao encontrada no PATH efetivo".to_string(),
-            duration_ms: started.elapsed().as_millis(),
-            exit_code: None,
-            marker_found: false,
-        };
-    };
-
-    match run_resolved_command_with_timeout(&path, &spec.args, spec.timeout, None) {
-        Ok(result) => {
-            let exit_code = result.output.status.code();
-            let stdout = String::from_utf8_lossy(&result.output.stdout);
-            let stderr = String::from_utf8_lossy(&result.output.stderr);
-            let marker_found = stdout.contains(spec.marker) || stderr.contains(spec.marker);
-
-            let (tone, status) = if result.timed_out {
-                ("error", "timeout aguardando resposta da CLI")
-            } else if result.output.status.success() && marker_found {
-                ("ok", "CLI executada e marcador recebido")
-            } else if result.output.status.success() {
-                ("warn", "CLI executada, mas marcador esperado nao apareceu")
-            } else {
-                ("error", "CLI retornou codigo de saida diferente de zero")
-            };
-
-            CliAdapterProbeResult {
-                name: spec.name.to_string(),
-                cli: spec.command.to_string(),
-                tone: tone.to_string(),
-                status: status.to_string(),
-                duration_ms: result.duration_ms,
-                exit_code,
-                marker_found,
-            }
-        }
-        Err(error) => CliAdapterProbeResult {
-            name: spec.name.to_string(),
-            cli: spec.command.to_string(),
-            tone: "error".to_string(),
-            status: sanitize_text(&format!("falha ao executar CLI: {error}"), 240),
-            duration_ms: started.elapsed().as_millis(),
-            exit_code: None,
-            marker_found: false,
-        },
-    }
-}
-
 
 pub(crate) fn effective_provider_key(
     config_value: Option<&str>,

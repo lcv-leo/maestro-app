@@ -4,6 +4,34 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.39] - 2026-05-02
+
+Pure refactor — no behavior change. Continues `docs/code-split-plan.md` migration step 5 by extracting the CLI adapter smoke probe machinery into a dedicated module.
+
+### Changed (extracted to `src-tauri/src/cli_adapter.rs`, ~153 lines with doc header, 2 functions)
+- `pub(crate) fn cli_adapter_specs(request: &CliAdapterSmokeRequest) -> Vec<CliAdapterSpec>` — builds the 3-element spec table (Claude with `--print --output-format text --permission-mode dontAsk`, Codex with `exec --skip-git-repo-check --sandbox read-only --color never`, Gemini with `--prompt --output-format text --approval-mode yolo --skip-trust`); 90s per-CLI timeout.
+- `pub(crate) fn run_cli_adapter_probe(spec: CliAdapterSpec) -> CliAdapterProbeResult` — single-spec runner: resolves the command against effective PATH (returns `blocked` tone with status "CLI nao encontrada no PATH efetivo" when missing), invokes `run_resolved_command_with_timeout`, classifies outcome (timeout/ok+marker/ok-without-marker/nonzero-exit).
+
+### Visibility upgrades in `lib.rs` (cross-module access required)
+- `pub(crate) struct CliAdapterSmokeRequest` + 5 fields (run_id, prompt_chars, protocol_name, protocol_lines, protocol_hash).
+- `pub(crate) struct CliAdapterSmokeResult` + 3 fields (run_id, agents, all_ready).
+- `pub(crate) struct CliAdapterProbeResult` + 7 fields (name, cli, tone, status, duration_ms, exit_code, marker_found).
+- `pub(crate) struct CliAdapterSpec` + 5 fields (name, command, marker, args, timeout).
+
+### Stayed in `lib.rs`
+- `run_cli_adapter_smoke` Tauri command wrapper — lives on the `#[tauri::command]` registry boundary and orchestrates the 3-CLI parallel spawn loop via `thread::spawn(move || run_cli_adapter_probe(spec))` joining results back into `CliAdapterSmokeResult`.
+
+### Cleanup in `lib.rs`
+- Removed unused `Instant` import (only `cli_adapter.rs` uses it now).
+- Collapsed `command_spawn` import: removed `run_resolved_command_with_timeout` (only `cli_adapter.rs` calls it now), single-line use statement.
+
+### Validation
+- `cargo test --lib`: **78 passed** (zero regression vs v0.3.38).
+- `cargo clippy --no-deps --all-targets`: 12 lib + 15 test warnings, all pre-existing (same shape as v0.3.38).
+- `npm run build` (tsc --noEmit + vite build): clean.
+- `lib.rs`: 4902 → 4788 lines (−114 net; 111 sed-deleted, 3 blank-line collapse, 1 mod line + 1 use line + minor cleanup adjustments).
+- Function-body byte-parity diff vs v0.3.38 (commit b7509b9): clean (only differences are the use block at the top of the new module and the wrapping `pub(crate) fn` decoration).
+
 ## [v0.3.38] - 2026-05-02
 
 Behavior fix — operator catch on session log [maestro-2026-05-02T09-01-33Z-pid7592.ndjson](data/logs): provider mode toggle (Hibrido/CLI/API) was not being respected for DeepSeek. Operator selected `provider_mode='cli'`, but DeepSeek still ran via `https://api.deepseek.com/chat/completions` while Claude/Codex/Gemini correctly resolved to local CLI binaries.

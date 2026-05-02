@@ -4,6 +4,83 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.4.0] - 2026-05-02
+
+Architectural refactor closing Gemini's `too_many_arguments` × 7 finding from the rigorous audit on HEAD `4b56e0d` (v0.3.47). Two new `pub(crate)` context structs collapse 9-11 positional parameters into 1-2 grouped arguments. No behavior change.
+
+### New `ProviderInvocation<'a>` struct (provider_runners.rs)
+Groups the 7 parameters that flowed through every editorial helper:
+```rust
+#[derive(Clone, Copy)]
+pub(crate) struct ProviderInvocation<'a> {
+    pub log_session: &'a LogSession,
+    pub run_id: &'a str,
+    pub name: &'a str,           // "Codex", "Claude", "Gemini", "DeepSeek"
+    pub cli: &'a str,            // "openai-api", "anthropic-api", etc.
+    pub provider: &'a str,       // "openai", "anthropic", "gemini", "deepseek"
+    pub role: &'a str,
+    pub output_path: &'a Path,
+}
+```
+`Clone, Copy` is free because all fields are references or `&str`. Built once inside each runner from the runner's hardcoded `name`/`cli`/`provider` constants plus the request's spawn context.
+
+### New `EditorialAgentRequest<'a>` struct (provider_runners.rs)
+Groups the 9 parameters that `run_*_api_agent` runners receive from the dispatch site in `editorial_agent_runners.rs`:
+```rust
+pub(crate) struct EditorialAgentRequest<'a> {
+    pub log_session: &'a LogSession,
+    pub run_id: &'a str,
+    pub role: &'a str,
+    pub prompt: String,
+    pub attachments: &'a [AttachmentManifestEntry],
+    pub output_path: &'a Path,
+    pub timeout: Option<Duration>,
+    pub config: &'a AiProviderConfig,
+    pub cost_guard: Option<ProviderCostGuard>,
+}
+```
+Passed by-value so each runner takes ownership of `prompt: String` and `cost_guard: Option<ProviderCostGuard>`. The DeepSeek runner ignores `attachments` because chat-completions does not natively accept inline payloads (matches existing v0.3.x behavior).
+
+### 4 helpers refactored — `provider_runners.rs`
+| Function | Before | After |
+|---|---|---|
+| `api_cost_preflight_result` | 11 args | 5 args |
+| `write_provider_missing_key_result` | 9 args | 3 args |
+| `write_provider_error_result` | 10 args | 4 args |
+| `write_provider_failure_result` | 13 args (had `#[allow]`) | 7 args (no `#[allow]` needed) |
+
+Each helper now takes `&ProviderInvocation` as its first parameter; internal references swap from `name`/`cli`/`provider`/`role`/`output_path`/`log_session`/`run_id` to `invocation.name`/`invocation.cli`/etc. Function bodies otherwise unchanged.
+
+### 4 runners refactored — `provider_runners.rs` + `provider_deepseek.rs`
+| Function | Before | After |
+|---|---|---|
+| `run_openai_api_agent` | 9 args | 1 arg (`EditorialAgentRequest`) |
+| `run_anthropic_api_agent` | 9 args | 1 arg |
+| `run_gemini_api_agent` | 9 args | 1 arg |
+| `run_deepseek_api_agent` | 8 args | 1 arg |
+
+Each runner destructures the request at the top, builds `let invocation = ProviderInvocation { ... };` once with its hardcoded `name`/`cli`/`provider`, and passes `&invocation` to every helper call. Body otherwise byte-identical to v0.3.48.
+
+### Call site updated — `editorial_agent_runners.rs:run_provider_api_agent`
+Single dispatch point: builds `EditorialAgentRequest` once at the top, then `match spec.key` moves the request into the matching runner. The fallback `_ => write_provider_error_result(...)` constructs an inline `ProviderInvocation` for the "API_PROVIDER_NOT_SUPPORTED" branch with `provider: "unknown"` and `cli: api_cli_for_agent(spec.key)`.
+
+### Out of scope
+- `write_provider_success_result` (17 args, retains `#[allow]`) — would need a third "outcome" struct (`ProviderRunOutcome`) to fit; deferred to keep v0.4.0 focused.
+- `log_provider_api_started` (11 args, retains `#[allow]`) — same rationale.
+- `write_deepseek_error_result` (7 args, exactly at threshold) — no clippy warning, structurally distinct from the unified family.
+- `items_after_test_module` in lib.rs:2542 — last remaining cosmetic warning; will resolve naturally as `pub fn run()` is moved into a future split.
+
+### Tests + Gates
+- `cargo test --locked --lib`: **88 passed** (zero regressions vs v0.3.48). All existing coverage exercises the refactored paths via runner dispatch tests.
+- `cargo clippy --locked --no-deps --all-targets`: **0 lib warnings + 1 test warning** (down from 7 + 8 in v0.3.48). The only remaining warning is `items_after_test_module`. **All 7 `too_many_arguments` warnings eliminated** — the refactor closes Gemini's primary finding from the rigorous audit.
+- `npm run build`: clean.
+
+### Versioning
+Minor bump (v0.3.48 → v0.4.0) per the workspace's `version-control.md`: "Minor: Novas funcionalidades, melhorias significativas". Architectural refactor that resolves a deferred audit finding qualifies as melhoria significativa even though no user-facing behavior changed. NOT a breaking change for end users.
+
+### Cross-review pré-Commit & Sync
+Cross-review-v2 quadrilateral pendente (HARD GATE 2026-04-26).
+
 ## [v0.3.48] - 2026-05-02
 
 Pure refactor batch continuing `docs/code-split-plan.md` migration step 2 ("logging and path safety" tail items deferred from v0.3.17). No behavior change.

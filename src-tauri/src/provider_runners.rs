@@ -54,6 +54,41 @@ use crate::{
     sanitize_text, write_text_file, AiProviderConfig, EditorialAgentResult,
 };
 
+/// Provider invocation identity bundle. Groups the 7 parameters that flow
+/// through every editorial helper (`api_cost_preflight_result`, the
+/// `write_provider_*_result` family) so signatures fit within clippy's
+/// `too_many_arguments` 7-arg threshold without per-helper `#[allow]`
+/// annotations. Built once inside each runner from its hardcoded
+/// `name`/`cli`/`provider` constants plus the shared spawn context.
+#[derive(Clone, Copy)]
+pub(crate) struct ProviderInvocation<'a> {
+    pub log_session: &'a LogSession,
+    pub run_id: &'a str,
+    pub name: &'a str,
+    pub cli: &'a str,
+    pub provider: &'a str,
+    pub role: &'a str,
+    pub output_path: &'a Path,
+}
+
+/// Per-call editorial-agent request bundle. Groups the 9 parameters that
+/// `run_*_api_agent` runners receive from
+/// `editorial_agent_runners::run_editorial_agent_for_spec`. Passed by-value
+/// so each runner takes ownership of `prompt: String` and
+/// `cost_guard: Option<ProviderCostGuard>`. The DeepSeek runner ignores
+/// `attachments` because chat-completions does not accept inline payloads.
+pub(crate) struct EditorialAgentRequest<'a> {
+    pub log_session: &'a LogSession,
+    pub run_id: &'a str,
+    pub role: &'a str,
+    pub prompt: String,
+    pub attachments: &'a [AttachmentManifestEntry],
+    pub output_path: &'a Path,
+    pub timeout: Option<Duration>,
+    pub config: &'a AiProviderConfig,
+    pub cost_guard: Option<ProviderCostGuard>,
+}
+
 pub(crate) fn editorial_api_system_prompt(agent_name: &str) -> String {
     format!(
         "Voce e o peer {agent_name} dentro do Maestro Editorial AI. Leia integralmente o pedido do usuario, o protocolo editorial e os artefatos fornecidos. Responda somente ao que foi solicitado. Em revisoes, a primeira linha precisa seguir exatamente o contrato MAESTRO_STATUS."
@@ -61,14 +96,8 @@ pub(crate) fn editorial_api_system_prompt(agent_name: &str) -> String {
 }
 
 pub(crate) fn api_cost_preflight_result(
-    log_session: &LogSession,
-    run_id: &str,
-    name: &str,
-    cli: &str,
-    provider: &str,
-    role: &str,
+    invocation: &ProviderInvocation,
     input_estimate_chars: usize,
-    output_path: &Path,
     max_tokens: u64,
     cost_guard: Option<&ProviderCostGuard>,
     duration_ms: u128,
@@ -82,25 +111,19 @@ pub(crate) fn api_cost_preflight_result(
     }
     let note = format!(
         "{} nao foi chamado: custo projetado ${:.6} somado ao observado ${:.6} excede o limite ${:.6}.",
-        provider_label_for_agent(match provider {
+        provider_label_for_agent(match invocation.provider {
             "anthropic" => "claude",
             "openai" => "codex",
             "gemini" => "gemini",
             "deepseek" => "deepseek",
-            _ => provider,
+            other => other,
         }),
         estimated_cost,
         guard.observed_cost_usd,
         max_session_cost_usd
     );
     Some(write_provider_failure_result(
-        log_session,
-        run_id,
-        name,
-        cli,
-        provider,
-        role,
-        output_path,
+        invocation,
         "unknown",
         "COST_LIMIT_REACHED",
         "blocked",
@@ -111,13 +134,7 @@ pub(crate) fn api_cost_preflight_result(
 }
 
 pub(crate) fn write_provider_missing_key_result(
-    log_session: &LogSession,
-    run_id: &str,
-    name: &str,
-    cli: &str,
-    provider: &str,
-    role: &str,
-    output_path: &Path,
+    invocation: &ProviderInvocation,
     model: &str,
     remote_present: bool,
 ) -> EditorialAgentResult {
@@ -128,68 +145,29 @@ pub(crate) fn write_provider_missing_key_result(
     };
     let note = if remote_present {
         format!(
-            "A referencia do segredo de {name} existe no Cloudflare Secrets Store, mas a Cloudflare nao devolve o valor bruto ao app local. Informe a chave na tela Ajustes > Agentes via API ou use a variavel de API correspondente."
+            "A referencia do segredo de {} existe no Cloudflare Secrets Store, mas a Cloudflare nao devolve o valor bruto ao app local. Informe a chave na tela Ajustes > Agentes via API ou use a variavel de API correspondente.",
+            invocation.name,
         )
     } else {
         format!(
-            "{name} precisa de chave informada na tela Ajustes > Agentes via API para executar no modo API."
+            "{} precisa de chave informada na tela Ajustes > Agentes via API para executar no modo API.",
+            invocation.name,
         )
     };
-    write_provider_failure_result(
-        log_session,
-        run_id,
-        name,
-        cli,
-        provider,
-        role,
-        output_path,
-        model,
-        status,
-        "blocked",
-        &note,
-        0,
-        None,
-    )
+    write_provider_failure_result(invocation, model, status, "blocked", &note, 0, None)
 }
 
 pub(crate) fn write_provider_error_result(
-    log_session: &LogSession,
-    run_id: &str,
-    name: &str,
-    cli: &str,
-    provider: &str,
-    role: &str,
-    output_path: &Path,
+    invocation: &ProviderInvocation,
     model: &str,
     status: &str,
     duration_ms: u128,
 ) -> EditorialAgentResult {
-    write_provider_failure_result(
-        log_session,
-        run_id,
-        name,
-        cli,
-        provider,
-        role,
-        output_path,
-        model,
-        status,
-        "error",
-        status,
-        duration_ms,
-        None,
-    )
+    write_provider_failure_result(invocation, model, status, "error", status, duration_ms, None)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_provider_failure_result(
-    log_session: &LogSession,
-    run_id: &str,
-    name: &str,
-    cli: &str,
-    provider: &str,
-    role: &str,
-    output_path: &Path,
+    invocation: &ProviderInvocation,
     model: &str,
     status: &str,
     tone: &str,
@@ -203,9 +181,13 @@ pub(crate) fn write_provider_failure_result(
         .map(|value| format!("- Cost projected USD: `{value:.6}`\n"))
         .unwrap_or_default();
     let _ = write_text_file(
-        output_path,
+        invocation.output_path,
         &format!(
-            "# {name} - {role}\n\n- CLI: `{cli}`\n- Provider: `{provider}`\n- Model: `{}`\n- Status: `{}`\n- Exit code: `unknown`\n- Duration ms: `{duration_ms}`\n{}{}\n## Stdout\n\n```text\n\n```\n\n## Stderr\n\n```text\n{}\n```\n",
+            "# {} - {}\n\n- CLI: `{}`\n- Provider: `{}`\n- Model: `{}`\n- Status: `{}`\n- Exit code: `unknown`\n- Duration ms: `{duration_ms}`\n{}{}\n## Stdout\n\n```text\n\n```\n\n## Stderr\n\n```text\n{}\n```\n",
+            invocation.name,
+            invocation.role,
+            invocation.cli,
+            invocation.provider,
             sanitize_text(model, 120),
             safe_status,
             projected_line,
@@ -218,22 +200,22 @@ pub(crate) fn write_provider_failure_result(
         ),
     );
     let result = EditorialAgentResult {
-        name: name.to_string(),
-        role: role.to_string(),
-        cli: cli.to_string(),
+        name: invocation.name.to_string(),
+        role: invocation.role.to_string(),
+        cli: invocation.cli.to_string(),
         tone: tone.to_string(),
         status: safe_status,
         duration_ms,
         exit_code: None,
-        output_path: output_path.to_string_lossy().to_string(),
+        output_path: invocation.output_path.to_string_lossy().to_string(),
         usage_input_tokens: None,
         usage_output_tokens: None,
         cost_usd: None,
         cost_estimated: None,
     };
     log_editorial_agent_finished(
-        log_session,
-        run_id,
+        invocation.log_session,
+        invocation.run_id,
         &result,
         None,
         Some(safe_note.len()),
@@ -359,31 +341,35 @@ pub(crate) fn log_provider_api_started(
     );
 }
 
-pub(crate) fn run_openai_api_agent(
-    log_session: &LogSession,
-    run_id: &str,
-    role: &str,
-    prompt: String,
-    attachments: &[AttachmentManifestEntry],
-    output_path: &Path,
-    timeout: Option<Duration>,
-    config: &AiProviderConfig,
-    cost_guard: Option<ProviderCostGuard>,
-) -> EditorialAgentResult {
+pub(crate) fn run_openai_api_agent(request: EditorialAgentRequest) -> EditorialAgentResult {
+    let EditorialAgentRequest {
+        log_session,
+        run_id,
+        role,
+        prompt,
+        attachments,
+        output_path,
+        timeout,
+        config,
+        cost_guard,
+    } = request;
     let started = Instant::now();
     let name = "Codex";
     let cli = "openai-api";
     let provider = "openai";
     let model_hint = "gpt-5.4";
+    let invocation = ProviderInvocation {
+        log_session,
+        run_id,
+        name,
+        cli,
+        provider,
+        role,
+        output_path,
+    };
     let Some((api_key, key_source)) = provider_key_for_agent(config, "codex") else {
         return write_provider_missing_key_result(
-            log_session,
-            run_id,
-            name,
-            cli,
-            provider,
-            role,
-            output_path,
+            &invocation,
             model_hint,
             provider_remote_present(config, "codex"),
         );
@@ -392,14 +378,8 @@ pub(crate) fn run_openai_api_agent(
     let max_tokens = api_role_max_tokens(role);
     let input_estimate_chars = api_input_estimate_chars(&prompt, attachments, provider);
     if let Some(result) = api_cost_preflight_result(
-        log_session,
-        run_id,
-        name,
-        cli,
-        provider,
-        role,
+        &invocation,
         input_estimate_chars,
-        output_path,
         max_tokens,
         cost_guard.as_ref(),
         started.elapsed().as_millis(),
@@ -412,13 +392,7 @@ pub(crate) fn run_openai_api_agent(
         Err(error) => {
             let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
             return write_provider_error_result(
-                log_session,
-                run_id,
-                name,
-                cli,
-                provider,
-                role,
-                output_path,
+                &invocation,
                 model_hint,
                 &status,
                 started.elapsed().as_millis(),
@@ -431,13 +405,7 @@ pub(crate) fn run_openai_api_agent(
         Err(error) => {
             let status = sanitize_text(&format!("ATTACHMENT_ERROR: {error}"), 240);
             return write_provider_error_result(
-                log_session,
-                run_id,
-                name,
-                cli,
-                provider,
-                role,
-                output_path,
+                &invocation,
                 &model,
                 &status,
                 started.elapsed().as_millis(),
@@ -487,13 +455,7 @@ pub(crate) fn run_openai_api_agent(
                     240,
                 );
                 return write_provider_error_result(
-                    log_session,
-                    run_id,
-                    name,
-                    cli,
-                    provider,
-                    role,
-                    output_path,
+                    &invocation,
                     &model,
                     &status,
                     started.elapsed().as_millis(),
@@ -537,13 +499,7 @@ pub(crate) fn run_openai_api_agent(
         Err(error) => {
             let status = sanitize_text(&format!("PROVIDER_NETWORK_ERROR: {error}"), 240);
             write_provider_error_result(
-                log_session,
-                run_id,
-                name,
-                cli,
-                provider,
-                role,
-                output_path,
+                &invocation,
                 &model,
                 &status,
                 started.elapsed().as_millis(),
@@ -552,31 +508,35 @@ pub(crate) fn run_openai_api_agent(
     }
 }
 
-pub(crate) fn run_anthropic_api_agent(
-    log_session: &LogSession,
-    run_id: &str,
-    role: &str,
-    prompt: String,
-    attachments: &[AttachmentManifestEntry],
-    output_path: &Path,
-    timeout: Option<Duration>,
-    config: &AiProviderConfig,
-    cost_guard: Option<ProviderCostGuard>,
-) -> EditorialAgentResult {
+pub(crate) fn run_anthropic_api_agent(request: EditorialAgentRequest) -> EditorialAgentResult {
+    let EditorialAgentRequest {
+        log_session,
+        run_id,
+        role,
+        prompt,
+        attachments,
+        output_path,
+        timeout,
+        config,
+        cost_guard,
+    } = request;
     let started = Instant::now();
     let name = "Claude";
     let cli = "anthropic-api";
     let provider = "anthropic";
     let model_hint = "claude-opus-4-1-20250805";
+    let invocation = ProviderInvocation {
+        log_session,
+        run_id,
+        name,
+        cli,
+        provider,
+        role,
+        output_path,
+    };
     let Some((api_key, key_source)) = provider_key_for_agent(config, "claude") else {
         return write_provider_missing_key_result(
-            log_session,
-            run_id,
-            name,
-            cli,
-            provider,
-            role,
-            output_path,
+            &invocation,
             model_hint,
             provider_remote_present(config, "claude"),
         );
@@ -585,14 +545,8 @@ pub(crate) fn run_anthropic_api_agent(
     let max_tokens = api_role_max_tokens(role);
     let input_estimate_chars = api_input_estimate_chars(&prompt, attachments, provider);
     if let Some(result) = api_cost_preflight_result(
-        log_session,
-        run_id,
-        name,
-        cli,
-        provider,
-        role,
+        &invocation,
         input_estimate_chars,
-        output_path,
         max_tokens,
         cost_guard.as_ref(),
         started.elapsed().as_millis(),
@@ -605,13 +559,7 @@ pub(crate) fn run_anthropic_api_agent(
         Err(error) => {
             let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
             return write_provider_error_result(
-                log_session,
-                run_id,
-                name,
-                cli,
-                provider,
-                role,
-                output_path,
+                &invocation,
                 model_hint,
                 &status,
                 started.elapsed().as_millis(),
@@ -624,13 +572,7 @@ pub(crate) fn run_anthropic_api_agent(
         Err(error) => {
             let status = sanitize_text(&format!("ATTACHMENT_ERROR: {error}"), 240);
             return write_provider_error_result(
-                log_session,
-                run_id,
-                name,
-                cli,
-                provider,
-                role,
-                output_path,
+                &invocation,
                 &model,
                 &status,
                 started.elapsed().as_millis(),
@@ -682,13 +624,7 @@ pub(crate) fn run_anthropic_api_agent(
                     240,
                 );
                 return write_provider_error_result(
-                    log_session,
-                    run_id,
-                    name,
-                    cli,
-                    provider,
-                    role,
-                    output_path,
+                    &invocation,
                     &model,
                     &status,
                     started.elapsed().as_millis(),
@@ -732,13 +668,7 @@ pub(crate) fn run_anthropic_api_agent(
         Err(error) => {
             let status = sanitize_text(&format!("PROVIDER_NETWORK_ERROR: {error}"), 240);
             write_provider_error_result(
-                log_session,
-                run_id,
-                name,
-                cli,
-                provider,
-                role,
-                output_path,
+                &invocation,
                 &model,
                 &status,
                 started.elapsed().as_millis(),
@@ -747,31 +677,35 @@ pub(crate) fn run_anthropic_api_agent(
     }
 }
 
-pub(crate) fn run_gemini_api_agent(
-    log_session: &LogSession,
-    run_id: &str,
-    role: &str,
-    prompt: String,
-    attachments: &[AttachmentManifestEntry],
-    output_path: &Path,
-    timeout: Option<Duration>,
-    config: &AiProviderConfig,
-    cost_guard: Option<ProviderCostGuard>,
-) -> EditorialAgentResult {
+pub(crate) fn run_gemini_api_agent(request: EditorialAgentRequest) -> EditorialAgentResult {
+    let EditorialAgentRequest {
+        log_session,
+        run_id,
+        role,
+        prompt,
+        attachments,
+        output_path,
+        timeout,
+        config,
+        cost_guard,
+    } = request;
     let started = Instant::now();
     let name = "Gemini";
     let cli = "gemini-api";
     let provider = "gemini";
     let model_hint = "gemini-2.5-pro";
+    let invocation = ProviderInvocation {
+        log_session,
+        run_id,
+        name,
+        cli,
+        provider,
+        role,
+        output_path,
+    };
     let Some((api_key, key_source)) = provider_key_for_agent(config, "gemini") else {
         return write_provider_missing_key_result(
-            log_session,
-            run_id,
-            name,
-            cli,
-            provider,
-            role,
-            output_path,
+            &invocation,
             model_hint,
             provider_remote_present(config, "gemini"),
         );
@@ -780,14 +714,8 @@ pub(crate) fn run_gemini_api_agent(
     let max_tokens = api_role_max_tokens(role);
     let input_estimate_chars = api_input_estimate_chars(&prompt, attachments, provider);
     if let Some(result) = api_cost_preflight_result(
-        log_session,
-        run_id,
-        name,
-        cli,
-        provider,
-        role,
+        &invocation,
         input_estimate_chars,
-        output_path,
         max_tokens,
         cost_guard.as_ref(),
         started.elapsed().as_millis(),
@@ -800,13 +728,7 @@ pub(crate) fn run_gemini_api_agent(
         Err(error) => {
             let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
             return write_provider_error_result(
-                log_session,
-                run_id,
-                name,
-                cli,
-                provider,
-                role,
-                output_path,
+                &invocation,
                 model_hint,
                 &status,
                 started.elapsed().as_millis(),
@@ -819,13 +741,7 @@ pub(crate) fn run_gemini_api_agent(
         Err(error) => {
             let status = sanitize_text(&format!("ATTACHMENT_ERROR: {error}"), 240);
             return write_provider_error_result(
-                log_session,
-                run_id,
-                name,
-                cli,
-                provider,
-                role,
-                output_path,
+                &invocation,
                 &model,
                 &status,
                 started.elapsed().as_millis(),
@@ -883,13 +799,7 @@ pub(crate) fn run_gemini_api_agent(
                     240,
                 );
                 return write_provider_error_result(
-                    log_session,
-                    run_id,
-                    name,
-                    cli,
-                    provider,
-                    role,
-                    output_path,
+                    &invocation,
                     &model,
                     &status,
                     started.elapsed().as_millis(),
@@ -933,13 +843,7 @@ pub(crate) fn run_gemini_api_agent(
         Err(error) => {
             let status = sanitize_text(&format!("PROVIDER_NETWORK_ERROR: {error}"), 240);
             write_provider_error_result(
-                log_session,
-                run_id,
-                name,
-                cli,
-                provider,
-                role,
-                output_path,
+                &invocation,
                 &model,
                 &status,
                 started.elapsed().as_millis(),

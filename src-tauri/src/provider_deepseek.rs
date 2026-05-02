@@ -17,32 +17,35 @@
 // and status string is identical to the lib.rs source it replaces.
 
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
 
 use crate::logging::{write_log_record, LogEventInput, LogSession};
 use crate::provider_retry::send_with_retry;
+use crate::provider_runners::EditorialAgentRequest;
 use crate::session_controls::{
-    api_role_max_tokens, estimate_provider_cost, provider_cost, usage_tokens, ProviderCostGuard,
+    api_role_max_tokens, estimate_provider_cost, provider_cost, usage_tokens,
 };
 use crate::{
     api_error_message, effective_provider_key, extract_maestro_status, first_env_value,
     log_editorial_agent_finished, sanitize_short, sanitize_text, write_text_file,
-    AiProviderConfig, EditorialAgentResult,
+    EditorialAgentResult,
 };
 
-pub(crate) fn run_deepseek_api_agent(
-    log_session: &LogSession,
-    run_id: &str,
-    role: &str,
-    prompt: String,
-    output_path: &Path,
-    timeout: Option<Duration>,
-    config: &AiProviderConfig,
-    cost_guard: Option<ProviderCostGuard>,
-) -> EditorialAgentResult {
+pub(crate) fn run_deepseek_api_agent(request: EditorialAgentRequest) -> EditorialAgentResult {
+    let EditorialAgentRequest {
+        log_session,
+        run_id,
+        role,
+        prompt,
+        attachments: _,
+        output_path,
+        timeout,
+        config,
+        cost_guard,
+    } = request;
     let started = Instant::now();
     let model_hint = deepseek_model();
     let name = "DeepSeek";

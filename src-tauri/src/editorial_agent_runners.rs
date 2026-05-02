@@ -65,6 +65,7 @@ use crate::logging::{write_log_record, LogEventInput, LogSession};
 use crate::provider_deepseek::run_deepseek_api_agent;
 use crate::provider_runners::{
     run_anthropic_api_agent, run_gemini_api_agent, run_openai_api_agent, write_provider_error_result,
+    EditorialAgentRequest, ProviderInvocation,
 };
 use crate::session_controls::ProviderCostGuard;
 use crate::session_evidence::AttachmentManifestEntry;
@@ -129,62 +130,34 @@ fn run_provider_api_agent(
     config: &AiProviderConfig,
     cost_guard: Option<ProviderCostGuard>,
 ) -> EditorialAgentResult {
+    let request = EditorialAgentRequest {
+        log_session,
+        run_id,
+        role,
+        prompt,
+        attachments,
+        output_path,
+        timeout,
+        config,
+        cost_guard,
+    };
     match spec.key {
-        "claude" => run_anthropic_api_agent(
-            log_session,
-            run_id,
-            role,
-            prompt,
-            attachments,
-            output_path,
-            timeout,
-            config,
-            cost_guard,
-        ),
-        "codex" => run_openai_api_agent(
-            log_session,
-            run_id,
-            role,
-            prompt,
-            attachments,
-            output_path,
-            timeout,
-            config,
-            cost_guard,
-        ),
-        "gemini" => run_gemini_api_agent(
-            log_session,
-            run_id,
-            role,
-            prompt,
-            attachments,
-            output_path,
-            timeout,
-            config,
-            cost_guard,
-        ),
-        "deepseek" => run_deepseek_api_agent(
-            log_session,
-            run_id,
-            role,
-            prompt,
-            output_path,
-            timeout,
-            config,
-            cost_guard,
-        ),
-        _ => write_provider_error_result(
-            log_session,
-            run_id,
-            spec.name,
-            api_cli_for_agent(spec.key),
-            "unknown",
-            role,
-            output_path,
-            "unknown",
-            "API_PROVIDER_NOT_SUPPORTED",
-            0,
-        ),
+        "claude" => run_anthropic_api_agent(request),
+        "codex" => run_openai_api_agent(request),
+        "gemini" => run_gemini_api_agent(request),
+        "deepseek" => run_deepseek_api_agent(request),
+        _ => {
+            let invocation = ProviderInvocation {
+                log_session: request.log_session,
+                run_id: request.run_id,
+                name: spec.name,
+                cli: api_cli_for_agent(spec.key),
+                provider: "unknown",
+                role: request.role,
+                output_path: request.output_path,
+            };
+            write_provider_error_result(&invocation, "unknown", "API_PROVIDER_NOT_SUPPORTED", 0)
+        }
     }
 }
 

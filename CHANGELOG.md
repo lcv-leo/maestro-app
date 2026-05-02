@@ -4,6 +4,45 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.4] - 2026-05-02
+
+Pure refactor batch — extracted [src-tauri/src/editorial_io.rs](src-tauri/src/editorial_io.rs) (10 items, ~256 lines incl. doc header) per `docs/code-split-plan.md`. No behavior change.
+
+### Extracted from lib.rs
+- **File I/O**: `write_text_file`, `read_text_file` — both sandboxed via `app_paths::checked_data_child_path`.
+- **Path helper**: `command_working_dir_for_output` — derives spawn working directory from per-agent output path with `app_root` fallback.
+- **Result builder**: `editorial_session_result` + `SessionResultContext<'a>` (now `pub(crate)`) — assembles `EditorialSessionResult`, runs `finalize_running_agent_artifacts` v0.3.16 NB-2 guard.
+- **NDJSON loggers**: `log_editorial_agent_finished` / `log_editorial_agent_spawned` / `log_editorial_agent_running` — emit `session.agent.finished/spawned/running` schema_version=2 events.
+- **Output parsers**: `extract_maestro_status` (parses MAESTRO_STATUS contract from stdout), `extract_stdout_block` (extracts fenced ## Stdout body from agent artifacts), `api_error_message` (best-effort error message from JSON HTTP-error bodies).
+
+### Re-export shim in lib.rs
+```rust
+pub(crate) use crate::editorial_io::{
+    api_error_message, command_working_dir_for_output, editorial_session_result,
+    extract_maestro_status, extract_stdout_block, log_editorial_agent_finished,
+    log_editorial_agent_running, log_editorial_agent_spawned, read_text_file,
+    write_text_file, SessionResultContext,
+};
+```
+Preserves all 10 unqualified call sites in `provider_runners.rs`, `provider_deepseek.rs`, `editorial_agent_runners.rs`, `command_spawn.rs`, and the 10 SessionResultContext call sites in `run_editorial_session_core`.
+
+### Cleanup in lib.rs
+- `crate::command_spawn::CommandProgressContext` import removed (now used only inside editorial_io.rs).
+- `crate::editorial_helpers::finalize_running_agent_artifacts` import gated `#[cfg(test)]` (the only remaining lib.rs caller is the test in `tests::finalize_running_agent_artifacts_rewrites_running_to_failed_no_output`).
+
+### Validation
+- `cargo test --locked --lib`: **93 passed** (zero regressions vs v0.5.3).
+- `cargo clippy --locked --no-deps --all-targets`: **0 lib + 0 test warnings** (same as v0.5.3 baseline).
+- `npm run build`: clean.
+- Function-body byte-parity diff vs v0.5.3 (commit 116154f): clean.
+- lib.rs: 4054 → 3847 lines (−207 net). editorial_io.rs: 256 lines new.
+
+### Cross-review pré-Commit & Sync
+Cross-review-v2 quadrilateral pendente (HARD GATE 2026-04-26).
+
+### Versioning
+Patch bump (v0.5.3 → v0.5.4) — pure refactor, no signature/dep/feature changes (workspace `version-control.md` patch criterion: "ajustes menores").
+
 ## [v0.5.3] - 2026-05-02
 
 Operator-driven hardening pass: D (proactive sweep) + B subset (items_after_test_module fix + CLI cancel artifact status refinement + duplicate `#[allow]` cleanup).

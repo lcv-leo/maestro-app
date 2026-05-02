@@ -28,6 +28,7 @@ mod ai_probes;
 mod api_payloads;
 mod app_init;
 mod app_paths;
+mod editorial_io;
 mod session_cancel;
 mod cli_adapter;
 mod cloudflare;
@@ -127,12 +128,14 @@ use crate::cloudflare::{run_cloudflare_probe, token_source_label};
 #[cfg(test)]
 use crate::cloudflare::ai_provider_secret_values;
 use crate::command_path::{command_search_dirs, resolve_command};
-use crate::command_spawn::{command_check, CommandProgressContext};
+use crate::command_spawn::command_check;
 use crate::editorial_agent_runners::run_editorial_agent_for_spec;
 use crate::editorial_helpers::{
-    filter_existing_agents_to_active_set, finalize_running_agent_artifacts,
-    resolve_effective_active_agents, review_complaint_fingerprint, FinalizeRunningArtifactsGuard,
+    filter_existing_agents_to_active_set, resolve_effective_active_agents,
+    review_complaint_fingerprint, FinalizeRunningArtifactsGuard,
 };
+#[cfg(test)]
+use crate::editorial_helpers::finalize_running_agent_artifacts;
 use crate::editorial_inputs::{
     build_active_agents_resolved_log_context, resolve_time_budget_anchor,
 };
@@ -2315,68 +2318,12 @@ fn run_editorial_session_core(
     ))
 }
 
-pub(crate) fn write_text_file(path: &Path, text: &str) -> Result<(), String> {
-    let path = checked_data_child_path(path)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create artifact dir: {error}"))?;
-    }
-    fs::write(&path, text).map_err(|error| format!("failed to write artifact: {error}"))
-}
-
-pub(crate) fn read_text_file(path: &Path) -> Result<String, String> {
-    let path = checked_data_child_path(path)?;
-    fs::read_to_string(&path).map_err(|error| format!("failed to read artifact: {error}"))
-}
-
-struct SessionResultContext<'a> {
-    run_id: &'a str,
-    session_dir: &'a Path,
-    prompt_path: &'a Path,
-    protocol_path: &'a Path,
-    active_agents: &'a [String],
-    max_session_cost_usd: Option<f64>,
-    max_session_minutes: Option<u64>,
-    observed_cost_usd: f64,
-    links_path: Option<&'a PathBuf>,
-    attachments_manifest_path: Option<&'a PathBuf>,
-    human_log_path: &'a Path,
-}
-
-fn editorial_session_result(
-    context: &SessionResultContext<'_>,
-    final_path: Option<&PathBuf>,
-    minutes_path: &Path,
-    draft_path: Option<PathBuf>,
-    agents: Vec<EditorialAgentResult>,
-    consensus_ready: bool,
-    status: &str,
-) -> EditorialSessionResult {
-    finalize_running_agent_artifacts(&context.session_dir.join("agent-runs"));
-    EditorialSessionResult {
-        run_id: context.run_id.to_string(),
-        session_dir: context.session_dir.to_string_lossy().to_string(),
-        final_markdown_path: final_path.map(|path| path.to_string_lossy().to_string()),
-        session_minutes_path: minutes_path.to_string_lossy().to_string(),
-        prompt_path: context.prompt_path.to_string_lossy().to_string(),
-        protocol_path: context.protocol_path.to_string_lossy().to_string(),
-        draft_path: draft_path.map(|path| path.to_string_lossy().to_string()),
-        agents,
-        consensus_ready,
-        status: status.to_string(),
-        active_agents: context.active_agents.to_vec(),
-        max_session_cost_usd: context.max_session_cost_usd,
-        max_session_minutes: context.max_session_minutes,
-        observed_cost_usd: Some(context.observed_cost_usd),
-        links_path: context
-            .links_path
-            .map(|path| path.to_string_lossy().to_string()),
-        attachments_manifest_path: context
-            .attachments_manifest_path
-            .map(|path| path.to_string_lossy().to_string()),
-        human_log_path: Some(context.human_log_path.to_string_lossy().to_string()),
-    }
-}
+pub(crate) use crate::editorial_io::{
+    api_error_message, command_working_dir_for_output, editorial_session_result,
+    extract_maestro_status, extract_stdout_block, log_editorial_agent_finished,
+    log_editorial_agent_running, log_editorial_agent_spawned, read_text_file,
+    write_text_file, SessionResultContext,
+};
 
 
 
@@ -2396,160 +2343,6 @@ pub(crate) struct SessionArtifact {
 
 
 
-pub(crate) fn log_editorial_agent_finished(
-    log_session: &LogSession,
-    run_id: &str,
-    result: &EditorialAgentResult,
-    stdout_chars: Option<usize>,
-    stderr_chars: Option<usize>,
-    resolved_path: Option<String>,
-    timed_out: bool,
-) {
-    let _ = write_log_record(
-        log_session,
-        LogEventInput {
-            level: if result.tone == "ok" {
-                "info".to_string()
-            } else if result.tone == "warn" || result.tone == "blocked" {
-                "warn".to_string()
-            } else {
-                "error".to_string()
-            },
-            category: "session.agent.finished".to_string(),
-            message: "editorial agent process finished".to_string(),
-            context: Some(json!({
-                "run_id": sanitize_short(run_id, 120),
-                "agent": result.name,
-                "role": result.role,
-                "cli": result.cli,
-                "tone": result.tone,
-                "status": result.status,
-                "duration_ms": result.duration_ms,
-                "exit_code": result.exit_code,
-                "timed_out": timed_out,
-                "resolved_path": resolved_path,
-                "stdout_chars": stdout_chars,
-                "stderr_chars": stderr_chars,
-                "usage_input_tokens": result.usage_input_tokens,
-                "usage_output_tokens": result.usage_output_tokens,
-                "cost_usd": result.cost_usd,
-                "cost_estimated": result.cost_estimated,
-                "output_path": result.output_path
-            })),
-        },
-    );
-}
-
-pub(crate) fn command_working_dir_for_output(output_path: &Path) -> PathBuf {
-    output_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(app_root)
-}
-
-pub(crate) fn log_editorial_agent_spawned(
-    progress: &CommandProgressContext<'_>,
-    child_id: u32,
-    path: &Path,
-    working_dir: &Path,
-) {
-    let _ = write_log_record(
-        progress.log_session,
-        LogEventInput {
-            level: "info".to_string(),
-            category: "session.agent.spawned".to_string(),
-            message: "editorial agent child process spawned".to_string(),
-            context: Some(json!({
-                "run_id": sanitize_short(progress.run_id, 120),
-                "agent": progress.agent,
-                "role": progress.role,
-                "cli": progress.cli,
-                "child_pid": child_id,
-                "resolved_path": path.to_string_lossy().to_string(),
-                "working_dir": working_dir.to_string_lossy().to_string(),
-                "output_path": progress.output_path.to_string_lossy().to_string()
-            })),
-        },
-    );
-}
-
-pub(crate) fn log_editorial_agent_running(
-    progress: &CommandProgressContext<'_>,
-    child_id: u32,
-    elapsed: Duration,
-    stdout_bytes: u64,
-    stderr_bytes: u64,
-) {
-    let _ = write_log_record(
-        progress.log_session,
-        LogEventInput {
-            level: "info".to_string(),
-            category: "session.agent.running".to_string(),
-            message: "editorial agent still running".to_string(),
-            context: Some(json!({
-                "run_id": sanitize_short(progress.run_id, 120),
-                "agent": progress.agent,
-                "role": progress.role,
-                "cli": progress.cli,
-                "child_pid": child_id,
-                "elapsed_seconds": elapsed.as_secs(),
-                "stdout_bytes_so_far": stdout_bytes,
-                "stderr_bytes_so_far": stderr_bytes,
-                "working_dir": command_working_dir_for_output(progress.output_path).to_string_lossy().to_string(),
-                "output_path": progress.output_path.to_string_lossy().to_string()
-            })),
-        },
-    );
-}
-
-pub(crate) fn extract_maestro_status(output: &str) -> Option<&'static str> {
-    output.lines().find_map(|line| {
-        let normalized = line.trim().to_ascii_uppercase();
-        if normalized == "MAESTRO_STATUS: READY" {
-            Some("READY")
-        } else if normalized == "MAESTRO_STATUS: NOT_READY" {
-            Some("NOT_READY")
-        } else {
-            None
-        }
-    })
-}
-
-pub(crate) fn extract_stdout_block(artifact: &str) -> Option<&str> {
-    let marker = "## Stdout\n\n```text\n";
-    let start = artifact.find(marker)? + marker.len();
-    let rest = &artifact[start..];
-    let end = rest.find("\n```\n\n## Stderr")?;
-    Some(rest[..end].trim())
-}
-
-
-pub(crate) fn api_error_message(body: &str) -> String {
-    if body.trim().is_empty() {
-        return "sem detalhe na resposta".to_string();
-    }
-
-    if let Ok(value) = serde_json::from_str::<Value>(body) {
-        if let Some(message) = value
-            .pointer("/error/message")
-            .or_else(|| value.pointer("/error/status"))
-            .or_else(|| value.pointer("/error/code"))
-            .and_then(Value::as_str)
-        {
-            return sanitize_text(message, 180);
-        }
-
-        if let Some(message) = value
-            .get("error")
-            .and_then(Value::as_str)
-            .or_else(|| value.get("message").and_then(Value::as_str))
-        {
-            return sanitize_text(message, 180);
-        }
-    }
-
-    sanitize_text(body, 180)
-}
 
 
 

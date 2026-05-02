@@ -45,9 +45,9 @@ pub(crate) fn app_root() -> PathBuf {
 
     #[cfg(test)]
     {
-        return PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target")
-            .join("maestro-editorial-ai-tests");
+            .join("maestro-editorial-ai-tests")
     }
 
     #[cfg(not(test))]

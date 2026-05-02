@@ -397,7 +397,7 @@ pub(crate) fn is_known_document_attachment(entry: &AttachmentManifestEntry) -> b
 }
 
 pub(crate) fn attachment_payload_base64_chars(entry: &AttachmentManifestEntry) -> usize {
-    ((entry.size_bytes as usize + 2) / 3) * 4
+    (entry.size_bytes as usize).div_ceil(3) * 4
 }
 
 fn attachment_extension(entry: &AttachmentManifestEntry) -> String {

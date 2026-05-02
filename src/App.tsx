@@ -355,7 +355,7 @@ const initialAiProviderChecks: AiProviderProbeRow[] = [
 const credentialStorageModes = [
   { mode: 'local_json', label: 'JSON local', detail: 'configuracoes e segredos em JSON ignorado' },
   { mode: 'windows_env', label: 'Env var Windows', detail: 'segredos em env var; configs em JSON' },
-  { mode: 'cloudflare', label: 'Cloudflare', detail: 'maestro_db + Secrets Store remoto' },
+  { mode: 'cloudflare', label: 'Cloudflare', detail: 'maestro_db + Secrets Store remoto (execucao local exige MAESTRO_*_API_KEY em env)' },
 ] satisfies Array<{ mode: CredentialStorageMode; label: string; detail: string }>;
 
 const storageModeSummaries: Record<CredentialStorageMode, { title: string; detail: string }> = {
@@ -369,7 +369,8 @@ const storageModeSummaries: Record<CredentialStorageMode, { title: string; detai
   },
   cloudflare: {
     title: 'Cloudflare remoto',
-    detail: 'Configuracoes em D1 maestro_db; segredos no Cloudflare Secrets Store.',
+    detail:
+      'Configuracoes em D1 maestro_db; segredos centralizados no Cloudflare Secrets Store. Importante: o app nao busca segredos remotos em runtime; para executar peers via API localmente, mantenha MAESTRO_OPENAI_API_KEY / MAESTRO_ANTHROPIC_API_KEY / MAESTRO_GEMINI_API_KEY / MAESTRO_DEEPSEEK_API_KEY em env vars (ou na config local). Esse modo e escolha de armazenamento canonico, nao alimenta execucao local sozinho.',
   },
 };
 

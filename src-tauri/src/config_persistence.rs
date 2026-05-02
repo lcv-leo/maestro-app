@@ -46,7 +46,7 @@
 // source (commit 254e5a3).
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 
 use serde_json::{json, Value};
 
@@ -63,7 +63,7 @@ use crate::{
 };
 
 pub(crate) fn persist_bootstrap_config(
-    path: &PathBuf,
+    path: &Path,
     config: &BootstrapConfig,
 ) -> Result<(), String> {
     let path = checked_data_child_path(path)?;
@@ -77,7 +77,7 @@ pub(crate) fn persist_bootstrap_config(
 }
 
 pub(crate) fn persist_ai_provider_config(
-    path: &PathBuf,
+    path: &Path,
     config: &AiProviderConfig,
 ) -> Result<(), String> {
     let path = checked_data_child_path(path)?;
@@ -91,7 +91,7 @@ pub(crate) fn persist_ai_provider_config(
 }
 
 pub(crate) fn persist_ai_provider_cloudflare_marker(
-    path: &PathBuf,
+    path: &Path,
     config: &AiProviderConfig,
 ) -> Result<(), String> {
     let marker = AiProviderConfig {

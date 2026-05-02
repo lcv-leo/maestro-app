@@ -4,6 +4,49 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.47] - 2026-05-02
+
+Bundled hardening pass closing the remaining P1 set from Codex's audit (#2 DOCX/paste sanitization + CSP allowlist, #3 Cloudflare Secrets Store mode UI clarification) plus the trivial half of Gemini's clippy hygiene findings (5 of 7 fixes; the architectural ones — `too_many_arguments` × 7 and `items_after_test_module` — stay deferred for v0.4.0 with documented rationale).
+
+### (1) DOCX / paste HTML sanitization (Codex #2 P1)
+- [src/editor/posteditor/PostEditor.tsx](src/editor/posteditor/PostEditor.tsx) `handleWordUpload` — Mammoth-converted HTML now passes through `DOMPurify.sanitize(htmlResult.value, { ADD_ATTR: ['style', 'data-width'] })` before `editor.chain().focus().insertContent(...)`. Previously raw `htmlResult.value` was inserted into Tiptap; a malicious `.docx` (e.g. opened from email/web) could carry payloads such as `<img onerror=...>`, `javascript:` URLs, or unknown attributes that survive Tiptap's schema parsing. Markdown import (`markdownImport.ts:77`) already used DOMPurify; this mirrors that posture.
+- [src/editor/posteditor/editor/extensions.ts](src/editor/posteditor/editor/extensions.ts) `WordPasteHandler.transformPastedHTML` — final return is now `DOMPurify.sanitize(clean, { ADD_ATTR: ['style', 'data-width'] })`. The existing Mso/xmlns/comment-strip layer is preserved (it removes Word bloatware), and DOMPurify is the defense-in-depth pass that drops event handlers, dangerous URL protocols, and embedded SVG with scripts. Inline styles for TextStyle/Color/FontFamily/TextIndent/EditorSpacing continue to be preserved via the explicit `ADD_ATTR: ['style']` whitelist.
+
+### (2) Tauri webview CSP allowlist (Codex #2 P2)
+- [src-tauri/tauri.conf.json](src-tauri/tauri.conf.json) `app.security.csp` — replaced `null` with a baseline allowlist:
+  - `default-src 'self'` — block by default.
+  - `img-src 'self' data: blob: https:` / `media-src 'self' data: blob: https:` — Tiptap inserts images via data URIs, blob URLs, and arbitrary HTTPS sources (operator can paste image URLs).
+  - `font-src 'self' data:` — bundled fonts.
+  - `style-src 'self' 'unsafe-inline'` — Tiptap's TextStyle/Color/FontFamily/FontSize/TextIndent/EditorSpacing all rely on inline `style` attributes.
+  - `script-src 'self'` — **NO `unsafe-inline`**, the actual XSS hardening. Vite production bundles all JS into `dist/assets/*.js` served from `'self'`, so this should not break the app.
+  - `frame-src 'self' https://www.youtube-nocookie.com https://www.youtube.com` — `CustomResizableYoutube` extension uses YouTube embeds with `nocookie: true`.
+  - `connect-src 'self' ipc: http://ipc.localhost https://api.openai.com https://api.anthropic.com https://generativelanguage.googleapis.com https://api.deepseek.com https://api.cloudflare.com` — Tauri 2 IPC + the 4 provider APIs + Cloudflare D1/Secrets Store.
+
+### (3) Cloudflare Secrets Store mode UI clarification (Codex #3 P1)
+- [src/App.tsx:358](src/App.tsx#L358) `credentialStorageModes` Cloudflare row detail — was `'maestro_db + Secrets Store remoto'`, now `'maestro_db + Secrets Store remoto (execucao local exige MAESTRO_*_API_KEY em env)'`.
+- [src/App.tsx:370-373](src/App.tsx#L370-L373) `storageModeSummaries.cloudflare` — expanded the detail copy to explain that the app does not fetch secrets from Cloudflare at runtime; for local execution the operator still needs `MAESTRO_OPENAI_API_KEY` / `MAESTRO_ANTHROPIC_API_KEY` / `MAESTRO_GEMINI_API_KEY` / `MAESTRO_DEEPSEEK_API_KEY` env vars (or local config). Cloudflare mode is a canonical-storage choice, not a path that unlocks local execution by itself. Codex's audit flagged the prior copy as "funcionalmente confuso"; this is the cheap option (a) from the operator decision matrix. Option (b) runtime fetch + (c) Worker/binding are still available for v0.4.x.
+
+### (4) Trivial clippy hygiene (Gemini findings, 5 of 7)
+- [src-tauri/src/app_paths.rs:48](src-tauri/src-tauri/src/app_paths.rs#L48) — dropped `return` on the last expression (`needless_return`).
+- [src-tauri/src/human_logs.rs:115](src-tauri/src-tauri/src/human_logs.rs#L115) — `elapsed % 300 != 0` → `!elapsed.is_multiple_of(300)` (Rust 1.87+ stable, `manual_is_multiple_of`).
+- [src-tauri/src/session_evidence.rs:400](src-tauri/src-tauri/src/session_evidence.rs#L400) — `((entry.size_bytes as usize + 2) / 3) * 4` → `(entry.size_bytes as usize).div_ceil(3) * 4` (Rust 1.73+ stable, `manual_div_ceil`). Math equivalence preserved (Base64 chars per 3 bytes, ceiling).
+- [src-tauri/src/config_persistence.rs:65,79,93](src-tauri/src-tauri/src/config_persistence.rs#L65) — three `&PathBuf` → `&Path` parameter swaps for `persist_bootstrap_config`, `persist_ai_provider_config`, `persist_ai_provider_cloudflare_marker` (`ptr_arg`). Call sites continue to work via deref coercion. Import switched from `std::path::PathBuf` to `std::path::Path`.
+- [src-tauri/src/lib.rs:3245](src-tauri/src-tauri/src/lib.rs#L3245) — `fs::create_dir_all(&session_dir.join(...))` → `fs::create_dir_all(session_dir.join(...))` (`needless_borrows_for_generic_args`).
+
+### Tests + Gates
+- `cargo test --locked --lib`: **88 passed** (same as v0.3.46, zero regressions). No new tests; existing coverage exercises all touched paths.
+- `cargo clippy --locked --no-deps --all-targets`: **7 lib + 8 test warnings** (down from 11 + 14 in v0.3.46). Remaining 7 are the architecturally-deferred set: `too_many_arguments` × 7 (refactor target for v0.4.0 with `EditorialAgentContext` struct) + `items_after_test_module` × 1 in lib.rs:2542 (requires moving `pub fn run()` 87-line block above the `mod tests` declaration; will resolve naturally as lib.rs splits continue per `docs/code-split-plan.md`).
+- `npm run build`: clean.
+
+### Cross-review pré-Commit & Sync
+Cross-review-v2 quadrilateral pendente (HARD GATE 2026-04-26).
+
+### Out of scope (still deferred)
+- `too_many_arguments` × 7 in `provider_runners.rs` + `provider_deepseek.rs`: requires Context Struct / Builder Pattern refactor; v0.4.0.
+- `items_after_test_module` in `lib.rs:2542`: 87-line `pub fn run()` move; cosmetic; will resolve as splits continue.
+- Codex #6 hardcoded model lists: real low-priority drift; defer until operator hits a stale fallback.
+- biome.json: not in pipeline; configuration without integration is bloat.
+
 ## [v0.3.46] - 2026-05-02
 
 Hardening pass closing the P0 set from Codex's read-only audit on HEAD `2ca92e7` (v0.3.45). All findings independently verified against current source before shipping. Three defensive fixes + CI gate that would have caught the v0.3.45 lockfile drift.

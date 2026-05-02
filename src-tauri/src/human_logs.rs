@@ -112,7 +112,7 @@ pub(crate) fn should_collapse_human_log_event(category: &str, context: &Value) -
                 .get("elapsed_seconds")
                 .and_then(Value::as_u64)
                 .unwrap_or_default();
-            elapsed == 0 || elapsed % 300 != 0
+            elapsed == 0 || !elapsed.is_multiple_of(300)
         }
         _ => false,
     }

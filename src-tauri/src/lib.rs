@@ -3242,7 +3242,7 @@ mod tests {
             &"Linha\n".repeat(120),
         )
         .unwrap();
-        fs::create_dir_all(&session_dir.join("agent-runs")).unwrap();
+        fs::create_dir_all(session_dir.join("agent-runs")).unwrap();
 
         let info = inspect_resumable_session_dir(&session_dir)
             .unwrap()

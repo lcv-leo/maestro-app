@@ -31,6 +31,7 @@ import { Typography } from '@tiptap/extension-typography';
 import YoutubeExtension from '@tiptap/extension-youtube';
 import { ReactNodeViewRenderer } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
+import DOMPurify from 'dompurify';
 import { common, createLowlight } from 'lowlight';
 import { Plugin, PluginKey } from 'prosemirror-state';
 import { Markdown } from 'tiptap-markdown';
@@ -590,7 +591,13 @@ export const WordPasteHandler = Extension.create({
             // IMPORTANTE: Deixamos TODOS os spans, text-indent e color passarem integralmente
             // porque eles serão interceptados e digeridos pelas extensões FontFamily, FontSize, Color e EditorSpacing.
 
-            return clean;
+            // Final defense-in-depth: pasted Word HTML can carry payloads that
+            // survive the Mso/xmlns strip above (event handlers on <img>, javascript:
+            // URLs, embedded SVG with scripts). DOMPurify removes those classes of
+            // attack while preserving the inline styles Tiptap relies on.
+            return DOMPurify.sanitize(clean, {
+              ADD_ATTR: ['style', 'data-width'],
+            });
           },
         },
       }),

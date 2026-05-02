@@ -50,6 +50,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
+import DOMPurify from 'dompurify';
 import type React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
@@ -370,8 +371,16 @@ export default function PostEditor({
           },
         );
 
-        const html = htmlResult.value;
-        editor.chain().focus().insertContent(html).run();
+        // Sanitize Mammoth output before inserting into Tiptap. Mammoth converts
+        // DOCX into HTML that can include <img>, <a>, inline styles, and
+        // arbitrary attributes coming from the source document — a malicious
+        // .docx (e.g. opened from email/web) could carry payloads such as
+        // event handlers or dangerous URLs. Markdown import already uses
+        // DOMPurify; mirror that posture here.
+        const sanitized = DOMPurify.sanitize(htmlResult.value, {
+          ADD_ATTR: ['style', 'data-width'],
+        });
+        editor.chain().focus().insertContent(sanitized).run();
         showNotification('Documento do Word importado com sucesso.', 'success');
       } catch (err) {
         showNotification(err instanceof Error ? err.message : 'Erro ao importar documento do Word.', 'error');

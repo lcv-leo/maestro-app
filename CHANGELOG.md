@@ -4,6 +4,43 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.5] - 2026-05-02
+
+Pure refactor batch — extracted [src-tauri/src/cloudflare_commands.rs](src-tauri/src/cloudflare_commands.rs) (~153 lines incl. doc header) per `docs/code-split-plan.md`. No behavior change.
+
+### Extracted from lib.rs
+- `cloudflare_env_snapshot` — Tauri command probing process env for `MAESTRO_CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_ACCOUNT_ID` / `CF_ACCOUNT_ID` and the matching API_TOKEN family. Returns scope (process / HKCU / HKLM) for each detected variable.
+- `dependency_preflight` (async) + `dependency_preflight_inner` (private) — Settings panel CLI/version checks for Claude / Codex / Gemini / Node / npm / cargo / gh plus Cloudflare env state + Wrangler hint. Async wrapper uses `spawn_blocking` to keep IPC thread free.
+- `verify_cloudflare_credentials` — Tauri command wrapping `cloudflare::run_cloudflare_probe` with `settings.cloudflare.verify_completed` NDJSON log emission.
+
+### Visibility upgrade
+`CloudflareEnvSnapshot` struct in lib.rs upgraded from private to `pub(crate)` (with all 6 fields `pub(crate)`) for cross-module access. `CloudflareProbeRequest` and `CloudflareProbeResult` were already `pub(crate)`.
+
+### Re-export shim in lib.rs
+```rust
+use crate::cloudflare_commands::{
+    cloudflare_env_snapshot, dependency_preflight, verify_cloudflare_credentials,
+};
+```
+Tauri's `generate_handler!` macro in `pub fn run()` resolves the 3 command identifiers from this `use` statement.
+
+### Cleanup in lib.rs
+- `crate::cloudflare::{run_cloudflare_probe, token_source_label}` import removed (now consumed only inside cloudflare_commands.rs).
+- `crate::command_spawn::command_check` import removed (now consumed only inside cloudflare_commands.rs::dependency_preflight_inner).
+
+### Validation
+- `cargo test --locked --lib`: **93 passed** (zero regressions vs v0.5.4).
+- `cargo clippy --locked --no-deps --all-targets`: **0 lib + 0 test warnings** (maintained v0.5.3+ baseline).
+- `npm run build`: clean.
+- Function-body byte-parity diff vs v0.5.4 (commit 812d988): clean.
+- lib.rs: 3847 → 3729 lines (−118 net). cloudflare_commands.rs: 153 lines new.
+
+### Cross-review pré-Commit & Sync
+Cross-review-v2 quadrilateral pendente (HARD GATE 2026-04-26).
+
+### Versioning
+Patch bump (v0.5.4 → v0.5.5) — pure refactor.
+
 ## [v0.5.4] - 2026-05-02
 
 Pure refactor batch — extracted [src-tauri/src/editorial_io.rs](src-tauri/src/editorial_io.rs) (10 items, ~256 lines incl. doc header) per `docs/code-split-plan.md`. No behavior change.

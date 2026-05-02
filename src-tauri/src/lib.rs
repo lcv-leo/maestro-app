@@ -1572,18 +1572,18 @@ fn run_editorial_session_core(
             context: Some(log_context),
         },
     );
-    let max_session_cost_usd =
-        sanitize_optional_positive_f64(request.max_session_cost_usd.or_else(|| {
-            saved_contract
-                .as_ref()
-                .and_then(|contract| contract.max_session_cost_usd)
-        }));
-    let max_session_minutes =
-        sanitize_optional_positive_u64(request.max_session_minutes.or_else(|| {
-            saved_contract
-                .as_ref()
-                .and_then(|contract| contract.max_session_minutes)
-        }));
+    // B20 backend completion (v0.3.42): the operator's request value is
+    // authoritative for cost/time caps — when frontend sends None (operator
+    // left the form blank intending "no cap"), the saved contract's prior
+    // cap MUST NOT be silently re-applied. Frontend B20 (v0.3.32) stopped
+    // pre-populating the form, but the backend still fell back to
+    // saved_contract via `request.max_session_cost_usd.or_else(...)`,
+    // defeating the operator's explicit unlimited-budget request on resume.
+    // Per the 2026-05-02 operator directive ("cada nova sessão, mesmo que
+    // seja sessão retomada, deve ser livre para que o usuário defina novos
+    // valores ou não"), the request alone is the source of truth.
+    let max_session_cost_usd = sanitize_optional_positive_f64(request.max_session_cost_usd);
+    let max_session_minutes = sanitize_optional_positive_u64(request.max_session_minutes);
     let created_at = saved_contract
         .as_ref()
         .map(|contract| parse_created_at(&contract.created_at))

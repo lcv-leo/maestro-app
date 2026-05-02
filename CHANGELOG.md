@@ -4,6 +4,63 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.42] - 2026-05-02
+
+Behavior fix — operator catch on session log [maestro-2026-05-02T10-54-07Z-pid1688.ndjson](data/logs) (running v0.3.39 binary): the v0.3.32 B20 fix was incomplete on the backend. With operator's form blank on resume (intent: "no cap, sessão livre"), the saved contract's prior caps were still being silently re-applied. All releases v0.3.32 through v0.3.41 carry this same regression.
+
+### Root cause
+[src-tauri/src/lib.rs:1575-1586](src-tauri/src/lib.rs#L1575-L1586) — the inline resolver called `request.max_session_cost_usd.or_else(|| saved_contract...max_session_cost_usd)`. v0.3.32 fixed the frontend (`startResumeSession` no longer pre-populates the form), but this `or_else` backend fallback meant: frontend sends None → backend falls through to the saved 5.0 cap → DeepSeek spawns with `cost_limit_usd: 5.0` even though operator wanted unlimited.
+
+### Reproduction in operator's log
+- L19 `session.resume.contract_applied`: `requested_max_session_cost_usd: None, requested_max_session_minutes: None` (form blank).
+- L21 `session.editorial.requested`: `max_session_cost_usd: None, max_session_minutes: None` (IPC request to backend carried None).
+- L23 `session.editorial.active_agents_resolved`: `max_session_cost_usd_requested: 5.0, max_session_cost_usd_saved: 5.0, max_session_cost_usd_source: 'request'`. The backend already merged `request.or_else(saved)` BEFORE building this log payload, so `_requested` reports 5.0 instead of None.
+- L26 `session.agent.started` for DeepSeek: `cost_limit_usd: 5.0`. Saved cap silently applied.
+
+### Fix
+Replaced the `or_else` fallback with direct request pass-through:
+
+```rust
+// Before (v0.3.32–v0.3.41):
+let max_session_cost_usd = sanitize_optional_positive_f64(
+    request.max_session_cost_usd.or_else(|| {
+        saved_contract.as_ref().and_then(|contract| contract.max_session_cost_usd)
+    }),
+);
+let max_session_minutes = sanitize_optional_positive_u64(
+    request.max_session_minutes.or_else(|| {
+        saved_contract.as_ref().and_then(|contract| contract.max_session_minutes)
+    }),
+);
+
+// After (v0.3.42):
+let max_session_cost_usd = sanitize_optional_positive_f64(request.max_session_cost_usd);
+let max_session_minutes = sanitize_optional_positive_u64(request.max_session_minutes);
+```
+
+Per the 2026-05-02 operator directive ("cada nova sessão, mesmo que seja sessão retomada, deve ser livre para que o usuário defina novos valores ou não"), the request alone is the source of truth. None means "no cap" — the saved contract's value is for historical reference only and MUST NOT be silently re-applied.
+
+### Behavior matrix (post-fix)
+| Scenario | Operator form | Effective cap |
+|---|---|---|
+| Fresh start, blank form | None | None (unlimited) |
+| Fresh start, "10" | Some(10.0) | 10.0 |
+| Resume (saved=5), blank form | None | **None (unlimited) ← was 5.0 before** |
+| Resume (saved=5), blank form, retain cap | "5" | 5.0 |
+| Resume (saved=5), bumped form | "10" | 10.0 |
+| Resume (saved=5), explicitly cleared | None | None (unlimited) |
+
+### Provider mode toggle re-verified (NOT a regression)
+The same operator log shows `provider_mode='hybrid'` selected and the v0.3.38 routing fix working correctly: L26 DeepSeek → `cli: 'deepseek-api'` (API), L30/41/44 Claude/Codex/Gemini → CLI peers. The "all agents via API" complaint surfaced alongside the cost-cap bug; the cost cap was the real issue (DeepSeek's `cost_limit_usd: 5.0` was the surface symptom), not the routing.
+
+### Validation
+- `cargo test --lib`: **78 passed** (zero regression vs v0.3.41).
+- `npm run build`: clean.
+
+### Operational notes
+- Pure behavior fix — no module split. Continues the v0.3.42 split-coding plan only after this hotfix ships. Cli/provider routing extraction (`provider_routing.rs`) deferred.
+- Affected versions: **all releases v0.3.32 through v0.3.41 carry this bug**. Operators on those binaries should upgrade to v0.3.42.
+
 ## [v0.3.41] - 2026-05-02
 
 Pure refactor — no behavior change. Continues `docs/code-split-plan.md` migration step 2 by extracting the bootstrap and AI provider config persistence layer (disk + Cloudflare).

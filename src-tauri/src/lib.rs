@@ -37,6 +37,7 @@ mod editorial_prompts;
 mod human_logs;
 mod link_audit;
 mod logging;
+mod provider_config;
 mod provider_deepseek;
 mod provider_retry;
 mod provider_runners;
@@ -56,6 +57,18 @@ pub(crate) use crate::sanitize::{
 };
 #[cfg(test)]
 pub(crate) use crate::sanitize::{redact_secrets, should_redact_key};
+
+// Re-export the provider_config surface so existing `crate::sanitize_ai_provider_config`
+// and similar unqualified call sites in lib.rs (and mod tests via `super::*`)
+// continue to resolve without per-file edits. Only the home of the implementation
+// moved. v0.3.40. Helpers consumed exclusively inside provider_config.rs
+// (`normalize_provider_mode`, `provider_env_value`, `sanitize_optional_cost_rate`,
+// `sanitize_optional_secret`) are not re-exported here.
+pub(crate) use crate::provider_config::{
+    api_provider_for_agent, merge_ai_provider_env_values, normalize_cloudflare_token_source,
+    normalize_storage_mode, provider_cost_rates_from_config, sanitize_ai_provider_config,
+    should_run_agent_via_api,
+};
 
 // Re-export the app_paths surface used throughout this file. The functions
 // keep their pre-extraction call sites (`sessions_dir()`, `app_root()`, etc.)
@@ -110,8 +123,10 @@ use human_logs::should_collapse_human_log_event;
 // are now consumed inside `logging.rs`; lib.rs no longer needs them.
 use session_controls::{
     effective_draft_lead, provider_cost_guard_for, sanitize_optional_positive_f64,
-    sanitize_optional_positive_u64, selected_editorial_agent_specs, ProviderCostRates,
+    sanitize_optional_positive_u64, selected_editorial_agent_specs,
 };
+#[cfg(test)]
+use session_controls::ProviderCostRates;
 use session_evidence::{
     attachment_base64, attachment_data_url, attachment_payload_base64_chars, is_audio_attachment,
     is_image_attachment, is_known_document_attachment, is_pdf_attachment, is_text_like_attachment,
@@ -1468,141 +1483,6 @@ fn persist_ai_provider_config_to_cloudflare(
     )
 }
 
-fn normalize_storage_mode(value: &str) -> &'static str {
-    match value {
-        "windows_env" => "windows_env",
-        "cloudflare" => "cloudflare",
-        _ => "local_json",
-    }
-}
-
-fn normalize_provider_mode(value: &str) -> &'static str {
-    match value {
-        "cli" => "cli",
-        "api" => "api",
-        _ => "hybrid",
-    }
-}
-
-fn normalize_cloudflare_token_source(value: &str) -> &'static str {
-    match value {
-        "windows_env" => "windows_env",
-        "local_encrypted" => "local_encrypted",
-        _ => "prompt_each_launch",
-    }
-}
-
-fn sanitize_ai_provider_config(config: AiProviderConfig) -> AiProviderConfig {
-    AiProviderConfig {
-        schema_version: 1,
-        provider_mode: normalize_provider_mode(&config.provider_mode).to_string(),
-        credential_storage_mode: normalize_storage_mode(&config.credential_storage_mode)
-            .to_string(),
-        openai_api_key: sanitize_optional_secret(config.openai_api_key),
-        anthropic_api_key: sanitize_optional_secret(config.anthropic_api_key),
-        gemini_api_key: sanitize_optional_secret(config.gemini_api_key),
-        deepseek_api_key: sanitize_optional_secret(config.deepseek_api_key),
-        openai_api_key_remote: config.openai_api_key_remote,
-        anthropic_api_key_remote: config.anthropic_api_key_remote,
-        gemini_api_key_remote: config.gemini_api_key_remote,
-        deepseek_api_key_remote: config.deepseek_api_key_remote,
-        openai_input_usd_per_million: sanitize_optional_cost_rate(
-            config.openai_input_usd_per_million,
-        ),
-        openai_output_usd_per_million: sanitize_optional_cost_rate(
-            config.openai_output_usd_per_million,
-        ),
-        anthropic_input_usd_per_million: sanitize_optional_cost_rate(
-            config.anthropic_input_usd_per_million,
-        ),
-        anthropic_output_usd_per_million: sanitize_optional_cost_rate(
-            config.anthropic_output_usd_per_million,
-        ),
-        gemini_input_usd_per_million: sanitize_optional_cost_rate(
-            config.gemini_input_usd_per_million,
-        ),
-        gemini_output_usd_per_million: sanitize_optional_cost_rate(
-            config.gemini_output_usd_per_million,
-        ),
-        deepseek_input_usd_per_million: sanitize_optional_cost_rate(
-            config.deepseek_input_usd_per_million,
-        ),
-        deepseek_output_usd_per_million: sanitize_optional_cost_rate(
-            config.deepseek_output_usd_per_million,
-        ),
-        cloudflare_secret_store_id: config
-            .cloudflare_secret_store_id
-            .map(|value| sanitize_short(&value, 80))
-            .filter(|value| !value.is_empty()),
-        cloudflare_secret_store_name: config
-            .cloudflare_secret_store_name
-            .map(|value| sanitize_short(&value, 80))
-            .filter(|value| !value.is_empty()),
-        updated_at: Utc::now().to_rfc3339(),
-    }
-}
-
-fn sanitize_optional_cost_rate(value: Option<f64>) -> Option<f64> {
-    value.filter(|value| value.is_finite() && *value > 0.0 && *value <= 10_000.0)
-}
-
-fn provider_cost_rates_from_config(
-    agent_key: &str,
-    config: &AiProviderConfig,
-) -> Result<ProviderCostRates, String> {
-    let (label, input, output) = match agent_key {
-        "claude" => (
-            "Anthropic / Claude",
-            config.anthropic_input_usd_per_million,
-            config.anthropic_output_usd_per_million,
-        ),
-        "codex" => (
-            "OpenAI / Codex",
-            config.openai_input_usd_per_million,
-            config.openai_output_usd_per_million,
-        ),
-        "gemini" => (
-            "Google / Gemini",
-            config.gemini_input_usd_per_million,
-            config.gemini_output_usd_per_million,
-        ),
-        "deepseek" => (
-            "DeepSeek",
-            config.deepseek_input_usd_per_million,
-            config.deepseek_output_usd_per_million,
-        ),
-        _ => {
-            return Err(format!(
-                "Peer editorial sem provedor de tarifa conhecido: {}.",
-                sanitize_text(agent_key, 80)
-            ))
-        }
-    };
-    let input = input.ok_or_else(|| {
-        format!(
-            "Configure a tarifa de entrada do provedor {label} em Configuracoes > Agentes via API > Tabela de tarifas."
-        )
-    })?;
-    let output = output.ok_or_else(|| {
-        format!(
-            "Configure a tarifa de saida do provedor {label} em Configuracoes > Agentes via API > Tabela de tarifas."
-        )
-    })?;
-    Ok(ProviderCostRates {
-        input_usd_per_million: input,
-        output_usd_per_million: output,
-    })
-}
-
-fn api_provider_for_agent(agent_key: &str) -> Option<&'static str> {
-    match agent_key {
-        "claude" => Some("anthropic"),
-        "codex" => Some("openai"),
-        "gemini" => Some("gemini"),
-        "deepseek" => Some("deepseek"),
-        _ => None,
-    }
-}
 
 pub(crate) fn api_cli_for_agent(agent_key: &str) -> &'static str {
     match agent_key {
@@ -1656,49 +1536,6 @@ pub(crate) fn provider_key_for_agent(config: &AiProviderConfig, agent_key: &str)
     }
 }
 
-fn should_run_agent_via_api(agent_key: &str, config: &AiProviderConfig) -> bool {
-    if api_provider_for_agent(agent_key).is_none() {
-        return false;
-    }
-    match normalize_provider_mode(&config.provider_mode) {
-        "api" => true,
-        "cli" => false,
-        // "hybrid" is deterministic by agent identity, not credential availability:
-        // DeepSeek runs via API (no maestro-app CLI integration exists); the other
-        // peers run via CLI. The whole reason hybrid mode exists is to let DeepSeek
-        // join a CLI session — if a user wants Claude/Codex/Gemini on API, they pick
-        // "api" mode explicitly.
-        _ => agent_key == "deepseek",
-    }
-}
-
-fn sanitize_optional_secret(value: Option<String>) -> Option<String> {
-    value
-        .map(|text| text.trim().chars().take(4096).collect::<String>())
-        .filter(|text| !text.is_empty())
-}
-
-fn merge_ai_provider_env_values(mut config: AiProviderConfig) -> AiProviderConfig {
-    if config.openai_api_key.is_none() {
-        config.openai_api_key = provider_env_value(&["MAESTRO_OPENAI_API_KEY", "OPENAI_API_KEY"]);
-    }
-    if config.anthropic_api_key.is_none() {
-        config.anthropic_api_key =
-            provider_env_value(&["MAESTRO_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]);
-    }
-    if config.gemini_api_key.is_none() {
-        config.gemini_api_key = provider_env_value(&["MAESTRO_GEMINI_API_KEY", "GEMINI_API_KEY"]);
-    }
-    if config.deepseek_api_key.is_none() {
-        config.deepseek_api_key =
-            provider_env_value(&["MAESTRO_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY"]);
-    }
-    sanitize_ai_provider_config(config)
-}
-
-fn provider_env_value(candidates: &[&str]) -> Option<String> {
-    first_env_value(candidates).map(|(_, _, value)| value)
-}
 
 fn enrich_ai_provider_config_from_cloudflare(
     mut config: AiProviderConfig,
@@ -3471,42 +3308,6 @@ mod tests {
     }
 
     #[test]
-    fn ai_provider_config_trims_empty_secret_fields() {
-        let config = sanitize_ai_provider_config(AiProviderConfig {
-            schema_version: 99,
-            provider_mode: "api".to_string(),
-            credential_storage_mode: "windows_env".to_string(),
-            openai_api_key: Some("  sk-test-value  ".to_string()),
-            anthropic_api_key: Some("   ".to_string()),
-            gemini_api_key: None,
-            deepseek_api_key: Some("  ds-test-value  ".to_string()),
-            openai_api_key_remote: false,
-            anthropic_api_key_remote: false,
-            gemini_api_key_remote: false,
-            deepseek_api_key_remote: false,
-            openai_input_usd_per_million: Some(2.50),
-            openai_output_usd_per_million: Some(10.0),
-            anthropic_input_usd_per_million: Some(3.0),
-            anthropic_output_usd_per_million: Some(15.0),
-            gemini_input_usd_per_million: Some(1.25),
-            gemini_output_usd_per_million: Some(5.0),
-            deepseek_input_usd_per_million: Some(0.55),
-            deepseek_output_usd_per_million: Some(2.19),
-            cloudflare_secret_store_id: None,
-            cloudflare_secret_store_name: None,
-            updated_at: "old".to_string(),
-        });
-
-        assert_eq!(config.schema_version, 1);
-        assert_eq!(config.provider_mode, "api");
-        assert_eq!(config.credential_storage_mode, "windows_env");
-        assert_eq!(config.openai_api_key.as_deref(), Some("sk-test-value"));
-        assert!(config.anthropic_api_key.is_none());
-        assert!(config.gemini_api_key.is_none());
-        assert_eq!(config.deepseek_api_key.as_deref(), Some("ds-test-value"));
-    }
-
-    #[test]
     fn cloudflare_ai_provider_marker_does_not_store_secret_values_locally() {
         let config = sanitize_ai_provider_config(AiProviderConfig {
             schema_version: 1,
@@ -4634,68 +4435,6 @@ mod tests {
         assert!(should_redact_key("api_token"));
         assert!(should_redact_key("authorization"));
         assert!(should_redact_key("private_key"));
-    }
-
-    #[test]
-    fn should_run_agent_via_api_api_mode_routes_all_to_api() {
-        let config = AiProviderConfig {
-            provider_mode: "api".to_string(),
-            ..AiProviderConfig::default()
-        };
-        for agent in ["claude", "codex", "gemini", "deepseek"] {
-            assert!(
-                should_run_agent_via_api(agent, &config),
-                "{agent} must run via API in api mode"
-            );
-        }
-    }
-
-    #[test]
-    fn should_run_agent_via_api_cli_mode_routes_all_to_cli() {
-        let config = AiProviderConfig {
-            provider_mode: "cli".to_string(),
-            ..AiProviderConfig::default()
-        };
-        for agent in ["claude", "codex", "gemini", "deepseek"] {
-            assert!(
-                !should_run_agent_via_api(agent, &config),
-                "{agent} must run via CLI in cli mode (DeepSeek included; frontend must gate it)"
-            );
-        }
-    }
-
-    #[test]
-    fn should_run_agent_via_api_hybrid_mode_routes_only_deepseek_to_api() {
-        let config = AiProviderConfig {
-            provider_mode: "hybrid".to_string(),
-            ..AiProviderConfig::default()
-        };
-        assert!(!should_run_agent_via_api("claude", &config));
-        assert!(!should_run_agent_via_api("codex", &config));
-        assert!(!should_run_agent_via_api("gemini", &config));
-        assert!(should_run_agent_via_api("deepseek", &config));
-    }
-
-    #[test]
-    fn should_run_agent_via_api_hybrid_mode_is_deterministic_regardless_of_keys() {
-        // Pre-v0.3.38, hybrid sent any agent with a configured key to the API runner.
-        // Post-v0.3.38 it is deterministic by agent identity: the only purpose of
-        // hybrid is to let DeepSeek (no CLI integration) join a CLI session. Other
-        // peers stay on CLI even when their API key is set.
-        let config = AiProviderConfig {
-            provider_mode: "hybrid".to_string(),
-            openai_api_key: Some("sk-test".to_string()),
-            anthropic_api_key: Some("sk-ant-test".to_string()),
-            gemini_api_key: Some("AIza-test".to_string()),
-            deepseek_api_key: None,
-            ..AiProviderConfig::default()
-        };
-        assert!(!should_run_agent_via_api("claude", &config));
-        assert!(!should_run_agent_via_api("codex", &config));
-        assert!(!should_run_agent_via_api("gemini", &config));
-        // DeepSeek goes API even without a key — the API runner emits a clear
-        // missing-key failure artifact instead of silently falling back.
-        assert!(should_run_agent_via_api("deepseek", &config));
     }
 }
 

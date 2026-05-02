@@ -4,6 +4,43 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.40] - 2026-05-02
+
+Pure refactor — no behavior change. Continues `docs/code-split-plan.md` migration step 5 by extracting the AI provider config validation, sanitization, mode-normalization, and routing layer.
+
+### Changed (extracted to `src-tauri/src/provider_config.rs`, ~340 lines incl. doc header + 5 tests, 11 functions)
+- `pub(crate) fn normalize_storage_mode` / `normalize_provider_mode` / `normalize_cloudflare_token_source` — collapse free-form strings into closed-enum string literals (unknown values fall to `"local_json"` / `"hybrid"` / `"prompt_each_launch"`).
+- `pub(crate) fn sanitize_optional_secret` (trims, caps to 4096 chars, drops empties) and `pub(crate) fn sanitize_optional_cost_rate` (filters `Option<f64>` to finite > 0 and ≤ 10_000.0).
+- `pub(crate) fn sanitize_ai_provider_config` — full per-field config builder used by the read/write Tauri commands and by the env-merge layer.
+- `pub(crate) fn merge_ai_provider_env_values` + `pub(crate) fn provider_env_value` — env var fallback when individual API keys are absent in the config (reads `MAESTRO_<PROVIDER>_API_KEY` then `<PROVIDER>_API_KEY`).
+- `pub(crate) fn provider_cost_rates_from_config` — builds the per-agent `ProviderCostRates` for cost-guard preflight; returns a Portuguese error string keyed to the operator UI when a tariff is missing.
+- `pub(crate) fn api_provider_for_agent` — agent_key → provider_label mapping (`"claude" → "anthropic"`, `"codex" → "openai"`, etc.).
+- `pub(crate) fn should_run_agent_via_api` — the v0.3.38 routing decision: false when no API provider OR `provider_mode == "cli"`; true when `"api"`; identity-deterministic hybrid (DeepSeek-only) otherwise.
+
+### Tests migrated (5 unit tests moved verbatim to `provider_config::tests`)
+- `ai_provider_config_trims_empty_secret_fields` — pins `sanitize_ai_provider_config` schema/sanitization output.
+- 4 mode-routing invariants from v0.3.38: `should_run_agent_via_api_api_mode_routes_all_to_api`, `should_run_agent_via_api_cli_mode_routes_all_to_cli`, `should_run_agent_via_api_hybrid_mode_routes_only_deepseek_to_api`, `should_run_agent_via_api_hybrid_mode_is_deterministic_regardless_of_keys`.
+
+### Re-export shim in `lib.rs` (matches the v0.3.34 `sanitize.rs` pattern)
+- `pub(crate) use crate::provider_config::{api_provider_for_agent, merge_ai_provider_env_values, normalize_cloudflare_token_source, normalize_storage_mode, provider_cost_rates_from_config, sanitize_ai_provider_config, should_run_agent_via_api};` — keeps existing `crate::sanitize_ai_provider_config` and similar unqualified call sites working without per-file edits.
+- Items consumed exclusively inside `provider_config.rs` (`normalize_provider_mode`, `provider_env_value`, `sanitize_optional_cost_rate`, `sanitize_optional_secret`) are NOT re-exported — minimal surface.
+
+### Cleanup in `lib.rs`
+- `ProviderCostRates` import gated `#[cfg(test)]` — only the cost-rates test still uses it directly in `lib.rs::tests`; production code calls `provider_cost_rates_from_config` from `provider_config.rs` which holds its own `use session_controls::ProviderCostRates`.
+
+### Stayed in `lib.rs`
+- `AiProviderConfig`, `BootstrapConfig` structs — still consumed by the Tauri command boundary.
+- The CLI peer routing helpers (`api_cli_for_agent`, `provider_label_for_agent`, `provider_remote_present`, `provider_key_for_agent`) — already `pub(crate)` and tightly coupled with `provider_runners.rs`.
+- `effective_provider_key` — used by both `provider_key_for_agent` (lib.rs) and `provider_runners.rs`; not part of the routing layer.
+
+### Validation
+- `cargo test --lib`: **78 passed** (zero regression vs v0.3.39).
+- `cargo clippy --no-deps --all-targets`: 12 lib + 15 test warnings, all pre-existing (same shape as v0.3.39, no new warnings).
+- `npm run build` (tsc --noEmit + vite build): clean.
+- `lib.rs`: 4788 → 4527 lines (−261 net; 11 function bodies + 5 tests removed).
+- `provider_config.rs`: 340 lines new (doc header + 11 `pub(crate)` functions + 5 tests).
+- Function-body byte-parity diff vs v0.3.39 (commit dc60061): clean (only differences are the use block at the top of the new module, the `pub(crate) fn` decoration, and the wrapping `mod tests` for the migrated tests).
+
 ## [v0.3.39] - 2026-05-02
 
 Pure refactor — no behavior change. Continues `docs/code-split-plan.md` migration step 5 by extracting the CLI adapter smoke probe machinery into a dedicated module.

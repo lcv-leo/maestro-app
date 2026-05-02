@@ -4,6 +4,31 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.34] - 2026-05-02
+
+Pure refactor — no behavior change. Continues migration step 5 by extracting the foundational text-sanitization + secret-redaction helpers into a dedicated module.
+
+### Changed (extracted to `src-tauri/src/sanitize.rs`, ~170 lines with doc header, 7 items)
+- `pub(crate) fn sanitize_short` — strips to ASCII alphanumerics + `_-.:`.
+- `pub(crate) fn sanitize_text` — redact + char-count truncate.
+- `pub(crate) fn truncate_text_head_tail` — head + tail preservation for large stderr/stdout.
+- `pub(crate) fn sanitize_value` — recursive JSON sanitizer with depth + array (80) + object (120) caps.
+- `pub(crate) fn should_redact_key` (test-exposed) — keyname-based redaction predicate with safe-suffix allowlist.
+- `pub(crate) fn redact_secrets` — replaces matches of the secret regex with `<redacted>`.
+- `secret_value_regex` (private) — `OnceLock<Regex>` cache covering sk-ant/sk_live/sk-/cfut_/cfat_/cfk_/xox[baprs]/gh[pousr]/AIza/re_/AKIA/PEM patterns.
+
+### Re-export shim in `lib.rs`
+- `pub(crate) use crate::sanitize::{ sanitize_short, sanitize_text, sanitize_value, truncate_text_head_tail }` plus a `#[cfg(test)] pub(crate) use { redact_secrets, should_redact_key }`. This preserves the existing `crate::sanitize_text` import path across all 19 sibling modules — zero downstream `use` changes required.
+
+### Other
+- Removed unused `regex::Regex` and `std::sync::OnceLock` imports from lib.rs (the only callers moved with the regex helpers).
+
+### Validation
+- `cargo test`: 74 passed.
+- `npm run typecheck` + `npm run build`: clean.
+- `lib.rs`: 5712 → 5581 lines (−131 net; 132 sed-deleted, 8 mod/use lines added).
+- ZERO-line byte-parity diff vs v0.3.33 (commit e296d89).
+
 ## [v0.3.33] - 2026-05-02
 
 Pure refactor — no behavior change. Continues migration step 5 by extracting PATH-resolution helpers for child command spawn.

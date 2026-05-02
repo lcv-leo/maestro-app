@@ -4,6 +4,57 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.8] - 2026-05-02
+
+Pure refactor batch — extracted [src-tauri/src/session_orchestration.rs](src-tauri/src/session_orchestration.rs) (~1004 lines incl. doc header) per `docs/code-split-plan.md`. **Largest single split since v0.4.0.** No behavior change.
+
+### Extracted from lib.rs (2 functions)
+- `run_editorial_session_inner` (thin wrapper, ~7 lines).
+- `run_editorial_session_core` (the orchestration loop with cancel propagation, FinalizeRunningArtifactsGuard, between-rounds checks, contract resolution — ~925 lines).
+
+### Re-export shim in lib.rs
+```rust
+pub(crate) use crate::session_orchestration::{
+    run_editorial_session_core, run_editorial_session_inner,
+};
+```
+session_commands.rs continues to import these via `use crate::{run_editorial_session_core, run_editorial_session_inner, ...};` and resolves through the shim.
+
+### Visibility upgrade in lib.rs
+`checked_data_child_path` and `sanitize_path_segment` (from `crate::app_paths::*`) promoted from plain `use` to `pub(crate) use` so sibling modules (`session_evidence.rs`) that already referenced them via `crate::checked_data_child_path` continue to resolve. `sessions_dir` similarly `#[cfg(test)] pub(crate) use` for the existing `#[cfg(test)] use crate::sessions_dir;` in `session_evidence.rs::tests`.
+
+### Cleanup in lib.rs (massive)
+After moving the orchestration body, the following imports in lib.rs became unused (consumed only inside session_orchestration.rs):
+- `std::collections::{BTreeMap, BTreeSet}`, `std::path::Path`, `std::thread`, `std::fs::self` (collapsed to `std::fs`); kept only `PathBuf, Output, Duration`. `fs`/`Path`/`thread` re-imported `#[cfg(test)]`-gated for the existing `mod tests`.
+- `crate::app_paths::sessions_dir` (test-only now)
+- `crate::editorial_agent_runners::run_editorial_agent_for_spec` (removed)
+- `crate::editorial_helpers::{filter_existing_agents_to_active_set, resolve_effective_active_agents, review_complaint_fingerprint, FinalizeRunningArtifactsGuard}` → `#[cfg(test)]`-only
+- `crate::editorial_inputs::{build_active_agents_resolved_log_context, resolve_time_budget_anchor}` → `#[cfg(test)]`-only
+- `crate::editorial_prompts::{build_draft_prompt, build_review_prompt, build_revision_prompt}` removed; kept `editorial_agent_specs, ordered_editorial_agent_specs, resolve_initial_agent_key`
+- `crate::session_minutes::build_session_minutes` removed
+- `crate::session_persistence::{append_agent_cost_to_ledger, load_cost_ledger, load_session_contract, write_session_contract}` → `#[cfg(test)]` for the two used by tests; the other two removed
+- `crate::session_resume::{parse_created_at, remaining_session_duration, session_time_exhausted}` removed (orchestration uses its own direct imports)
+- `crate::session_controls::{effective_draft_lead, provider_cost_guard_for, sanitize_optional_positive_f64, sanitize_optional_positive_u64, selected_editorial_agent_specs}` removed
+- `crate::session_evidence::process_session_evidence` removed
+- `pub(crate) use crate::provider_config::*` trimmed: dropped `api_provider_for_agent`, `provider_cost_rates_from_config`, `should_run_agent_via_api` (kept `sanitize_ai_provider_config` used by tests via `super::*`)
+- `pub(crate) use crate::editorial_io::*` trimmed: dropped `editorial_session_result` and `SessionResultContext` (consumed only inside session_orchestration.rs)
+
+### Out of scope (v0.5.9)
+Frontend `src/App.tsx` (~3775 lines) split — types + constants + pure helpers extraction. Sub-component extraction explicitly deferred.
+
+### Validation
+- `cargo test --locked --lib`: **93 passed** (zero regressions vs v0.5.7).
+- `cargo clippy --locked --no-deps --all-targets`: **0 lib + 0 test warnings**.
+- `npm run build`: clean.
+- Function-body byte-parity diff vs v0.5.7 (commit `7a6a451`, lib.rs lines 612-1544 vs new session_orchestration.rs lines 72-1004): **clean** (zero diff after stripping the trailing brace boundary).
+
+### Versioning
+Patch bump (v0.5.7 → v0.5.8) — pure refactor, no signature/dep/feature changes.
+
+### File metrics
+- lib.rs: 3072 → 2127 lines (−945 net).
+- session_orchestration.rs: 1004 lines new.
+
 ## [v0.5.7] - 2026-05-02
 
 Pure refactor batch — extracted [src-tauri/src/session_commands.rs](src-tauri/src/session_commands.rs) (4 Tauri commands + 3 blocking workers, ~449 lines incl. doc header) per `docs/code-split-plan.md`. No behavior change. Largest single split since v0.5.6.

@@ -30,6 +30,7 @@ mod cli_adapter;
 mod cloudflare;
 mod command_path;
 mod command_spawn;
+mod config_persistence;
 mod editorial_agent_runners;
 mod editorial_helpers;
 mod editorial_inputs;
@@ -70,6 +71,16 @@ pub(crate) use crate::provider_config::{
     should_run_agent_via_api,
 };
 
+// Re-export the config_persistence surface so existing
+// `crate::persist_ai_provider_config` and similar unqualified call sites in
+// lib.rs continue to resolve. v0.3.41. Helpers consumed only inside
+// config_persistence.rs (`json_find_first_string`,
+// `read_ai_provider_cloudflare_metadata`) are not re-exported here.
+pub(crate) use crate::config_persistence::{
+    enrich_ai_provider_config_from_cloudflare, persist_ai_provider_cloudflare_marker,
+    persist_ai_provider_config, persist_ai_provider_config_to_cloudflare, persist_bootstrap_config,
+};
+
 // Re-export the app_paths surface used throughout this file. The functions
 // keep their pre-extraction call sites (`sessions_dir()`, `app_root()`, etc.)
 // untouched; only the home of the implementation moved per
@@ -82,12 +93,9 @@ use crate::app_paths::{
     try_set_app_root,
 };
 use crate::cli_adapter::{cli_adapter_specs, run_cli_adapter_probe};
-use crate::cloudflare::{
-    ai_provider_secret_values, cloudflare_client, cloudflare_get, cloudflare_post_json,
-    cloudflare_result_id_for_name, cloudflare_token_from_provider_request,
-    ensure_cloudflare_d1_database, ensure_cloudflare_secret_store, run_cloudflare_probe,
-    token_source_label, upsert_ai_provider_secrets, write_ai_provider_metadata_to_cloudflare,
-};
+use crate::cloudflare::{run_cloudflare_probe, token_source_label};
+#[cfg(test)]
+use crate::cloudflare::ai_provider_secret_values;
 use crate::command_path::{command_search_dirs, resolve_command};
 use crate::command_spawn::{command_check, CommandProgressContext};
 use crate::editorial_agent_runners::run_editorial_agent_for_spec;
@@ -143,16 +151,16 @@ const API_NATIVE_ATTACHMENT_MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
 // land in the use list below alongside `app_paths::*`.
 
 #[derive(Clone, Deserialize, Serialize)]
-struct BootstrapConfig {
-    schema_version: u8,
-    credential_storage_mode: String,
-    cloudflare_account_id: Option<String>,
-    cloudflare_api_token_source: String,
-    cloudflare_api_token_env_var: String,
-    cloudflare_persistence_database: String,
-    cloudflare_secret_store: String,
-    windows_env_prefix: String,
-    updated_at: String,
+pub(crate) struct BootstrapConfig {
+    pub(crate) schema_version: u8,
+    pub(crate) credential_storage_mode: String,
+    pub(crate) cloudflare_account_id: Option<String>,
+    pub(crate) cloudflare_api_token_source: String,
+    pub(crate) cloudflare_api_token_env_var: String,
+    pub(crate) cloudflare_persistence_database: String,
+    pub(crate) cloudflare_secret_store: String,
+    pub(crate) windows_env_prefix: String,
+    pub(crate) updated_at: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -1381,107 +1389,6 @@ fn apply_hidden_window_policy(command: &mut Command) {
 #[cfg(not(windows))]
 fn apply_hidden_window_policy(_command: &mut Command) {}
 
-fn persist_bootstrap_config(path: &PathBuf, config: &BootstrapConfig) -> Result<(), String> {
-    let path = checked_data_child_path(path)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create config dir: {error}"))?;
-    }
-    let bytes = serde_json::to_vec_pretty(config)
-        .map_err(|error| format!("failed to serialize bootstrap config: {error}"))?;
-    fs::write(&path, bytes).map_err(|error| format!("failed to write bootstrap config: {error}"))
-}
-
-fn persist_ai_provider_config(path: &PathBuf, config: &AiProviderConfig) -> Result<(), String> {
-    let path = checked_data_child_path(path)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create config dir: {error}"))?;
-    }
-    let bytes = serde_json::to_vec_pretty(config)
-        .map_err(|error| format!("failed to serialize AI provider config: {error}"))?;
-    fs::write(&path, bytes).map_err(|error| format!("failed to write AI provider config: {error}"))
-}
-
-fn persist_ai_provider_cloudflare_marker(
-    path: &PathBuf,
-    config: &AiProviderConfig,
-) -> Result<(), String> {
-    let marker = AiProviderConfig {
-        schema_version: config.schema_version,
-        provider_mode: config.provider_mode.clone(),
-        credential_storage_mode: "cloudflare".to_string(),
-        openai_api_key: None,
-        anthropic_api_key: None,
-        gemini_api_key: None,
-        deepseek_api_key: None,
-        openai_api_key_remote: config.openai_api_key.is_some() || config.openai_api_key_remote,
-        anthropic_api_key_remote: config.anthropic_api_key.is_some()
-            || config.anthropic_api_key_remote,
-        gemini_api_key_remote: config.gemini_api_key.is_some() || config.gemini_api_key_remote,
-        deepseek_api_key_remote: config.deepseek_api_key.is_some()
-            || config.deepseek_api_key_remote,
-        openai_input_usd_per_million: config.openai_input_usd_per_million,
-        openai_output_usd_per_million: config.openai_output_usd_per_million,
-        anthropic_input_usd_per_million: config.anthropic_input_usd_per_million,
-        anthropic_output_usd_per_million: config.anthropic_output_usd_per_million,
-        gemini_input_usd_per_million: config.gemini_input_usd_per_million,
-        gemini_output_usd_per_million: config.gemini_output_usd_per_million,
-        deepseek_input_usd_per_million: config.deepseek_input_usd_per_million,
-        deepseek_output_usd_per_million: config.deepseek_output_usd_per_million,
-        cloudflare_secret_store_id: config.cloudflare_secret_store_id.clone(),
-        cloudflare_secret_store_name: config.cloudflare_secret_store_name.clone(),
-        updated_at: config.updated_at.clone(),
-    };
-    persist_ai_provider_config(path, &marker)
-}
-
-fn persist_ai_provider_config_to_cloudflare(
-    config: &AiProviderConfig,
-    request: &CloudflareProviderStorageRequest,
-) -> Result<(), String> {
-    let token = cloudflare_token_from_provider_request(request)?;
-    let account_id = sanitize_short(request.account_id.trim(), 80);
-    if account_id.is_empty() {
-        return Err("Account ID da Cloudflare ausente".to_string());
-    }
-
-    let persistence_database = sanitize_short(&request.persistence_database, 80);
-    if persistence_database.is_empty() {
-        return Err("nome do banco D1 de persistencia ausente".to_string());
-    }
-
-    let requested_store_name = sanitize_short(&request.secret_store, 80);
-    if requested_store_name.is_empty() {
-        return Err("nome do Secrets Store ausente".to_string());
-    }
-
-    let client = cloudflare_client()?;
-    let database_id =
-        ensure_cloudflare_d1_database(&client, &token, &account_id, &persistence_database)?;
-    let store = ensure_cloudflare_secret_store(
-        &client,
-        &token,
-        &account_id,
-        &requested_store_name,
-        Some(&database_id),
-    )?;
-
-    let secrets = ai_provider_secret_values(config);
-    let secret_records =
-        upsert_ai_provider_secrets(&client, &token, &account_id, &store, &secrets)?;
-
-    write_ai_provider_metadata_to_cloudflare(
-        &client,
-        &token,
-        &account_id,
-        &database_id,
-        config,
-        &requested_store_name,
-        &store,
-        &secret_records,
-    )
-}
 
 
 pub(crate) fn api_cli_for_agent(agent_key: &str) -> &'static str {
@@ -1537,145 +1444,6 @@ pub(crate) fn provider_key_for_agent(config: &AiProviderConfig, agent_key: &str)
 }
 
 
-fn enrich_ai_provider_config_from_cloudflare(
-    mut config: AiProviderConfig,
-    bootstrap: &BootstrapConfig,
-) -> AiProviderConfig {
-    if let Ok(remote) = read_ai_provider_cloudflare_metadata(bootstrap) {
-        config.provider_mode = remote.provider_mode;
-        config.openai_api_key_remote |= remote.openai_api_key_remote;
-        config.anthropic_api_key_remote |= remote.anthropic_api_key_remote;
-        config.gemini_api_key_remote |= remote.gemini_api_key_remote;
-        config.deepseek_api_key_remote |= remote.deepseek_api_key_remote;
-        config.cloudflare_secret_store_id = remote
-            .cloudflare_secret_store_id
-            .or(config.cloudflare_secret_store_id);
-        config.cloudflare_secret_store_name = remote
-            .cloudflare_secret_store_name
-            .or(config.cloudflare_secret_store_name);
-    }
-    config
-}
-
-fn read_ai_provider_cloudflare_metadata(
-    bootstrap: &BootstrapConfig,
-) -> Result<AiProviderConfig, String> {
-    let account_id = bootstrap
-        .cloudflare_account_id
-        .as_deref()
-        .map(|value| sanitize_short(value, 80))
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "Cloudflare account id ausente no bootstrap".to_string())?;
-    let token_request = CloudflareProviderStorageRequest {
-        account_id: account_id.clone(),
-        api_token: None,
-        api_token_env_var: bootstrap.cloudflare_api_token_env_var.clone(),
-        persistence_database: bootstrap.cloudflare_persistence_database.clone(),
-        secret_store: bootstrap.cloudflare_secret_store.clone(),
-    };
-    let token = cloudflare_token_from_provider_request(&token_request)?;
-    let client = cloudflare_client()?;
-    let d1_path = format!("/accounts/{account_id}/d1/database");
-    let listed = cloudflare_get(&client, &token, &d1_path)?;
-    let Some(database_id) =
-        cloudflare_result_id_for_name(&listed, &bootstrap.cloudflare_persistence_database)
-    else {
-        return Err("maestro_db nao encontrado para recuperar metadados".to_string());
-    };
-
-    let raw_path = format!("/accounts/{account_id}/d1/database/{database_id}/raw");
-    let value = cloudflare_post_json(
-        &client,
-        &token,
-        &raw_path,
-        json!({
-            "sql": "SELECT value_json FROM maestro_settings WHERE key = ?",
-            "params": ["ai.providers"]
-        }),
-    )?;
-    let Some(value_json) = json_find_first_string(&value, "value_json") else {
-        return Err("metadados ai.providers nao encontrados em maestro_db".to_string());
-    };
-    let metadata: Value = serde_json::from_str(&value_json)
-        .map_err(|error| format!("metadados ai.providers invalidos: {error}"))?;
-    let mut config = AiProviderConfig {
-        credential_storage_mode: "cloudflare".to_string(),
-        provider_mode: metadata
-            .get("provider_mode")
-            .and_then(Value::as_str)
-            .unwrap_or("hybrid")
-            .to_string(),
-        updated_at: metadata
-            .get("updated_at")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        cloudflare_secret_store_id: metadata
-            .get("effective_store_id")
-            .and_then(Value::as_str)
-            .map(|value| value.to_string()),
-        cloudflare_secret_store_name: metadata
-            .get("effective_store_name")
-            .and_then(Value::as_str)
-            .map(|value| value.to_string()),
-        openai_input_usd_per_million: metadata
-            .get("openai_input_usd_per_million")
-            .and_then(Value::as_f64),
-        openai_output_usd_per_million: metadata
-            .get("openai_output_usd_per_million")
-            .and_then(Value::as_f64),
-        anthropic_input_usd_per_million: metadata
-            .get("anthropic_input_usd_per_million")
-            .and_then(Value::as_f64),
-        anthropic_output_usd_per_million: metadata
-            .get("anthropic_output_usd_per_million")
-            .and_then(Value::as_f64),
-        gemini_input_usd_per_million: metadata
-            .get("gemini_input_usd_per_million")
-            .and_then(Value::as_f64),
-        gemini_output_usd_per_million: metadata
-            .get("gemini_output_usd_per_million")
-            .and_then(Value::as_f64),
-        deepseek_input_usd_per_million: metadata
-            .get("deepseek_input_usd_per_million")
-            .and_then(Value::as_f64),
-        deepseek_output_usd_per_million: metadata
-            .get("deepseek_output_usd_per_million")
-            .and_then(Value::as_f64),
-        ..AiProviderConfig::default()
-    };
-
-    if let Some(items) = metadata.get("secrets").and_then(Value::as_array) {
-        for item in items {
-            match item.get("name").and_then(Value::as_str).unwrap_or_default() {
-                "MAESTRO_OPENAI_API_KEY" => config.openai_api_key_remote = true,
-                "MAESTRO_ANTHROPIC_API_KEY" => config.anthropic_api_key_remote = true,
-                "MAESTRO_GEMINI_API_KEY" => config.gemini_api_key_remote = true,
-                "MAESTRO_DEEPSEEK_API_KEY" => config.deepseek_api_key_remote = true,
-                _ => {}
-            }
-        }
-    }
-
-    Ok(sanitize_ai_provider_config(config))
-}
-
-fn json_find_first_string(value: &Value, key: &str) -> Option<String> {
-    match value {
-        Value::Object(map) => map
-            .get(key)
-            .and_then(Value::as_str)
-            .map(|value| value.to_string())
-            .or_else(|| {
-                map.values()
-                    .find_map(|item| json_find_first_string(item, key))
-            }),
-        Value::Array(items) => items
-            .iter()
-            .find_map(|item| json_find_first_string(item, key)),
-        _ => None,
-    }
-}
 
 pub(crate) fn first_env_value(candidates: &[&str]) -> Option<(String, String, String)> {
     candidates.iter().find_map(|name| {

@@ -1,6 +1,6 @@
 [package]
 name = "maestro-editorial-ai"
-version = "0.3.40"
+version = "0.3.41"
 description = "Portable Windows editorial workbench for protocol-driven AI drafting."
 authors = ["LCV"]
 edition = "2021"

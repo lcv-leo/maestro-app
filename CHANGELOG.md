@@ -4,6 +4,42 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.41] - 2026-05-02
+
+Pure refactor — no behavior change. Continues `docs/code-split-plan.md` migration step 2 by extracting the bootstrap and AI provider config persistence layer (disk + Cloudflare).
+
+### Changed (extracted to `src-tauri/src/config_persistence.rs`, ~311 lines incl. doc header, 7 functions)
+- `pub(crate) fn persist_bootstrap_config(path, config) -> Result<(), String>` — atomic JSON write to disk via the `checked_data_child_path` safety gate from `app_paths.rs`.
+- `pub(crate) fn persist_ai_provider_config(path, config) -> Result<(), String>` — same shape, for the AI provider config.
+- `pub(crate) fn persist_ai_provider_cloudflare_marker(path, config)` — writes a marker JSON to disk that records `credential_storage_mode = "cloudflare"` and which remote secrets are present, with the actual API keys cleared. Used when the operator opts in to Cloudflare-managed secrets so the local file no longer holds plaintext.
+- `pub(crate) fn persist_ai_provider_config_to_cloudflare(config, request)` — full upload path: ensures D1 database + Secrets Store via `cloudflare.rs` ensure_* helpers, upserts per-provider secrets, writes the metadata row to D1.
+- `pub(crate) fn enrich_ai_provider_config_from_cloudflare(config, bootstrap)` — best-effort merge of remote `provider_mode` / remote-secret-present flags / store id+name into a locally-loaded config (no error propagation; falls through when the remote read fails).
+- `pub(crate) fn read_ai_provider_cloudflare_metadata(bootstrap)` — reads the JSON value blob from `maestro_settings WHERE key='ai.providers'` in D1 and rebuilds an `AiProviderConfig` with `credential_storage_mode="cloudflare"`, remote presence flags, store id+name, and per-provider tariff rates.
+- `fn json_find_first_string(value, key)` (module-private) — recursive helper to find the first string value for a given key anywhere in a serde_json `Value`. No callers outside this module.
+
+### Visibility upgrade in `lib.rs` (cross-module access required)
+- `pub(crate) struct BootstrapConfig` + 9 fields (`schema_version`, `credential_storage_mode`, `cloudflare_account_id`, `cloudflare_api_token_source`, `cloudflare_api_token_env_var`, `cloudflare_persistence_database`, `cloudflare_secret_store`, `windows_env_prefix`, `updated_at`).
+
+### Re-export shim in `lib.rs` (matches v0.3.40 `provider_config.rs` pattern)
+- `pub(crate) use crate::config_persistence::{enrich_ai_provider_config_from_cloudflare, persist_ai_provider_cloudflare_marker, persist_ai_provider_config, persist_ai_provider_config_to_cloudflare, persist_bootstrap_config};` — preserves all unqualified call sites without per-file edits.
+- Items consumed only inside `config_persistence.rs` (`json_find_first_string`, `read_ai_provider_cloudflare_metadata`) are NOT re-exported (minimal surface; `read_ai_provider_cloudflare_metadata` has no caller in lib.rs after extraction since `enrich_ai_provider_config_from_cloudflare` calls it internally).
+
+### Cleanup in `lib.rs`
+- Trimmed the cloudflare import block from 10 items to 2 (`run_cloudflare_probe`, `token_source_label` — the only ones still consumed in lib.rs production code). The 8 removed (`ai_provider_secret_values`, `cloudflare_client`, `cloudflare_get`, `cloudflare_post_json`, `cloudflare_result_id_for_name`, `cloudflare_token_from_provider_request`, `ensure_cloudflare_d1_database`, `ensure_cloudflare_secret_store`, `upsert_ai_provider_secrets`, `write_ai_provider_metadata_to_cloudflare`) now live inside `config_persistence.rs`. `ai_provider_secret_values` is `#[cfg(test)]`-gated in lib.rs (one test still uses it directly).
+
+### Stayed in `lib.rs`
+- `read_bootstrap_config` and `read_ai_provider_config` Tauri commands (registry boundary; consume the helpers here via crate-level imports).
+- `BootstrapConfig` and `AiProviderConfig` struct definitions themselves.
+- `first_env_value` and `env_value_with_scope` (used outside the persistence layer).
+
+### Validation
+- `cargo test --lib`: **78 passed** (zero regression vs v0.3.40).
+- `cargo clippy --no-deps --all-targets`: 12 lib + 15 test warnings, all pre-existing (same shape as v0.3.40, no new warnings).
+- `npm run build` (tsc --noEmit + vite build): clean.
+- `lib.rs`: 4527 → 4295 lines (−232 net; 7 function bodies removed plus cloudflare import shrink).
+- `config_persistence.rs`: 311 lines new (doc header + 7 functions).
+- Function-body byte-parity diff vs v0.3.40 (commit 254e5a3): clean.
+
 ## [v0.3.40] - 2026-05-02
 
 Pure refactor — no behavior change. Continues `docs/code-split-plan.md` migration step 5 by extracting the AI provider config validation, sanitization, mode-normalization, and routing layer.

@@ -4,6 +4,42 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.1] - 2026-05-02
+
+Behavior fix — B21: resume MUST honor operator's current React state, NOT silently override with saved session contract.
+
+### Operator report
+"maestro-app também importa os peers anteriormente configurados, não respeitando novas configurações." — operator changed the peer selection in the UI, clicked "Retomar", and the session ran with the saved-contract peers instead of the new selection.
+
+### Root cause
+[src/App.tsx:1660-1679](src/App.tsx) `startResumeSession` called `setActiveAgents(validSavedAgents)` and `setInitialAgent(resolvedInitial)` AT RESUME TIME, overriding whatever the operator had in the React UI. Then built `resumeRunOptions = { activeAgents: validSavedAgents }` which the backend correctly honored as `_source: "request"` — but the "request" was constructed from saved values, not from the operator's current selection.
+
+This was the v0.3.18 B17 fix's behavior ("auto-pre-populate from saved on resume so cold-open + click Retomar continues with same peers"), which solved one scenario but broke the more common scenario of operator deliberately changing peer config before resume.
+
+### Fix (App.tsx:startResumeSession)
+- Removed `setActiveAgents(validSavedAgents)` and `setInitialAgent(resolvedInitial)` overrides.
+- Removed the if-validSavedAgents branch entirely.
+- Always use `currentSessionRunOptions()` (which reads React state).
+- The `saved_active_agents` / `saved_initial_agent` fields stay in `ResumableSessionInfo` for the picker UI to display informationally (operator can SEE what the session was running with) but are NEVER auto-applied.
+- New NDJSON event `session.resume.contract_applied` log now records both `saved_*` (informational) and `requested_*` (what's actually used) so audit trail proves request semantics.
+
+This mirrors the v0.3.42 B20 fix for cost/time caps: **request is source of truth; saved_contract is reference only**. Both peer selection and caps now follow the same semantics.
+
+### What stays unchanged
+- Backend `resolve_effective_active_agents` already correctly prefers request over saved (v0.3.15 B11 + tests).
+- Backend `session.editorial.active_agents_resolved` NDJSON log still surfaces `_source ∈ {request, saved_contract, default_all}` so auditors can verify semantics.
+- Saved fields in `ResumableSessionInfo` remain available for future picker UI enhancement (showing operator "this session was running with [claude, codex]" in the resume dialog) — but no auto-apply.
+
+### Validation
+- `cargo test --locked --lib`: **93 passed** (no test changes; existing `resolve_effective_active_agents_request_overrides_saved` covers the backend invariant that the fix relies on).
+- `npm run build`: clean.
+
+### Cross-review pré-Commit & Sync
+Cross-review-v2 quadrilateral pendente (HARD GATE 2026-04-26).
+
+### Versioning
+Patch bump (v0.5.0 → v0.5.1) — pure bugfix, no signature/dep/feature changes.
+
 ## [v0.5.0] - 2026-05-02
 
 Operator-driven session stop. The single largest UX gap pre-v0.5.0 was that the only way to abort a long editorial session was killing the maestro-app process. Real operator log `data/sessions/run-2026-05-02T11-39-41-113Z` shows a 35-minute session with peers running 3-7 minutes each, ending with `session.agent.running` Codex still chugging at 13:49 — the operator killed the app. v0.5.0 ships full async stop with sub-2-second cancel granularity.

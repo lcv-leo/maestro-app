@@ -1645,74 +1645,56 @@ export function App() {
     setSessionName(session.session_name);
     const protocolOverride = resumeProtocolOptions(useLoadedProtocol);
 
-    // B17 fix (v0.3.18): pre-populate React state for ACTIVE_AGENTS and
-    // INITIAL_AGENT from the saved session contract before building
-    // resumeRunOptions, so that clicking "Retomar" continues with the same
-    // peers that were active when the session paused — not the cold-open
-    // default of all 4.
+    // B21 fix (v0.5.1, operator-reported "maestro-app importa os peers
+    // anteriormente configurados, não respeitando novas configurações"):
+    // resume MUST honor the operator's CURRENT React state (peer toggles +
+    // initial-agent picker + caps), NOT the saved session contract. The
+    // saved_active_agents/saved_initial_agent fields stay in
+    // ResumableSessionInfo for the picker UI to display informationally
+    // (so the operator can see what the session was running with), but
+    // they are NEVER auto-applied to React state and NEVER injected into
+    // resumeRunOptions. This mirrors the v0.3.42 B20 fix for caps:
+    // request is source of truth; saved_contract is reference only.
     //
-    // B20 fix (v0.3.32, operator-reported): time and cost caps are NOT
-    // carried forward from the saved session. Each new session — including
-    // a resume — must let the operator define new caps OR leave them
-    // unlimited. The picker's saved_max_session_* fields stay in
-    // ResumableSessionInfo for backward compat / inspection but are NOT
-    // applied to React state and NOT injected into resumeRunOptions.
-    const validSavedAgents = session.saved_active_agents.filter((agent) =>
-      initialAgentOptions.some((option) => option.key === agent),
-    ) as InitialAgentKey[];
+    // Replaces the v0.3.18 B17 behavior (auto-pre-populate from saved on
+    // resume) which was casca vazia in disguise — UI showed operator's
+    // selection but resume silently overrode with saved values.
     let resumeRunOptions: SessionRunOptions;
-    if (validSavedAgents.length >= 1 && validSavedAgents.length <= 4) {
-      setActiveAgents(validSavedAgents);
-      const candidateInitial = (session.saved_initial_agent ?? '') as InitialAgentKey;
-      const resolvedInitial: InitialAgentKey = validSavedAgents.includes(candidateInitial)
-        ? candidateInitial
-        : (validSavedAgents[0] as InitialAgentKey);
-      setInitialAgent(resolvedInitial);
-      // B20: read whatever cost/minutes the operator currently has in the UI
-      // (may be empty = unlimited). Do NOT pre-populate from saved session.
-      const currentRunOptions = currentSessionRunOptions();
-      resumeRunOptions = {
-        activeAgents: validSavedAgents,
-        maxSessionCostUsd: currentRunOptions.maxSessionCostUsd,
-        maxSessionMinutes: currentRunOptions.maxSessionMinutes,
-        attachments: promptAttachments,
-        links: parseSessionLinks(),
-      };
-      void logEvent({
-        level: 'info',
-        category: 'session.resume.contract_applied',
-        message: 'resume populated React state from saved session contract (peers only; B20: caps come from current UI)',
-        context: {
-          run_id: session.run_id,
-          saved_active_agents: validSavedAgents,
-          saved_initial_agent: resolvedInitial,
-          // B20: caps explicitly read from current UI state, not from saved
-          // contract. The saved_max_session_* fields are inspection-only.
-          requested_max_session_cost_usd: currentRunOptions.maxSessionCostUsd,
-          requested_max_session_minutes: currentRunOptions.maxSessionMinutes,
-        },
+    try {
+      resumeRunOptions = currentSessionRunOptions();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setOperation({
+        title: 'Retomada bloqueada',
+        progress: 0,
+        current: message,
+        eta: 'Ajuste a configuracao de peers e tente novamente.',
+        status: 'blocked',
       });
-    } else {
-      try {
-        resumeRunOptions = currentSessionRunOptions();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        setOperation({
-          title: 'Retomada bloqueada',
-          progress: 0,
-          current: message,
-          eta: 'Ajuste a configuracao de peers e tente novamente.',
-          status: 'blocked',
-        });
-        void logEvent({
-          level: 'error',
-          category: 'session.resume.run_options_invalid',
-          message: 'resume aborted because UI peers/caps state is invalid',
-          context: { run_id: session.run_id, error: message },
-        });
-        return;
-      }
+      void logEvent({
+        level: 'error',
+        category: 'session.resume.run_options_invalid',
+        message: 'resume aborted because UI peers/caps state is invalid',
+        context: { run_id: session.run_id, error: message },
+      });
+      return;
     }
+    void logEvent({
+      level: 'info',
+      category: 'session.resume.contract_applied',
+      message: 'resume honoring current UI state; saved contract values are reference-only',
+      context: {
+        run_id: session.run_id,
+        // What the saved session contract had — informational only, NOT applied.
+        saved_active_agents: session.saved_active_agents,
+        saved_initial_agent: session.saved_initial_agent,
+        // What the resume actually uses — comes from the current React state.
+        requested_active_agents: resumeRunOptions.activeAgents,
+        requested_initial_agent: initialAgent,
+        requested_max_session_cost_usd: resumeRunOptions.maxSessionCostUsd,
+        requested_max_session_minutes: resumeRunOptions.maxSessionMinutes,
+      },
+    });
     setOperation({
       title: 'Retomando sessao editorial',
       progress: 32,

@@ -4,6 +4,48 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.38] - 2026-05-02
+
+Behavior fix — operator catch on session log [maestro-2026-05-02T09-01-33Z-pid7592.ndjson](data/logs): provider mode toggle (Hibrido/CLI/API) was not being respected for DeepSeek. Operator selected `provider_mode='cli'`, but DeepSeek still ran via `https://api.deepseek.com/chat/completions` while Claude/Codex/Gemini correctly resolved to local CLI binaries.
+
+### Root cause
+Both backend and frontend short-circuited DeepSeek to API regardless of mode:
+- [src-tauri/src/lib.rs:1664](src-tauri/src/lib.rs#L1664) `should_run_agent_via_api` returned `true` when `agent_key == "deepseek"` before checking `provider_mode`.
+- [src/App.tsx:926](src/App.tsx#L926) `agentUsesApi` had the same shortcut.
+
+The shortcut was a workaround for the absence of a DeepSeek CLI integration in maestro-app (deferred from cross-review-mcp v1.4.0 → v1.5.0; the `deepseek-cli` direct integration was rejected over command-injection via cmd.exe newline truncation). The shortcut violated the explicit operator selection and was never documented in the settings UI.
+
+### Fixed — provider mode is now strict and deterministic
+- **API**: all 4 peers via API.
+- **Hybrid**: DeepSeek via API + Claude/Codex/Gemini via CLI, **always**, regardless of which API keys are configured. Hybrid is now defined by agent identity, not credential availability — its sole purpose is to let DeepSeek (no CLI) join an otherwise CLI-driven session.
+- **CLI**: all CLI; DeepSeek button disabled in the agent toggles with tooltip "DeepSeek so roda via API. Troque para Hibrido ou API para incluir."
+
+### Backend — [src-tauri/src/lib.rs](src-tauri/src/lib.rs)
+- `should_run_agent_via_api`: removed DeepSeek shortcut. Hybrid branch now `agent_key == "deepseek"` (deterministic) instead of `provider_key_for_agent(...).is_some()`.
+
+### Frontend — [src/App.tsx](src/App.tsx)
+- `agentUsesApi`: mirrors the new logic.
+- `chooseProviderMode`: when switching to CLI, auto-removes DeepSeek from `activeAgents` and reassigns `initialAgent='claude'` if it was DeepSeek.
+- New `useEffect([providerMode, activeAgents, initialAgent])` defense-in-depth: catches config-load AND saved-contract restore paths that call `setActiveAgents`/`setInitialAgent` directly while `providerMode` is already `'cli'`. Reads state directly (not via setState updater closure) so `react-hooks/preserve-manual-memoization` accepts the deps; both setState calls are guarded so no render loop is possible. Dep-array tightening was raised in cross-review-v2 R1 by codex + deepseek (both NEEDS_EVIDENCE) and shipped in R2.
+- Initial-agent picker (line ~2814) and peer toggle row (line ~2837): both gate the DeepSeek button via `cliBlocksDeepseek` flag.
+- Settings UI text (line ~3528): rewritten to explicitly explain the new semantics — "API roda os 4 peers via provedores oficiais. Hibrido reserva DeepSeek para API (nao tem CLI) e Claude, Codex, Gemini para CLI, sempre, independentemente das chaves. CLI roda os 3 peers com CLI; DeepSeek fica desabilitado porque nao possui integracao CLI."
+
+### Tests — 4 new `#[test]` invariants in [src-tauri/src/lib.rs](src-tauri/src/lib.rs)
+- `should_run_agent_via_api_api_mode_routes_all_to_api`
+- `should_run_agent_via_api_cli_mode_routes_all_to_cli`
+- `should_run_agent_via_api_hybrid_mode_routes_only_deepseek_to_api`
+- `should_run_agent_via_api_hybrid_mode_is_deterministic_regardless_of_keys` — proves keyed-but-CLI-routed for non-DeepSeek peers (anti-regression: the pre-v0.3.38 behavior would have routed any keyed agent to API in hybrid).
+
+### Validation
+- `cargo test`: **78 passed** (74 + 4 new).
+- `cargo clippy --no-deps --all-targets`: no new warnings (12 lib + 13 test warnings, all pre-existing).
+- `npm run build` (tsc --noEmit + vite build): clean, 1.06s, 2434 modules transformed.
+
+### Operational notes
+- Pure behavior fix — no module split. Cli adapter split (`cli_adapter.rs`) deferred to v0.3.39.
+- Defense in depth: even if a stale config or contract bypasses the frontend gates, the backend `should_run_agent_via_api` returns `false` for DeepSeek in CLI mode, the CLI runner emits a clear `CLI nao encontrada no PATH efetivo` for `deepseek` (no resolved binary), and the operator sees an explicit failure instead of a silent API call.
+- Cross-review-v2 quadrilateral session `d24674a0-898f-4258-8714-f7a49cf6f1f3` converged `unanimous_ready_after_R2_fix_for_useeffect_deps` after 2 rounds: R1 had gemini READY but codex + deepseek NEEDS_EVIDENCE on the useEffect dep-array gap (saved-contract restore could re-inject DeepSeek without flipping `providerMode`); R2 shipped the dep-array tightening + concrete code snippets + raw test output and converged with all 3 peers READY. Cross-review-v1 was tried first per operator request but aborted: codex hit the upstream Windows sandbox bug ("ERRO: o processo... não foi encontrado") and gemini probe failed; v1 session `fb6eee68-a4eb-4f91-ae38-a9fe1044b926` finalized aborted with reason `operator_switch_to_v2_for_diagnostic_separation` for later v1 transport diagnostic.
+
 ## [v0.3.37] - 2026-05-02
 
 Pure refactor — no behavior change. Continues migration step 5 by extracting the `ata-da-sessao.md` (session minutes) text generators into a dedicated module.

@@ -1660,14 +1660,15 @@ fn should_run_agent_via_api(agent_key: &str, config: &AiProviderConfig) -> bool 
     if api_provider_for_agent(agent_key).is_none() {
         return false;
     }
-    let mode = normalize_provider_mode(&config.provider_mode);
-    if agent_key == "deepseek" {
-        return true;
-    }
-    match mode {
+    match normalize_provider_mode(&config.provider_mode) {
         "api" => true,
         "cli" => false,
-        _ => provider_key_for_agent(config, agent_key).is_some(),
+        // "hybrid" is deterministic by agent identity, not credential availability:
+        // DeepSeek runs via API (no maestro-app CLI integration exists); the other
+        // peers run via CLI. The whole reason hybrid mode exists is to let DeepSeek
+        // join a CLI session — if a user wants Claude/Codex/Gemini on API, they pick
+        // "api" mode explicitly.
+        _ => agent_key == "deepseek",
     }
 }
 
@@ -4747,6 +4748,68 @@ mod tests {
         assert!(should_redact_key("api_token"));
         assert!(should_redact_key("authorization"));
         assert!(should_redact_key("private_key"));
+    }
+
+    #[test]
+    fn should_run_agent_via_api_api_mode_routes_all_to_api() {
+        let config = AiProviderConfig {
+            provider_mode: "api".to_string(),
+            ..AiProviderConfig::default()
+        };
+        for agent in ["claude", "codex", "gemini", "deepseek"] {
+            assert!(
+                should_run_agent_via_api(agent, &config),
+                "{agent} must run via API in api mode"
+            );
+        }
+    }
+
+    #[test]
+    fn should_run_agent_via_api_cli_mode_routes_all_to_cli() {
+        let config = AiProviderConfig {
+            provider_mode: "cli".to_string(),
+            ..AiProviderConfig::default()
+        };
+        for agent in ["claude", "codex", "gemini", "deepseek"] {
+            assert!(
+                !should_run_agent_via_api(agent, &config),
+                "{agent} must run via CLI in cli mode (DeepSeek included; frontend must gate it)"
+            );
+        }
+    }
+
+    #[test]
+    fn should_run_agent_via_api_hybrid_mode_routes_only_deepseek_to_api() {
+        let config = AiProviderConfig {
+            provider_mode: "hybrid".to_string(),
+            ..AiProviderConfig::default()
+        };
+        assert!(!should_run_agent_via_api("claude", &config));
+        assert!(!should_run_agent_via_api("codex", &config));
+        assert!(!should_run_agent_via_api("gemini", &config));
+        assert!(should_run_agent_via_api("deepseek", &config));
+    }
+
+    #[test]
+    fn should_run_agent_via_api_hybrid_mode_is_deterministic_regardless_of_keys() {
+        // Pre-v0.3.38, hybrid sent any agent with a configured key to the API runner.
+        // Post-v0.3.38 it is deterministic by agent identity: the only purpose of
+        // hybrid is to let DeepSeek (no CLI integration) join a CLI session. Other
+        // peers stay on CLI even when their API key is set.
+        let config = AiProviderConfig {
+            provider_mode: "hybrid".to_string(),
+            openai_api_key: Some("sk-test".to_string()),
+            anthropic_api_key: Some("sk-ant-test".to_string()),
+            gemini_api_key: Some("AIza-test".to_string()),
+            deepseek_api_key: None,
+            ..AiProviderConfig::default()
+        };
+        assert!(!should_run_agent_via_api("claude", &config));
+        assert!(!should_run_agent_via_api("codex", &config));
+        assert!(!should_run_agent_via_api("gemini", &config));
+        // DeepSeek goes API even without a key — the API runner emits a clear
+        // missing-key failure artifact instead of silently falling back.
+        assert!(should_run_agent_via_api("deepseek", &config));
     }
 }
 

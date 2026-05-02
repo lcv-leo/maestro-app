@@ -923,10 +923,11 @@ export function App() {
     deepseek: 'deepseek',
   };
   const agentUsesApi = (agent: InitialAgentKey) => {
-    if (agent === 'deepseek') return true;
     if (providerMode === 'api') return true;
     if (providerMode === 'cli') return false;
-    return aiCredentials[providerForAgent[agent]].trim().length > 0;
+    // "hybrid" is deterministic by agent identity: DeepSeek goes API
+    // (no CLI integration in maestro-app), the other peers stay on CLI.
+    return agent === 'deepseek';
   };
   const providerRatesConfigured = (provider: AiCredentialKey) =>
     providerInputUsdPerMillion[provider].trim().length > 0 &&
@@ -948,6 +949,25 @@ export function App() {
       setInitialAgent(activeAgents[0] ?? 'claude');
     }
   }, [activeAgents, initialAgent]);
+
+  useEffect(() => {
+    // CLI mode is incompatible with DeepSeek (no CLI integration in maestro-app).
+    // Defense in depth: catches config-load AND resume-contract paths that call
+    // setActiveAgents/setInitialAgent directly while providerMode is already 'cli'
+    // (peer review v0.3.38: codex + deepseek raised this — providerMode-only deps
+    // would miss saved-contract restore that injects DeepSeek without flipping mode).
+    // Reads activeAgents/initialAgent directly (not via setState updater closure)
+    // so the React-hooks/preserve-manual-memoization lint sees them as real deps;
+    // both setState calls are guarded so no render loop is possible.
+    if (providerMode !== 'cli') return;
+    if (activeAgents.includes('deepseek')) {
+      const filtered = activeAgents.filter((agent) => agent !== 'deepseek');
+      setActiveAgents(filtered.length === 0 ? ['claude'] : filtered);
+    }
+    if (initialAgent === 'deepseek') {
+      setInitialAgent('claude');
+    }
+  }, [providerMode, activeAgents, initialAgent]);
 
   useEffect(() => {
     void logEvent({
@@ -2370,6 +2390,16 @@ export function App() {
 
   function chooseProviderMode(nextMode: ProviderMode) {
     setProviderMode(nextMode);
+    if (nextMode === 'cli') {
+      // CLI mode is incompatible with DeepSeek (no CLI integration available).
+      // Drop DeepSeek from the peer set and reassign the initial agent so the
+      // operator can never enter a state where the run silently falls back to API.
+      setActiveAgents((current) => {
+        const filtered = current.filter((agent) => agent !== 'deepseek');
+        return filtered.length === 0 ? ['claude'] : filtered;
+      });
+      setInitialAgent((current) => (current === 'deepseek' ? 'claude' : current));
+    }
     void saveAiProviderConfig(nextMode);
     void logEvent({
       level: 'info',
@@ -2801,19 +2831,26 @@ export function App() {
                     <strong>{initialAgentLabel}</strong>
                   </div>
                   <div className="initial-agent-buttons">
-                    {initialAgentOptions.map((option) => (
-                      <button
-                        className={initialAgent === option.key ? 'active' : ''}
-                        type="button"
-                        key={option.key}
-                        onClick={() => setInitialAgent(option.key)}
-                        aria-pressed={initialAgent === option.key}
-                        disabled={isRunPreparing}
-                        title={option.detail}
-                      >
-                        {option.label}
-                      </button>
-                    ))}
+                    {initialAgentOptions.map((option) => {
+                      const cliBlocksDeepseek = providerMode === 'cli' && option.key === 'deepseek';
+                      return (
+                        <button
+                          className={initialAgent === option.key ? 'active' : ''}
+                          type="button"
+                          key={option.key}
+                          onClick={() => setInitialAgent(option.key)}
+                          aria-pressed={initialAgent === option.key}
+                          disabled={isRunPreparing || cliBlocksDeepseek}
+                          title={
+                            cliBlocksDeepseek
+                              ? 'DeepSeek so roda via API. Troque para Hibrido ou API para incluir.'
+                              : option.detail
+                          }
+                        >
+                          {option.label}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
                 <div className="session-controls" aria-label="Controles da sessao">
@@ -2823,19 +2860,28 @@ export function App() {
                       <strong>{activeAgentLabels}</strong>
                     </div>
                     <div className="initial-agent-buttons">
-                      {initialAgentOptions.map((option) => (
-                        <button
-                          className={activeAgents.includes(option.key) ? 'active' : ''}
-                          type="button"
-                          key={option.key}
-                          onClick={() => toggleActiveAgent(option.key)}
-                          aria-pressed={activeAgents.includes(option.key)}
-                          disabled={isRunPreparing || (activeAgents.length === 1 && activeAgents.includes(option.key))}
-                          title={option.detail}
-                        >
-                          {option.label}
-                        </button>
-                      ))}
+                      {initialAgentOptions.map((option) => {
+                        const cliBlocksDeepseek = providerMode === 'cli' && option.key === 'deepseek';
+                        const isLastSelected =
+                          activeAgents.length === 1 && activeAgents.includes(option.key);
+                        return (
+                          <button
+                            className={activeAgents.includes(option.key) ? 'active' : ''}
+                            type="button"
+                            key={option.key}
+                            onClick={() => toggleActiveAgent(option.key)}
+                            aria-pressed={activeAgents.includes(option.key)}
+                            disabled={isRunPreparing || cliBlocksDeepseek || isLastSelected}
+                            title={
+                              cliBlocksDeepseek
+                                ? 'DeepSeek so roda via API. Troque para Hibrido ou API para incluir.'
+                                : option.detail
+                            }
+                          >
+                            {option.label}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
                   {costRatesRequired && (
@@ -3501,9 +3547,12 @@ export function App() {
               <div className="provider-mode-note">
                 <strong>Execucao API real por peer</strong>
                 <span>
-                  API usa os provedores oficiais para Claude, Codex, Gemini e DeepSeek. Hibrido usa API quando a
-                  chave esta configurada e CLI como alternativa; tarifas continuam obrigatorias para qualquer chamada
-                  de API.
+                  <strong>API</strong> roda os 4 peers via provedores oficiais.
+                  {' '}<strong>Hibrido</strong> reserva DeepSeek para API (nao tem CLI) e
+                  Claude, Codex, Gemini para CLI, sempre, independentemente das chaves.
+                  {' '}<strong>CLI</strong> roda os 3 peers com CLI; DeepSeek fica desabilitado
+                  porque nao possui integracao CLI.
+                  Tarifas continuam obrigatorias para qualquer chamada de API.
                 </span>
               </div>
 

@@ -41,6 +41,7 @@ mod logging;
 mod provider_config;
 mod provider_deepseek;
 mod provider_retry;
+mod provider_routing;
 mod provider_runners;
 mod sanitize;
 mod session_artifacts;
@@ -79,6 +80,17 @@ pub(crate) use crate::provider_config::{
 pub(crate) use crate::config_persistence::{
     enrich_ai_provider_config_from_cloudflare, persist_ai_provider_cloudflare_marker,
     persist_ai_provider_config, persist_ai_provider_config_to_cloudflare, persist_bootstrap_config,
+};
+
+// Re-export the provider_routing surface so existing `crate::api_cli_for_agent`
+// and similar unqualified call sites across sibling modules (ai_probes.rs,
+// cloudflare.rs, editorial_agent_runners.rs, provider_config.rs,
+// provider_deepseek.rs, provider_runners.rs) continue to resolve without
+// per-file edits. v0.3.43. The Windows-only `windows_registry_env_value` is
+// consumed only inside `provider_routing.rs` and is not re-exported.
+pub(crate) use crate::provider_routing::{
+    api_cli_for_agent, effective_provider_key, env_value_with_scope, first_env_value,
+    provider_key_for_agent, provider_label_for_agent, provider_remote_present,
 };
 
 // Re-export the app_paths surface used throughout this file. The functions
@@ -1391,125 +1403,9 @@ fn apply_hidden_window_policy(_command: &mut Command) {}
 
 
 
-pub(crate) fn api_cli_for_agent(agent_key: &str) -> &'static str {
-    match agent_key {
-        "claude" => "anthropic-api",
-        "codex" => "openai-api",
-        "gemini" => "gemini-api",
-        "deepseek" => "deepseek-api",
-        _ => "provider-api",
-    }
-}
-
-pub(crate) fn provider_label_for_agent(agent_key: &str) -> &'static str {
-    match agent_key {
-        "claude" => "Anthropic / Claude",
-        "codex" => "OpenAI / Codex",
-        "gemini" => "Google / Gemini",
-        "deepseek" => "DeepSeek",
-        _ => "Provedor API",
-    }
-}
-
-pub(crate) fn provider_remote_present(config: &AiProviderConfig, agent_key: &str) -> bool {
-    match agent_key {
-        "claude" => config.anthropic_api_key_remote,
-        "codex" => config.openai_api_key_remote,
-        "gemini" => config.gemini_api_key_remote,
-        "deepseek" => config.deepseek_api_key_remote,
-        _ => false,
-    }
-}
-
-pub(crate) fn provider_key_for_agent(config: &AiProviderConfig, agent_key: &str) -> Option<(String, String)> {
-    match agent_key {
-        "claude" => effective_provider_key(
-            config.anthropic_api_key.as_deref(),
-            &["MAESTRO_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"],
-        ),
-        "codex" => effective_provider_key(
-            config.openai_api_key.as_deref(),
-            &["MAESTRO_OPENAI_API_KEY", "OPENAI_API_KEY"],
-        ),
-        "gemini" => effective_provider_key(
-            config.gemini_api_key.as_deref(),
-            &["MAESTRO_GEMINI_API_KEY", "GEMINI_API_KEY"],
-        ),
-        "deepseek" => effective_provider_key(
-            config.deepseek_api_key.as_deref(),
-            &["MAESTRO_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY"],
-        ),
-        _ => None,
-    }
-}
 
 
 
-pub(crate) fn first_env_value(candidates: &[&str]) -> Option<(String, String, String)> {
-    candidates.iter().find_map(|name| {
-        env_value_with_scope(name).map(|(scope, value)| ((*name).to_string(), scope, value))
-    })
-}
-
-pub(crate) fn env_value_with_scope(name: &str) -> Option<(String, String)> {
-    if let Some(value) = std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    {
-        return Some(("process".to_string(), value));
-    }
-
-    #[cfg(windows)]
-    {
-        if let Some(value) = windows_registry_env_value(r"HKCU\Environment", name) {
-            return Some(("user".to_string(), value));
-        }
-
-        if let Some(value) = windows_registry_env_value(
-            r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
-            name,
-        ) {
-            return Some(("machine".to_string(), value));
-        }
-    }
-
-    None
-}
-
-#[cfg(windows)]
-fn windows_registry_env_value(key: &str, name: &str) -> Option<String> {
-    let output = hidden_command("reg.exe")
-        .args(["query", key, "/v", name])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.lines().find_map(|line| {
-        let trimmed = line.trim();
-        if !trimmed.starts_with(name) {
-            return None;
-        }
-        let parts = trimmed.split_whitespace().collect::<Vec<_>>();
-        let type_index = parts.iter().position(|part| part.starts_with("REG_"))?;
-        let value = parts
-            .iter()
-            .skip(type_index + 1)
-            .copied()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .trim()
-            .to_string();
-        if value.is_empty() {
-            None
-        } else {
-            Some(value)
-        }
-    })
-}
 
 fn run_editorial_session_inner(
     request: &EditorialSessionRequest,
@@ -2749,20 +2645,6 @@ pub(crate) fn extract_stdout_block(artifact: &str) -> Option<&str> {
     let rest = &artifact[start..];
     let end = rest.find("\n```\n\n## Stderr")?;
     Some(rest[..end].trim())
-}
-
-pub(crate) fn effective_provider_key(
-    config_value: Option<&str>,
-    env_candidates: &[&str],
-) -> Option<(String, String)> {
-    if let Some(value) = config_value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_string())
-    {
-        return Some((value, "config".to_string()));
-    }
-    first_env_value(env_candidates).map(|(name, scope, value)| (value, format!("{name}:{scope}")))
 }
 
 

@@ -4,6 +4,42 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.43] - 2026-05-02
+
+Pure refactor — no behavior change. Continues `docs/code-split-plan.md` migration step 3 (provider routing tail) + step 4 (env helpers) by extracting the per-agent provider routing and env-var lookup helpers.
+
+### Changed (extracted to `src-tauri/src/provider_routing.rs`, ~185 lines incl. doc header, 8 functions)
+- `pub(crate) fn api_cli_for_agent(agent_key) -> &'static str` — agent_key → static label like "anthropic-api". Used as the `cli` field in NDJSON `session.agent.started`/`session.agent.finished` log records when a peer runs through an API runner.
+- `pub(crate) fn provider_label_for_agent(agent_key) -> &'static str` — agent_key → human label "Anthropic / Claude" etc. Used in PT-BR error strings and UI surfaces.
+- `pub(crate) fn provider_remote_present(config, agent_key) -> bool` — reads `*_api_key_remote` flags on `AiProviderConfig` to indicate Cloudflare-managed credential presence.
+- `pub(crate) fn provider_key_for_agent(config, agent_key) -> Option<(String, String)>` — config_value first, then env-var fallback via `effective_provider_key`. Returns `(value, source_label)`.
+- `pub(crate) fn first_env_value(candidates) -> Option<(String, String, String)>` — walks env-var candidate list returning first present as `(name, scope, value)`.
+- `pub(crate) fn env_value_with_scope(name) -> Option<(String, String)>` — `std::env::var` first ("process"), then on Windows `HKCU\Environment` ("user") and `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment` ("machine") via `reg.exe query`.
+- `fn windows_registry_env_value(key, name)` (Windows-only, module-private) — `reg.exe` parser that extracts the value column for a given REG_* type row. Calls `crate::hidden_command("reg.exe")` for non-window-popping spawn.
+- `pub(crate) fn effective_provider_key(config_value, env_candidates) -> Option<(String, String)>` — config_value (trimmed) wins; otherwise `first_env_value` over the candidates with source label `<env_name>:<scope>`.
+
+### Re-export shim in `lib.rs` (matches v0.3.40/v0.3.41 pattern)
+```rust
+pub(crate) use crate::provider_routing::{
+    api_cli_for_agent, effective_provider_key, env_value_with_scope, first_env_value,
+    provider_key_for_agent, provider_label_for_agent, provider_remote_present,
+};
+```
+
+Preserves all unqualified call sites in 6 sibling modules (`ai_probes.rs`, `cloudflare.rs`, `editorial_agent_runners.rs`, `provider_config.rs`, `provider_deepseek.rs`, `provider_runners.rs`) without per-file edits. The Windows-only `windows_registry_env_value` is consumed only inside `provider_routing.rs` and is not re-exported.
+
+### Stayed in `lib.rs`
+- `hidden_command` — the Windows process-spawn primitive that `windows_registry_env_value` calls (also used by Tauri command handlers and other spawn paths).
+- `AiProviderConfig` struct definition.
+
+### Validation
+- `cargo test --lib`: **78 passed** (zero regression vs v0.3.42).
+- `cargo clippy --no-deps --all-targets`: 12 lib + 15 test warnings, all pre-existing (same shape as v0.3.42).
+- `npm run build` (tsc --noEmit + vite build): clean.
+- `lib.rs`: 4297 → 4177 lines (−120 net).
+- `provider_routing.rs`: 185 lines new (doc header + 8 functions).
+- Function-body byte-parity diff vs v0.3.42 (commit 0f672cf): clean.
+
 ## [v0.3.42] - 2026-05-02
 
 Behavior fix — operator catch on session log [maestro-2026-05-02T10-54-07Z-pid1688.ndjson](data/logs) (running v0.3.39 binary): the v0.3.32 B20 fix was incomplete on the backend. With operator's form blank on resume (intent: "no cap, sessão livre"), the saved contract's prior caps were still being silently re-applied. All releases v0.3.32 through v0.3.41 carry this same regression.

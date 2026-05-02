@@ -4,6 +4,54 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.7] - 2026-05-02
+
+Pure refactor batch — extracted [src-tauri/src/session_commands.rs](src-tauri/src/session_commands.rs) (4 Tauri commands + 3 blocking workers, ~449 lines incl. doc header) per `docs/code-split-plan.md`. No behavior change. Largest single split since v0.5.6.
+
+### Extracted from lib.rs (7 items)
+**Tauri commands (4)**: `list_resumable_sessions`, `resume_editorial_session`, `run_editorial_session`, `stop_editorial_session`.
+
+**Blocking workers (3)**: `run_editorial_session_blocking`, `resume_editorial_session_blocking`, `list_resumable_sessions_blocking`.
+
+### Visibility upgrades in lib.rs
+- `ResumeSessionRequest` struct + 10 fields: private → `pub(crate)`.
+- `EditorialSessionResult` struct + 17 fields: private → `pub(crate)`.
+- `run_editorial_session_inner` fn: `fn` → `pub(crate) fn` (called from session_commands.rs).
+- `run_editorial_session_core` fn: `fn` → `pub(crate) fn` (called from session_commands.rs for resume).
+
+The 4 Tauri commands also gained `pub(crate)` so the re-export shim in lib.rs feeds them into `tauri::generate_handler!`.
+
+### Re-export shim in lib.rs
+```rust
+use crate::session_commands::{
+    list_resumable_sessions, resume_editorial_session, run_editorial_session,
+    stop_editorial_session,
+};
+```
+Tauri's `generate_handler!` macro in `pub fn run()` resolves the 4 command identifiers from this `use` statement.
+
+### Cleanup in lib.rs
+The following imports were used only by the 3 extracted `*_blocking` helpers and are now removed from lib.rs (consumed only inside `session_commands.rs`):
+- `crate::app_paths::safe_run_id_from_entry` — moved to `#[cfg(test)]` (only tests use it now)
+- `crate::session_artifacts::{inspect_resumable_session_dir, load_resume_session_state}` — moved to `#[cfg(test)]`
+- `crate::session_resume::{extract_saved_initial_agent, extract_saved_prompt, extract_saved_session_name, stable_text_fingerprint}` — first three moved to `#[cfg(test)]`; `stable_text_fingerprint` removed entirely (only used in resume blocking)
+
+### Out of scope (deferred to v0.5.8)
+`run_editorial_session_inner` and `run_editorial_session_core` (~954 lines of orchestration with cancel propagation, FinalizeRunningArtifactsGuard, between-rounds checks, contract resolution) stay in lib.rs for v0.5.7. Will move to `session_orchestration.rs` in v0.5.8.
+
+### Validation
+- `cargo test --locked --lib`: **93 passed** (zero regressions vs v0.5.6).
+- `cargo clippy --locked --no-deps --all-targets`: **0 lib + 0 test warnings** (maintained baseline).
+- `npm run build`: clean.
+- Function-body byte-parity diff vs v0.5.6 (commit `e477ba3`): only the 4 Tauri commands gained `pub(crate)` visibility; all NDJSON shapes, log categories, B22 comment block, RAII cancel guard, and resume contract resolution preserved verbatim.
+
+### Versioning
+Patch bump (v0.5.6 → v0.5.7) — pure refactor, no signature/dep/feature changes.
+
+### File metrics
+- lib.rs: 3460 → 3072 lines (−388 net).
+- session_commands.rs: 449 lines new.
+
 ## [v0.5.6] - 2026-05-02
 
 Pure refactor batch — extracted [src-tauri/src/tauri_commands.rs](src-tauri/src/tauri_commands.rs) (11 Tauri commands, ~341 lines incl. doc header) per `docs/code-split-plan.md`. No behavior change. Largest single split batch since v0.4.0.

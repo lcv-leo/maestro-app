@@ -818,7 +818,7 @@ export function App() {
   const [sessionName, setSessionName] = useState('Artigo academico sem titulo');
   const [verbosity, setVerbosity] = useState<VerbosityMode>('detalhado');
   const [editorialPrompt, setEditorialPrompt] = useState(
-    'Escreva um artigo academico sobre o tema informado, seguindo integralmente o protocolo editorial ativo.',
+    'Escreva um artigo acadêmico sobre [...], seguindo rigorosa e integralmente o protocolo editorial ativo.',
   );
   const [showPostEditor, setShowPostEditor] = useState(false);
   const [mainSiteHtml, setMainSiteHtml] = useState(

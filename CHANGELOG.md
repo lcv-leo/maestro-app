@@ -4,6 +4,40 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.45] - 2026-05-02
+
+Two operator-directed changes bundled in one release:
+
+### (1) Default editorial prompt text rewritten — UX
+- [src/App.tsx:821](src/App.tsx#L821) — replaced `'Escreva um artigo academico sobre o tema informado, seguindo integralmente o protocolo editorial ativo.'` with `'Escreva um artigo acadêmico sobre [...], seguindo rigorosa e integralmente o protocolo editorial ativo.'`. Adds proper Portuguese accent (`acadêmico`), inserts an explicit `[...]` slot for the operator to fill in the topic, and strengthens the protocol-adherence wording (`rigorosa e integralmente` instead of `integralmente`).
+
+### (2) Upstream-bug stderr classification (operator log triage v0.3.45)
+Triggered by operator catch on session log [maestro-2026-05-02T11-33-55Z-pid27440.ndjson](data/logs/maestro-2026-05-02T11-33-55Z-pid27440.ndjson) (running v0.3.43 binary): "vários erros silenciosos em background" — 8 errors + 4 warns where each peer hit a different upstream failure mode. Maestro was classifying them all as the generic `EMPTY_DRAFT` / `AGENT_FAILED_NO_OUTPUT` / `AGENT_FAILED_EMPTY`, which masked the actual root cause from the operator-facing artifact.
+
+#### Changed (`src-tauri/src/editorial_agent_runners.rs`)
+- New private helper `fn classify_upstream_cli_failure(name, stderr) -> Option<&'static str>` (~25 lines) that returns a more specific status code when the CLI's stderr matches a known upstream-bug fingerprint:
+  - **`CODEX_WINDOWS_SANDBOX_UPSTREAM`** — Codex CLI 0.128.0+ on Windows runs the sandbox in PowerShell ConstrainedLanguage mode and trips on `Cannot set property` while resolving classifier state; process-tree teardown emits the Portuguese `ERRO: o processo "<pid>" nao foi encontrado` from `taskkill`. Documented in workspace memory `reference_codex_cli_sandbox_constrained_language.md`. Tracked upstream; deferred from cross-review-mcp v1.4.0 to v1.5.0+.
+  - **`GEMINI_WORKSPACE_VIOLATION`** — Gemini CLI with `--skip-trust` resolves the workspace as the agent's CWD (`agent-runs/`) and refuses any file-system tool that touches the parent session directory; emits `Error executing tool list_directory: Path not in workspace` / `resolves outside the allowed workspace directories`.
+- Classification site (run_editorial_agent body) now invokes `classify_upstream_cli_failure(name, &stderr)` BEFORE settling on the generic `EMPTY_DRAFT`/`AGENT_FAILED_NO_OUTPUT`/`AGENT_FAILED_EMPTY` codes. When the helper returns `Some("CODEX_WINDOWS_SANDBOX_UPSTREAM")` or `Some("GEMINI_WORKSPACE_VIOLATION")`, that status overrides the generic fallback. Tone stays `error`. The artifact note now explains the upstream root cause + what the operator can do (try another peer, or run outside the sandbox).
+- Helper is intentionally scoped to `Codex` and `Gemini` agent names. Claude/DeepSeek failures continue to use the generic classifications because their failure modes are different (Claude CLI exit 1 with empty stderr; DeepSeek API silent empty response).
+
+#### Tests — 5 new `#[test]` invariants in `editorial_agent_runners::tests`
+- `classify_upstream_cli_failure_detects_codex_windows_sandbox_taskkill` — pins detection of the `ERRO: o processo` pattern.
+- `classify_upstream_cli_failure_detects_codex_constrained_language` — pins detection of `ConstrainedLanguage` and `Cannot set property` patterns.
+- `classify_upstream_cli_failure_detects_gemini_workspace_violation` — pins detection of `Path not in workspace` and `resolves outside the allowed workspace directories` patterns.
+- `classify_upstream_cli_failure_returns_none_when_stderr_is_clean` — anti-regression: clean Codex/Gemini stderr (warning lines, version banners) does NOT trip the classifier.
+- `classify_upstream_cli_failure_does_not_misclassify_other_agents` — anti-regression: even when Claude/DeepSeek/unknown stderr contains a substring matching the Codex/Gemini patterns, returns None to preserve the generic classification.
+
+### What this does NOT fix (out of scope, documented as upstream)
+- DeepSeek API silent empty response (3× in the operator log) — DeepSeek API returned 0 chars + exit 0 + 0 chars stderr in 32-44s. Likely DeepSeek-side rate limit or context-length silent truncation. Not detectable from the empty response itself.
+- Claude CLI exit 1 with empty stderr (2× in the operator log) — true silent failure; no fingerprint to classify against. Stays as generic `AGENT_FAILED_NO_OUTPUT`.
+- Codex Windows sandbox bug itself — upstream Codex CLI issue. Maestro now surfaces it clearly but cannot patch the third-party CLI.
+
+### Validation
+- `cargo test --lib`: **83 passed** (78 + 5 new).
+- `cargo clippy --no-deps --all-targets`: 11 lib + 14 test warnings, all pre-existing (same shape as v0.3.44).
+- `npm run build` (tsc --noEmit + vite build): clean, 2434 modules.
+
 ## [v0.3.44] - 2026-05-02
 
 Pure refactor — no behavior change. Continues `docs/code-split-plan.md` migration step 3 (provider API surfaces) by extracting the per-provider API request payload builders + native attachment support detection.

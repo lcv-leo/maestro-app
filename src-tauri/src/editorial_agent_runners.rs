@@ -290,22 +290,25 @@ fn run_editorial_agent(
             let exit_code = result.output.status.code();
             let status = if role == "review" {
                 if stdout.trim().is_empty() {
-                    if result.output.status.success() {
+                    let base = if result.output.status.success() {
                         "AGENT_FAILED_EMPTY"
                     } else {
                         "AGENT_FAILED_NO_OUTPUT"
-                    }
+                    };
+                    classify_upstream_cli_failure(name, &stderr).unwrap_or(base)
                 } else {
                     extract_maestro_status(&stdout).unwrap_or("NOT_READY")
                 }
             } else if stdout.trim().is_empty() {
-                "EMPTY_DRAFT"
+                classify_upstream_cli_failure(name, &stderr).unwrap_or("EMPTY_DRAFT")
             } else {
                 "DRAFT_CREATED"
             };
             let tone = if result.timed_out
                 || status == "AGENT_FAILED_EMPTY"
                 || status == "AGENT_FAILED_NO_OUTPUT"
+                || status == "CODEX_WINDOWS_SANDBOX_UPSTREAM"
+                || status == "GEMINI_WORKSPACE_VIOLATION"
             {
                 "error"
             } else if result.output.status.success()
@@ -317,7 +320,11 @@ fn run_editorial_agent(
             } else {
                 "error"
             };
-            let note = if status == "AGENT_FAILED_NO_OUTPUT" {
+            let note = if status == "CODEX_WINDOWS_SANDBOX_UPSTREAM" {
+                "\n> Codex CLI 0.128.0+ no Windows roda o sandbox em PowerShell ConstrainedLanguage e trava ao desmontar o tree de processos (stderr mostra `ConstrainedLanguage`, `Cannot set property` ou `ERRO: o processo` do taskkill). Bug upstream conhecido (rastreado no cross-review-mcp v1.5.0+). Tente outro peer ou ambiente sem o sandbox.\n"
+            } else if status == "GEMINI_WORKSPACE_VIOLATION" {
+                "\n> Gemini CLI bloqueou uma chamada de ferramenta porque o agente tentou acessar caminho fora do workspace (`Path not in workspace` / `resolves outside the allowed workspace directories`). Esperado quando o protocolo pede recursos no diretorio pai. Tente outro peer.\n"
+            } else if status == "AGENT_FAILED_NO_OUTPUT" {
                 "\n> O agente encerrou sem entregar avaliacao editorial em stdout. Este arquivo e diagnostico operacional, nao parecer de revisao.\n"
             } else if status == "AGENT_FAILED_EMPTY" {
                 "\n> O agente encerrou com exit code 0 mas devolveu stdout vazio. Tratado como falha operacional (NAO READY), nao como parecer editorial.\n"
@@ -431,3 +438,116 @@ fn run_editorial_agent(
         }
     }
 }
+
+/// Classify CLI failures whose stderr matches a known upstream-bug pattern.
+///
+/// Returns a more specific status code when the stderr fingerprint matches a
+/// documented upstream issue, so the operator-facing artifact distinguishes
+/// "agent CLI failed silently" from "agent CLI hit a known platform bug".
+///
+/// **Codex Windows sandbox bug** (Codex CLI 0.128.0+ on Windows): the
+/// PowerShell sandbox runs in `ConstrainedLanguage` mode, trips on
+/// `Cannot set property` while resolving classifier state, and the
+/// process-tree teardown emits the Portuguese `ERRO: o processo "<pid>"
+/// nao foi encontrado` from `taskkill`. Documented in the workspace memory
+/// at `reference_codex_cli_sandbox_constrained_language.md`. Tracked
+/// upstream; deferred from cross-review-mcp v1.4.0 to v1.5.0+.
+///
+/// **Gemini workspace violation** (Gemini CLI with `--skip-trust`): the CLI
+/// resolves the workspace as the agent's CWD (`agent-runs/`) and refuses
+/// any file-system tool that touches the parent session directory; emits
+/// `Error executing tool list_directory: Path not in workspace` /
+/// `resolves outside the allowed workspace directories`. Surfaces when
+/// the protocol prompt asks the agent to read sibling files (the input
+/// file lives in `agent-runs/` but the protocol references the parent).
+fn classify_upstream_cli_failure(name: &str, stderr: &str) -> Option<&'static str> {
+    match name {
+        "Codex" => {
+            if stderr.contains("ConstrainedLanguage")
+                || stderr.contains("Cannot set property")
+                || stderr.contains("ERRO: o processo")
+            {
+                Some("CODEX_WINDOWS_SANDBOX_UPSTREAM")
+            } else {
+                None
+            }
+        }
+        "Gemini" => {
+            if stderr.contains("Path not in workspace")
+                || stderr.contains("resolves outside the allowed workspace directories")
+            {
+                Some("GEMINI_WORKSPACE_VIOLATION")
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_upstream_cli_failure;
+
+    #[test]
+    fn classify_upstream_cli_failure_detects_codex_windows_sandbox_taskkill() {
+        let stderr = "OpenAI Codex v0.128.0 (research preview)\nReading additional input from stdin...\nERRO: o processo \"4232\" nao foi encontrado.\n";
+        assert_eq!(
+            classify_upstream_cli_failure("Codex", stderr),
+            Some("CODEX_WINDOWS_SANDBOX_UPSTREAM"),
+        );
+    }
+
+    #[test]
+    fn classify_upstream_cli_failure_detects_codex_constrained_language() {
+        let stderr = "InvalidOperation: Cannot set property. Property setting is supported only on core types in this language mode.\nConstrainedLanguage mode\n";
+        assert_eq!(
+            classify_upstream_cli_failure("Codex", stderr),
+            Some("CODEX_WINDOWS_SANDBOX_UPSTREAM"),
+        );
+    }
+
+    #[test]
+    fn classify_upstream_cli_failure_detects_gemini_workspace_violation() {
+        let stderr = "Error executing tool list_directory: Path not in workspace: Attempted path \"C:\\Users\\leona\\OneDrive\\Downloads\\maestro-editorial-ai\\data\\sessions\\run-2026-05-02T11-39-41-113Z\" resolves outside the allowed workspace directories: C:\\Users\\leona\\OneDrive\\Downloads\\maestro-editorial-ai\\data\\sessions\\run-2026-05-02T11-39-41-113Z\\agent-runs\n";
+        assert_eq!(
+            classify_upstream_cli_failure("Gemini", stderr),
+            Some("GEMINI_WORKSPACE_VIOLATION"),
+        );
+    }
+
+    #[test]
+    fn classify_upstream_cli_failure_returns_none_when_stderr_is_clean() {
+        assert_eq!(classify_upstream_cli_failure("Codex", ""), None);
+        assert_eq!(
+            classify_upstream_cli_failure("Codex", "OpenAI Codex v0.128.0\nworkdir: C:\\\n"),
+            None,
+        );
+        assert_eq!(classify_upstream_cli_failure("Gemini", ""), None);
+        assert_eq!(
+            classify_upstream_cli_failure("Gemini", "Warning: 256-color support not detected.\n"),
+            None,
+        );
+    }
+
+    #[test]
+    fn classify_upstream_cli_failure_does_not_misclassify_other_agents() {
+        // Claude/DeepSeek do not have classified upstream-bug fingerprints; even
+        // when their stderr includes substrings that would match Codex/Gemini
+        // patterns, they must return None to preserve the generic
+        // EMPTY_DRAFT/AGENT_FAILED_EMPTY classification.
+        assert_eq!(
+            classify_upstream_cli_failure("Claude", "ERRO: o processo nao foi encontrado"),
+            None,
+        );
+        assert_eq!(
+            classify_upstream_cli_failure("DeepSeek", "Path not in workspace"),
+            None,
+        );
+        assert_eq!(
+            classify_upstream_cli_failure("Unknown", "ConstrainedLanguage"),
+            None,
+        );
+    }
+}
+

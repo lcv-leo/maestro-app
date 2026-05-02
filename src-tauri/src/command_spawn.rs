@@ -50,7 +50,7 @@
 
 use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -64,6 +64,12 @@ use crate::{
     app_root, command_working_dir_for_output, hidden_command, log_editorial_agent_running,
     log_editorial_agent_spawned, sanitize_text, TimedCommandOutput,
 };
+
+/// Cap per-pipe buffer at 64 MiB. Beyond the cap, bytes continue to be drained
+/// from the pipe (so the child does not block on a full pipe), but they are not
+/// retained; the pipe_error field gets the truncation marker so the artifact
+/// surfaces the cause.
+pub(crate) const MAX_PIPE_BYTES: u64 = 64 * 1024 * 1024;
 
 pub(crate) fn command_check(label: &str, command: &str, args: &[&str]) -> Value {
     let Some(path) = resolve_command(command) else {
@@ -173,7 +179,7 @@ pub(crate) fn run_resolved_command_observed(
     if let Some(text) = stdin_text {
         if let Some(mut stdin) = child.stdin.take() {
             if let Err(error) = stdin.write_all(text.as_bytes()) {
-                let _ = child.kill();
+                kill_process_tree(&mut child);
                 let _ = child.wait();
                 return Err(error);
             }
@@ -214,7 +220,7 @@ pub(crate) fn run_resolved_command_observed(
 
         if let Some(timeout) = timeout {
             if started.elapsed() >= timeout {
-                let _ = child.kill();
+                kill_process_tree(&mut child);
                 let status = child.wait()?;
                 let (stdout, stdout_pipe_error) = stdout_handle
                     .join()
@@ -260,16 +266,38 @@ fn read_pipe_to_end_counting_classified(
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 8192];
     let mut pipe_error: Option<String> = None;
+    let mut truncated = false;
     if let Some(mut pipe) = pipe {
         loop {
             match pipe.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(count) => {
                     byte_counter.fetch_add(count as u64, Ordering::Relaxed);
-                    buffer.extend_from_slice(&chunk[..count]);
+                    if !truncated {
+                        let projected = buffer.len() as u64 + count as u64;
+                        if projected <= MAX_PIPE_BYTES {
+                            buffer.extend_from_slice(&chunk[..count]);
+                        } else {
+                            // Append only the prefix that fits within MAX_PIPE_BYTES, then
+                            // mark truncated and keep draining without retaining further bytes.
+                            // Draining (instead of breaking) keeps the child unblocked when the
+                            // OS pipe fills up, so the timeout branch can still reap it cleanly.
+                            let remaining = MAX_PIPE_BYTES.saturating_sub(buffer.len() as u64);
+                            if remaining > 0 {
+                                let remaining = remaining as usize;
+                                buffer.extend_from_slice(&chunk[..remaining]);
+                            }
+                            truncated = true;
+                            pipe_error = Some(format!(
+                                "stdout_truncated_oversize (cap={MAX_PIPE_BYTES} bytes; further output drained but not retained)"
+                            ));
+                        }
+                    }
                 }
                 Err(error) => {
-                    pipe_error = Some(classify_pipe_error(&error));
+                    if pipe_error.is_none() {
+                        pipe_error = Some(classify_pipe_error(&error));
+                    }
                     break;
                 }
             }
@@ -331,6 +359,32 @@ fn resolved_command_builder(path: &Path, args: &[String]) -> Command {
     command
 }
 
+/// Kill a child process AND its descendant tree.
+///
+/// On Windows, `child.kill()` only terminates the direct PID. When a peer is
+/// reached through `cmd.exe /C <peer>.cmd` (or any other shim), the actual
+/// peer process is a grandchild of `child` and survives the direct kill. We
+/// invoke `taskkill /T /F /PID <pid>` to walk the descendant tree, then call
+/// `child.wait()` to reap the cmd.exe wrapper. On non-Windows platforms,
+/// `child.kill()` already sends SIGKILL to the process group when the child
+/// was set up as a session leader; we keep the simple direct kill there.
+pub(crate) fn kill_process_tree(child: &mut Child) {
+    #[cfg(windows)]
+    {
+        let pid = child.id();
+        let mut taskkill = hidden_command("taskkill");
+        taskkill.args(["/T", "/F", "/PID", &pid.to_string()]);
+        // Best-effort: if taskkill itself fails (rare; e.g. PATH stripped), we
+        // still fall back to the direct kill below so the child does not leak.
+        let _ = taskkill.output();
+        let _ = child.kill();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = child.kill();
+    }
+}
+
 pub(crate) fn apply_editorial_agent_environment(command: &mut Command, path: &Path) {
     command
         .env("PYTHONIOENCODING", "utf-8")
@@ -345,5 +399,104 @@ pub(crate) fn apply_editorial_agent_environment(command: &mut Command, path: &Pa
         .to_ascii_lowercase();
     if stem == "gemini" {
         command.env("GEMINI_CLI_TRUST_WORKSPACE", "true");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn pipe_reader_retains_short_payloads_without_truncation() {
+        let payload = b"hello world".to_vec();
+        let counter = Arc::new(AtomicU64::new(0));
+        let (buffer, pipe_error) =
+            read_pipe_to_end_counting_classified(Some(Cursor::new(payload.clone())), Arc::clone(&counter));
+        assert_eq!(buffer, payload);
+        assert!(pipe_error.is_none());
+        assert_eq!(counter.load(Ordering::Relaxed), payload.len() as u64);
+    }
+
+    #[test]
+    fn pipe_reader_caps_buffer_at_max_pipe_bytes_and_keeps_draining() {
+        let oversize = (MAX_PIPE_BYTES as usize) + 4096;
+        let payload = vec![b'x'; oversize];
+        let counter = Arc::new(AtomicU64::new(0));
+        let (buffer, pipe_error) = read_pipe_to_end_counting_classified(
+            Some(Cursor::new(payload.clone())),
+            Arc::clone(&counter),
+        );
+        assert_eq!(buffer.len(), MAX_PIPE_BYTES as usize);
+        let marker = pipe_error.expect("truncation marker must be set");
+        assert!(
+            marker.contains("stdout_truncated_oversize"),
+            "marker must surface root cause: {marker}"
+        );
+        assert!(
+            marker.contains(&MAX_PIPE_BYTES.to_string()),
+            "marker must include cap value: {marker}"
+        );
+        // Counter must reflect the FULL input the child wrote, not the truncated retained slice.
+        assert_eq!(counter.load(Ordering::Relaxed), oversize as u64);
+    }
+
+    #[test]
+    fn pipe_reader_classifies_io_error_when_no_truncation_yet() {
+        // A pipe that returns Err before any bytes is the classify-only path.
+        struct FailingReader;
+        impl Read for FailingReader {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "boom"))
+            }
+        }
+        let counter = Arc::new(AtomicU64::new(0));
+        let (buffer, pipe_error) =
+            read_pipe_to_end_counting_classified(Some(FailingReader), Arc::clone(&counter));
+        assert!(buffer.is_empty());
+        let marker = pipe_error.expect("classifier must run on first-error path");
+        assert!(
+            marker.contains("broken_pipe"),
+            "io error must be classified, not silenced: {marker}"
+        );
+    }
+
+    #[test]
+    fn pipe_reader_truncation_marker_takes_precedence_over_late_io_error() {
+        // After the cap is reached, an Err should not overwrite the truncation marker; the
+        // operator needs to see WHY the buffer was capped, not a downstream pipe close.
+        struct CapThenError {
+            remaining: usize,
+        }
+        impl Read for CapThenError {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.remaining > 0 {
+                    let n = buf.len().min(self.remaining);
+                    buf[..n].fill(b'x');
+                    self.remaining -= n;
+                    Ok(n)
+                } else {
+                    Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "late"))
+                }
+            }
+        }
+        let oversize = (MAX_PIPE_BYTES as usize) + 8192;
+        let counter = Arc::new(AtomicU64::new(0));
+        let (buffer, pipe_error) = read_pipe_to_end_counting_classified(
+            Some(CapThenError { remaining: oversize }),
+            Arc::clone(&counter),
+        );
+        assert_eq!(buffer.len(), MAX_PIPE_BYTES as usize);
+        let marker = pipe_error.expect("marker must be set");
+        assert!(
+            marker.contains("stdout_truncated_oversize"),
+            "truncation cause must win over late io error: {marker}"
+        );
+    }
+
+    #[test]
+    fn max_pipe_bytes_is_64_mib() {
+        // Pin the cap so accidental edits surface in CI.
+        assert_eq!(MAX_PIPE_BYTES, 64 * 1024 * 1024);
     }
 }

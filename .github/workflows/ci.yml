@@ -53,3 +53,28 @@ jobs:
             echo "Secret-shaped string detected. Use placeholders such as <api_key_redacted>." >&2
             exit 1
           fi
+
+  rust-gates:
+    name: Rust gates (cargo --locked)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Rust stable
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+
+      - name: cargo check --locked
+        working-directory: src-tauri
+        run: cargo check --locked --all-targets
+
+      - name: cargo test --locked
+        working-directory: src-tauri
+        run: cargo test --locked --lib
+
+      - name: cargo clippy --locked
+        working-directory: src-tauri
+        run: cargo clippy --locked --no-deps --all-targets

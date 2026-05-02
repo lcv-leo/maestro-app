@@ -132,7 +132,7 @@ jobs:
         run: npm ci
 
       - name: Build Tauri portable executable
-        run: npm run tauri -- build --ci --no-bundle
+        run: npm run tauri -- build --ci --no-bundle -- --locked
 
       - name: Create portable release archive
         shell: pwsh

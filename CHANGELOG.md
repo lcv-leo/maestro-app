@@ -4,6 +4,45 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.46] - 2026-05-02
+
+Hardening pass closing the P0 set from Codex's read-only audit on HEAD `2ca92e7` (v0.3.45). All findings independently verified against current source before shipping. Three defensive fixes + CI gate that would have caught the v0.3.45 lockfile drift.
+
+### (1) Rust reproducibility gate restored
+- [src-tauri/Cargo.lock](src-tauri/Cargo.lock) — regenerated to match `Cargo.toml`. v0.3.45 shipped with the lockfile pinned to `0.3.44` because no Rust gate in CI surfaced the drift; `cargo check --locked` failed locally with `cannot update the lock file because --locked was passed to prevent this`.
+- [.github/workflows/ci.yml](.github/workflows/ci.yml) — new `rust-gates` job on `windows-latest` runs `cargo check --locked --all-targets`, `cargo test --locked --lib`, `cargo clippy --locked --no-deps --all-targets`. CI now blocks pushes that desync the lockfile or break clippy, in addition to the existing `npm ci + npm run build` hygiene job.
+- [.github/workflows/release.yml](.github/workflows/release.yml) — `npm run tauri -- build --ci --no-bundle -- --locked` so release builds inherit the same reproducibility guarantee.
+
+### (2) Pipe buffer cap (defense in depth)
+- [src-tauri/src/command_spawn.rs](src-tauri/src/command_spawn.rs) — new `pub(crate) const MAX_PIPE_BYTES: u64 = 64 * 1024 * 1024;` (64 MiB) cap on `read_pipe_to_end_counting_classified`. Past the cap, bytes continue to be drained from the OS pipe (so the child does not block on a full pipe and the timeout branch can still reap it cleanly), but they are not retained in the buffer. The atomic byte counter still reflects the full wire-bytes count.
+- New `pipe_error` marker `stdout_truncated_oversize (cap=<bytes>; further output drained but not retained)` surfaces the cap value to the operator in the artifact. Truncation marker takes precedence over a late I/O error from the same pipe — the operator needs to see WHY the buffer was capped, not a downstream pipe close.
+- Realistic motivation: operator-driven editorial sessions emit KB-MB of CLI output. A pathological hang (CLI stuck in error loop emitting megabytes/sec) would otherwise grow the buffer indefinitely until OOM.
+
+### (3) Process tree teardown on Windows (timeout + stdin failure)
+- [src-tauri/src/command_spawn.rs](src-tauri/src/command_spawn.rs) — new `pub(crate) fn kill_process_tree(child: &mut Child)`. On Windows, runs `taskkill /T /F /PID <child.id()>` to walk the descendant tree before falling back to the direct `child.kill()`. On non-Windows, keeps `child.kill()` (process-group SIGKILL when child was set up as a session leader).
+- Two call sites swapped: stdin-write failure path (`run_resolved_command_observed`) and the timeout-elapsed path. Both previously called `child.kill()` directly, which on Windows leaks grandchildren when the peer is reached through `cmd.exe /C <peer>.cmd` (for `.cmd`/`.bat` resolves) or `powershell.exe -File` (for `.ps1` resolves). With this fix, the peer process is reaped along with its `cmd.exe`/`powershell.exe` wrapper.
+
+### Tests — 5 new `#[cfg(test)] mod tests` invariants in `command_spawn`
+- `pipe_reader_retains_short_payloads_without_truncation` — payloads ≤ MAX_PIPE_BYTES round-trip unchanged.
+- `pipe_reader_caps_buffer_at_max_pipe_bytes_and_keeps_draining` — 64 MiB+4 KiB synthetic input → buffer capped at exactly MAX_PIPE_BYTES, marker contains the cap value, byte counter equals the full input size (proves drainage continued past the cap).
+- `pipe_reader_classifies_io_error_when_no_truncation_yet` — first-error path still calls `classify_pipe_error`, no silent error swallow.
+- `pipe_reader_truncation_marker_takes_precedence_over_late_io_error` — truncation cause wins over downstream pipe close, so the operator sees root cause, not noise.
+- `max_pipe_bytes_is_64_mib` — pins the cap value to surface accidental edits in CI.
+
+### Validation
+- `cargo check --locked` clean.
+- `cargo test --locked --lib`: **88 passed** (83 + 5 new). Zero regressions.
+- `cargo clippy --locked --no-deps --all-targets`: 11 lib + 14 test warnings, same shape as v0.3.45 (no new warnings introduced; "items after a test module" is in `lib.rs:2542`, pre-existing).
+- `npm run build`: clean.
+
+### Cross-review pré-Commit & Sync
+Cross-review-v2 quadrilateral pendente (HARD GATE 2026-04-26).
+
+### Out of scope (audit findings deferred)
+- **#2 DOCX/paste sanitization + CSP**: Mammoth output goes straight to Tiptap without DOMPurify, and CSP is `null`. Real high-severity finding but bundles two distinct fixes (sanitizer + CSP allowlist for Tauri webview); deferred to v0.3.47 after operator review of import flow regression risk.
+- **#3 Cloudflare Secrets Store dead-end**: marker mode persists no usable credentials locally and runners can't read back from the Secrets Store API. Real, but the fix is either UI clarification (cheap) or runtime fetch (architectural — exposes the same token scope the mode was intended to avoid). Deferred to v0.3.47/v0.3.48 with operator decision on path.
+- **#6 hardcoded model lists**: real but low-priority drift; deferred until operator hits a stale fallback.
+
 ## [v0.3.45] - 2026-05-02
 
 Two operator-directed changes bundled in one release:

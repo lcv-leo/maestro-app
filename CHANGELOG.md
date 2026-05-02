@@ -4,6 +4,46 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.44] - 2026-05-02
+
+Pure refactor — no behavior change. Continues `docs/code-split-plan.md` migration step 3 (provider API surfaces) by extracting the per-provider API request payload builders + native attachment support detection.
+
+### Changed (extracted to `src-tauri/src/api_payloads.rs`, ~214 lines incl. doc header, 11 items: 1 const + 4 `pub(crate)` fns + 6 module-private fns)
+- `pub(crate) const API_NATIVE_ATTACHMENT_MAX_FILE_BYTES: u64 = 20 * 1024 * 1024` — single-file inline-base64 payload cap (20 MiB).
+- `pub(crate) fn api_input_estimate_chars(prompt, attachments, provider) -> usize` — input-cost preflight estimator. Sums prompt chars + per-attachment overhead (base64 chars + filename chars + media-type chars + 96 bytes JSON envelope).
+- `fn provider_supports_native_attachment(provider, entry) -> bool` (module-private) — dispatcher; openai/anthropic/gemini → corresponding helper; unknown → false.
+- `fn openai_api_attachment_supported(entry) -> bool` (module-private) — image OR known document, gated by payload cap.
+- `fn openai_api_file_attachment_supported(entry) -> bool` (module-private) — known document attachment proxy.
+- `fn anthropic_api_attachment_supported(entry) -> bool` (module-private) — image OR PDF, gated by payload cap.
+- `fn gemini_api_attachment_supported(entry) -> bool` (module-private) — image OR audio OR video OR PDF OR text-like OR known document, gated by payload cap.
+- `fn attachment_within_native_payload_cap(entry) -> bool` (module-private) — single point of truth for the 20 MiB limit.
+- `pub(crate) fn openai_api_input(prompt, attachments) -> Result<Value, String>` — Responses API input shape (input_text + input_image + input_file).
+- `pub(crate) fn anthropic_api_user_content(prompt, attachments) -> Result<Value, String>` — Messages API user content shape (text + image base64 + document base64+title).
+- `pub(crate) fn gemini_api_user_parts(prompt, attachments) -> Result<Vec<Value>, String>` — generateContent parts shape (text + inline_data with mime_type+base64).
+
+### Re-export shim in `lib.rs` (matches v0.3.40+ pattern)
+```rust
+pub(crate) use crate::api_payloads::{
+    anthropic_api_user_content, api_input_estimate_chars, gemini_api_user_parts, openai_api_input,
+};
+#[cfg(test)]
+use crate::api_payloads::API_NATIVE_ATTACHMENT_MAX_FILE_BYTES;
+```
+
+Preserves call sites in `provider_runners.rs` and `provider_deepseek.rs` without per-file edits. The 4 module-private support helpers and `provider_supports_native_attachment` + `attachment_within_native_payload_cap` are not re-exported (minimal surface). The constant is `#[cfg(test)]`-gated because only `lib.rs::tests` exercises the cap directly; production code goes through `api_payloads.rs` internally.
+
+### Cleanup in `lib.rs`
+- Trimmed `session_evidence` import block from 13 items to 3 (`process_session_evidence`, `AttachmentManifestEntry`, `PromptAttachmentRequest`). The 10 removed (`attachment_base64`, `attachment_data_url`, `attachment_payload_base64_chars`, `is_audio_attachment`, `is_image_attachment`, `is_known_document_attachment`, `is_pdf_attachment`, `is_text_like_attachment`, `is_video_attachment`, `normalized_attachment_media_type`) now live inside `api_payloads.rs`.
+- Removed orphaned doc comment (lines 2379-2388 in pre-fix lib.rs) that referenced `filter_existing_agents_to_active_set` — that function lives in `editorial_helpers.rs` since v0.3.24; the doc was orphaned debris from that extraction. Removing it dropped one clippy `empty_line_after_doc_comments` warning.
+
+### Validation
+- `cargo test --lib`: **78 passed** (zero regression vs v0.3.43).
+- `cargo clippy --no-deps --all-targets`: **11 lib + 14 test warnings** (one fewer than v0.3.43; the orphaned-doc fix saved a warning).
+- `npm run build` (tsc --noEmit + vite build): clean.
+- `lib.rs`: 4177 → 4049 lines (−128 net).
+- `api_payloads.rs`: 214 lines new.
+- Function-body byte-parity diff vs v0.3.43 (commit f7beeb7): clean.
+
 ## [v0.3.43] - 2026-05-02
 
 Pure refactor — no behavior change. Continues `docs/code-split-plan.md` migration step 3 (provider routing tail) + step 4 (env helpers) by extracting the per-agent provider routing and env-var lookup helpers.

@@ -25,6 +25,7 @@ use std::{
 use tauri::Manager;
 
 mod ai_probes;
+mod api_payloads;
 mod app_paths;
 mod cli_adapter;
 mod cloudflare;
@@ -93,6 +94,21 @@ pub(crate) use crate::provider_routing::{
     provider_key_for_agent, provider_label_for_agent, provider_remote_present,
 };
 
+// Re-export the api_payloads surface so existing `crate::openai_api_input`
+// and similar unqualified call sites in `provider_runners.rs` and
+// `provider_deepseek.rs` continue to resolve without per-file edits.
+// v0.3.44. Helpers consumed exclusively inside `api_payloads.rs`
+// (`provider_supports_native_attachment`, the 4 per-provider
+// `*_api_attachment_supported` helpers, `attachment_within_native_payload_cap`)
+// are not re-exported here. `API_NATIVE_ATTACHMENT_MAX_FILE_BYTES` is
+// `#[cfg(test)]`-gated because only `lib.rs::tests` exercises the cap
+// directly; production code goes through `api_payloads.rs` internally.
+pub(crate) use crate::api_payloads::{
+    anthropic_api_user_content, api_input_estimate_chars, gemini_api_user_parts, openai_api_input,
+};
+#[cfg(test)]
+use crate::api_payloads::API_NATIVE_ATTACHMENT_MAX_FILE_BYTES;
+
 // Re-export the app_paths surface used throughout this file. The functions
 // keep their pre-extraction call sites (`sessions_dir()`, `app_root()`, etc.)
 // untouched; only the home of the implementation moved per
@@ -147,16 +163,10 @@ use session_controls::{
 };
 #[cfg(test)]
 use session_controls::ProviderCostRates;
-use session_evidence::{
-    attachment_base64, attachment_data_url, attachment_payload_base64_chars, is_audio_attachment,
-    is_image_attachment, is_known_document_attachment, is_pdf_attachment, is_text_like_attachment,
-    is_video_attachment, normalized_attachment_media_type, process_session_evidence,
-    AttachmentManifestEntry, PromptAttachmentRequest,
-};
+use session_evidence::{process_session_evidence, AttachmentManifestEntry, PromptAttachmentRequest};
 
 // `NATIVE_LOG_SEQUENCE` lives in `logging::NATIVE_LOG_SEQUENCE`.
 // `APP_ROOT` lives in `app_paths::APP_ROOT`.
-const API_NATIVE_ATTACHMENT_MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
 
 // `LogSession`, `LogEventInput`, `LogWriteResult`, `create_log_session`,
 // and `write_log_record` were moved into `logging.rs` in v0.3.19. Imports
@@ -2365,160 +2375,8 @@ pub(crate) struct SessionArtifact {
 
 
 
-pub(crate) fn api_input_estimate_chars(
-    prompt: &str,
-    attachments: &[AttachmentManifestEntry],
-    provider: &str,
-) -> usize {
-    let attachment_chars = attachments
-        .iter()
-        .filter(|entry| provider_supports_native_attachment(provider, entry))
-        .map(|entry| {
-            attachment_payload_base64_chars(entry)
-                + entry.file_name.chars().count()
-                + normalized_attachment_media_type(entry).chars().count()
-                + 96
-        })
-        .sum::<usize>();
-    prompt.chars().count().saturating_add(attachment_chars)
-}
-
-fn provider_supports_native_attachment(provider: &str, entry: &AttachmentManifestEntry) -> bool {
-    match provider {
-        "openai" => openai_api_attachment_supported(entry),
-        "anthropic" => anthropic_api_attachment_supported(entry),
-        "gemini" => gemini_api_attachment_supported(entry),
-        _ => false,
-    }
-}
-
-fn openai_api_attachment_supported(entry: &AttachmentManifestEntry) -> bool {
-    if !attachment_within_native_payload_cap(entry) {
-        return false;
-    }
-    is_image_attachment(entry) || openai_api_file_attachment_supported(entry)
-}
-
-fn openai_api_file_attachment_supported(entry: &AttachmentManifestEntry) -> bool {
-    is_known_document_attachment(entry)
-}
-
-fn anthropic_api_attachment_supported(entry: &AttachmentManifestEntry) -> bool {
-    if !attachment_within_native_payload_cap(entry) {
-        return false;
-    }
-    is_image_attachment(entry) || is_pdf_attachment(entry)
-}
-
-fn gemini_api_attachment_supported(entry: &AttachmentManifestEntry) -> bool {
-    if !attachment_within_native_payload_cap(entry) {
-        return false;
-    }
-    is_image_attachment(entry)
-        || is_audio_attachment(entry)
-        || is_video_attachment(entry)
-        || is_pdf_attachment(entry)
-        || is_text_like_attachment(entry)
-        || is_known_document_attachment(entry)
-}
-
-fn attachment_within_native_payload_cap(entry: &AttachmentManifestEntry) -> bool {
-    entry.size_bytes <= API_NATIVE_ATTACHMENT_MAX_FILE_BYTES
-}
-
-pub(crate) fn openai_api_input(
-    prompt: &str,
-    attachments: &[AttachmentManifestEntry],
-) -> Result<Value, String> {
-    let mut content = vec![json!({ "type": "input_text", "text": prompt })];
-    for entry in attachments {
-        if !attachment_within_native_payload_cap(entry) {
-            continue;
-        }
-        if is_image_attachment(entry) {
-            content.push(json!({
-                "type": "input_image",
-                "image_url": attachment_data_url(entry)?
-            }));
-        } else if openai_api_file_attachment_supported(entry) {
-            content.push(json!({
-                "type": "input_file",
-                "filename": entry.file_name.as_str(),
-                "file_data": attachment_data_url(entry)?
-            }));
-        }
-    }
-    Ok(json!([
-        {
-            "role": "user",
-            "content": content
-        }
-    ]))
-}
-
-pub(crate) fn anthropic_api_user_content(
-    prompt: &str,
-    attachments: &[AttachmentManifestEntry],
-) -> Result<Value, String> {
-    let mut content = vec![json!({ "type": "text", "text": prompt })];
-    for entry in attachments {
-        if !attachment_within_native_payload_cap(entry) {
-            continue;
-        }
-        if is_image_attachment(entry) {
-            content.push(json!({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": normalized_attachment_media_type(entry),
-                    "data": attachment_base64(entry)?
-                }
-            }));
-        } else if is_pdf_attachment(entry) {
-            content.push(json!({
-                "type": "document",
-                "source": {
-                    "type": "base64",
-                    "media_type": "application/pdf",
-                    "data": attachment_base64(entry)?
-                },
-                "title": entry.file_name.as_str()
-            }));
-        }
-    }
-    Ok(Value::Array(content))
-}
-
-pub(crate) fn gemini_api_user_parts(
-    prompt: &str,
-    attachments: &[AttachmentManifestEntry],
-) -> Result<Vec<Value>, String> {
-    let mut parts = vec![json!({ "text": prompt })];
-    for entry in attachments {
-        if gemini_api_attachment_supported(entry) {
-            parts.push(json!({
-                "inline_data": {
-                    "mime_type": normalized_attachment_media_type(entry),
-                    "data": attachment_base64(entry)?
-                }
-            }));
-        }
-    }
-    Ok(parts)
-}
 
 
-
-/// Filter `existing_agents` recovered from the agent-runs/ directory on resume
-/// down to only those whose names normalize to a key in `active_agent_keys`.
-///
-/// **B19 fix (v0.3.18)**: without this filter, the "Ultimo estado" UI summary
-/// shows peers that ran in earlier sessions but were narrowed out for this
-/// run, misleading the operator into thinking the current run touched them.
-/// Older artifacts stay on disk under `agent-runs/` (operator can still
-/// inspect them); only the in-memory snapshot used for status reporting is
-/// filtered. Name normalization mirrors `normalize_active_agents` so
-/// "Claude"/"anthropic"/"claude" all map to the same key.
 
 pub(crate) fn log_editorial_agent_finished(
     log_session: &LogSession,

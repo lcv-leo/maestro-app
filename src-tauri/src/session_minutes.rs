@@ -1,0 +1,148 @@
+// Modulo: src-tauri/src/session_minutes.rs
+// Descricao: `ata-da-sessao.md` (session minutes) text generators extracted
+// from lib.rs in v0.3.37 per `docs/code-split-plan.md` migration step 5.
+//
+// What's here (2 functions):
+//   - `build_session_minutes` — builds the markdown body of
+//     `ata-da-sessao.md` with header (run id, session name, protocol,
+//     consensus flag, final-text path, peers, caps), per-agent bullets,
+//     and the closing "Decisao" section. Branches into
+//     `build_blocked_minutes_decision` when consensus did not converge.
+//   - `build_blocked_minutes_decision` — explains why the session did not
+//     reach unanimity: counts READY reviews / operational failures /
+//     editorial divergences, and lists the most recent 8 of each (reversed
+//     so the latest rounds appear first).
+//
+// What stays in lib.rs (consumed via `pub(crate)` imports):
+//   - `EditorialSessionRequest` (pub(crate) since v0.3.25 via
+//     editorial_prompts), `EditorialAgentResult` (pub(crate)).
+//   - `sanitize_text`, `sanitize_short` (re-exported via lib.rs since v0.3.34).
+//   - `all_agent_keys` from `session_controls` (already pub(crate)).
+//
+// v0.3.37 is a pure move: every signature, format string, and marker
+// ("Texto final liberado por unanimidade...", "A regra permanece:
+// divergencia editorial exige novas rodadas...", etc.) is identical to
+// the v0.3.36 lib.rs source (commit e199c1b).
+
+use std::path::PathBuf;
+
+use crate::session_controls::all_agent_keys;
+use crate::{
+    sanitize_short, sanitize_text, EditorialAgentResult, EditorialSessionRequest,
+};
+
+pub(crate) fn build_session_minutes(
+    request: &EditorialSessionRequest,
+    run_id: &str,
+    agents: &[EditorialAgentResult],
+    consensus_ready: bool,
+    final_path: Option<&PathBuf>,
+) -> String {
+    let mut text = format!(
+        "# Ata da Sessao Maestro\n\n- Run: `{run_id}`\n- Sessao: {}\n- Protocolo: `{}`\n- Hash do protocolo: `{}`\n- Consenso unanime: `{}`\n- Texto final: `{}`\n- Peers ativos: `{}`\n- Limite de custo: `{}`\n- Limite de tempo: `{}`\n\n## Solicitacao\n\n{}\n\n## Rodada 001\n\n",
+        sanitize_text(&request.session_name, 200),
+        sanitize_text(&request.protocol_name, 200),
+        sanitize_short(&request.protocol_hash, 80),
+        consensus_ready,
+        final_path
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_else(|| "bloqueado".to_string()),
+        request
+            .active_agents
+            .clone()
+            .unwrap_or_else(all_agent_keys)
+            .join(", "),
+        request
+            .max_session_cost_usd
+            .map(|value| format!("US$ {value:.4}"))
+            .unwrap_or_else(|| "ignorado".to_string()),
+        request
+            .max_session_minutes
+            .map(|value| format!("{value} min"))
+            .unwrap_or_else(|| "ignorado".to_string()),
+        request.prompt
+    );
+
+    for agent in agents {
+        text.push_str(&format!(
+            "- **{} / {}**: `{}` (`{}`), {} ms, artifact: `{}`\n",
+            agent.name, agent.role, agent.status, agent.tone, agent.duration_ms, agent.output_path
+        ));
+    }
+
+    if !consensus_ready {
+        text.push_str("\n## Decisao\n\n");
+        text.push_str(&build_blocked_minutes_decision(agents));
+    } else {
+        text.push_str("\n## Decisao\n\nTexto final liberado por unanimidade dos agentes.\n");
+    }
+
+    text
+}
+
+pub(crate) fn build_blocked_minutes_decision(agents: &[EditorialAgentResult]) -> String {
+    let review_agents = agents
+        .iter()
+        .filter(|agent| agent.role == "review")
+        .collect::<Vec<_>>();
+    let ready_reviews = review_agents
+        .iter()
+        .filter(|agent| agent.status == "READY")
+        .count();
+    let operational_failures = agents
+        .iter()
+        .filter(|agent| {
+            agent.tone == "error"
+                || agent.tone == "blocked"
+                || agent.status == "RUNNING"
+                || agent.status == "AGENT_FAILED_NO_OUTPUT"
+                || agent.status == "AGENT_FAILED_EMPTY"
+                || agent.status == "EMPTY_DRAFT"
+                || agent.status.starts_with("EXEC_ERROR")
+        })
+        .collect::<Vec<_>>();
+    let editorial_divergences = review_agents
+        .iter()
+        .filter(|agent| agent.status != "READY" && agent.tone != "error" && agent.tone != "blocked")
+        .collect::<Vec<_>>();
+
+    let mut text = format!(
+        "Texto final indisponivel nesta chamada.\n\n- Revisoes READY registradas: {ready_reviews}/{}.\n- Falhas operacionais detectadas: {}.\n- Divergencias editoriais ainda abertas: {}.\n",
+        review_agents.len(),
+        operational_failures.len(),
+        editorial_divergences.len()
+    );
+
+    if !operational_failures.is_empty() {
+        text.push_str("\n### Falhas operacionais\n\n");
+        for agent in operational_failures.iter().rev().take(8) {
+            text.push_str(&format!(
+                "- **{} / {}**: `{}` (`{}`), exit code `{}`, artifact: `{}`\n",
+                agent.name,
+                agent.role,
+                agent.status,
+                agent.tone,
+                agent
+                    .exit_code
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                agent.output_path
+            ));
+        }
+    }
+
+    if !editorial_divergences.is_empty() {
+        text.push_str("\n### Divergencias editoriais\n\n");
+        for agent in editorial_divergences.iter().rev().take(8) {
+            text.push_str(&format!(
+                "- **{} / {}**: `{}` (`{}`), artifact: `{}`\n",
+                agent.name, agent.role, agent.status, agent.tone, agent.output_path
+            ));
+        }
+    }
+
+    text.push_str(
+        "\nA regra permanece: divergencia editorial exige novas rodadas ate unanimidade; falha operacional exige retry ou intervencao do operador antes de qualquer entrega final.\n",
+    );
+    text
+}

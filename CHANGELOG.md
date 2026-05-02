@@ -4,6 +4,23 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.3.37] - 2026-05-02
+
+Pure refactor — no behavior change. Continues migration step 5 by extracting the `ata-da-sessao.md` (session minutes) text generators into a dedicated module.
+
+### Changed (extracted to `src-tauri/src/session_minutes.rs`, ~148 lines with doc header, 2 functions)
+- `pub(crate) fn build_session_minutes` — markdown body of `ata-da-sessao.md` (header, per-agent bullets, "Decisao" section).
+- `pub(crate) fn build_blocked_minutes_decision` — non-unanimous decision section: counts READY reviews / operational failures / editorial divergences, lists most recent 8 of each.
+
+### Other
+- Removed unused `all_agent_keys` import from lib.rs (only `build_session_minutes` consumed it).
+
+### Validation
+- `cargo test`: 74 passed.
+- `npm run typecheck` + `npm run build`: clean.
+- `lib.rs`: 4956 → 4836 lines (−120 net; 115 sed-deleted, 5 mod/use lines added).
+- ZERO-line byte-parity diff vs v0.3.36 (commit e199c1b).
+
 ## [v0.3.36] - 2026-05-02
 
 Pure refactor — no behavior change. Continues migration step 5 by extracting the per-spec agent dispatchers + the CLI-path editorial agent runner.

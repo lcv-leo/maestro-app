@@ -64,7 +64,7 @@ DeepSeek usa API, nao CLI local. Para que ele opere sem digitar a chave a cada e
 
 ## Estado deste build
 
-Este build executa sessao editorial real em background: Claude, Codex, Gemini e DeepSeek podem gerar/revisar o texto contra o protocolo integral importado. Se um agente nao retornar aprovacao, a sessao nao deve ser tratada como finalizada; ela permanece sem entrega final e novas rodadas de revisao devem continuar ate unanimidade. A ata fica disponivel em `data/sessions/<run>/ata-da-sessao.md`.
+Este build executa sessao editorial real em background: Claude, Codex, Gemini e DeepSeek podem gerar/revisar o texto contra o protocolo integral importado. Se um agente nao retornar aprovacao, a sessao nao deve ser tratada como finalizada; ela permanece sem entrega final e novas rodadas de revisao devem continuar ate unanimidade. A ata fica disponivel em `data/sessions/<run>/ata-da-sessao.md` e agrupa os eventos por rodada real. O texto publico final, quando houver unanimidade, fica em `data/sessions/<run>/texto-final.md` sem o marcador tecnico interno `MAESTRO_STATUS`.
 
 As chamadas editoriais reais nao possuem timeout artificial, porque os modelos podem demorar bastante para cumprir o protocolo. A UI mostra andamento e tempo decorrido enquanto os agentes trabalham, e as CLIs devem rodar sem qualquer janela de terminal visivel.
 

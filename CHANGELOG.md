@@ -4,6 +4,20 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.10] - 2026-05-03
+
+Artifact correctness hotfix from production-session evidence. `ata-da-sessao.md` now groups agent entries by the real `round-NNN-...` artifact name instead of placing every entry under a hard-coded `Rodada 001`. `texto-final.md` is now a clean public deliverable: the internal first-line `MAESTRO_STATUS: READY|NOT_READY` protocol marker is stripped when writing the final text after unanimity, while agent artifacts keep the raw marker for audit/debugging.
+
+### Operational policy
+- New release-close directive: after a finalized Maestro version is delivered, delete `src-tauri/target` from the local workspace to keep `C:\Users\leona\lcv-workspace` lean. This cleanup is post-validation only and must resolve the path under `maestro-app\src-tauri\target` before deletion.
+
+### Validation
+- Focused Rust tests added for round grouping, unparseable-round visibility, final-text marker stripping, and UTF-8 BOM/CRLF marker handling.
+- `cargo test --locked strip_leading_maestro_status --lib`: 2 passed.
+- `cargo test --locked build_session_minutes_groups_agents_by_real_artifact_round --lib`: 1 passed.
+- `cargo test --locked --lib`: 98 passed.
+- Cross-review-v2 session `113c453f-57fc-477b-a647-6e52116949a5`: caller Codex + Claude/Gemini/DeepSeek converged READY in round 1; two non-blocking hardening follow-ups were applied before final validation.
+
 ## [v0.5.9] - 2026-05-02
 
 Pure refactor batch — frontend split. Extracted three new modules from [src/App.tsx](src/App.tsx) per `docs/code-split-plan.md` (frontend track). No behavior change. Per advisor's explicit guidance, scope is **pure data only**: types, constants, pure helpers. NO sub-component extraction. NO hook refactor.

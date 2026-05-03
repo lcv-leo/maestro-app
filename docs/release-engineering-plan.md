@@ -33,6 +33,7 @@ Release readiness requires:
 - Updated README and security docs when behavior changes.
 - Annotated tag.
 - GitHub Release notes that identify installer status, Windows 11+ target, portable layout, checksums, and known limitations.
+- After a finalized version is delivered, delete local `src-tauri/target` from `C:\Users\leona\lcv-workspace\maestro-app` to keep the workspace lean. Perform this only after validation/release closure and only after verifying the resolved absolute path is under `maestro-app\src-tauri\target`.
 
 Distribution policy:
 

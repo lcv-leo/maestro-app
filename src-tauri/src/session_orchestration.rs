@@ -43,8 +43,8 @@ use crate::editorial_inputs::{
     build_active_agents_resolved_log_context, resolve_time_budget_anchor,
 };
 use crate::editorial_io::{
-    editorial_session_result, extract_stdout_block, read_text_file, write_text_file,
-    SessionResultContext,
+    editorial_session_result, extract_stdout_block, read_text_file, strip_leading_maestro_status,
+    write_text_file, SessionResultContext,
 };
 use crate::editorial_prompts::{build_draft_prompt, build_review_prompt, build_revision_prompt};
 use crate::logging::{write_log_record, LogEventInput, LogSession};
@@ -60,9 +60,7 @@ use crate::session_minutes::build_session_minutes;
 use crate::session_persistence::{
     append_agent_cost_to_ledger, load_cost_ledger, load_session_contract, write_session_contract,
 };
-use crate::session_resume::{
-    parse_created_at, remaining_session_duration, session_time_exhausted,
-};
+use crate::session_resume::{parse_created_at, remaining_session_duration, session_time_exhausted};
 use crate::tauri_commands::read_ai_provider_config;
 use crate::{
     sanitize_text, AiProviderConfig, EditorialAgentResult, EditorialSessionRequest,
@@ -104,7 +102,9 @@ pub(crate) fn run_editorial_session_core(
     let saved_contract = load_session_contract(&session_dir);
     let (active_agent_keys, active_agents_source) = resolve_effective_active_agents(
         request.active_agents.as_ref(),
-        saved_contract.as_ref().map(|contract| &contract.active_agents),
+        saved_contract
+            .as_ref()
+            .map(|contract| &contract.active_agents),
     )?;
     let (draft_lead_key, invalid_initial_agent) =
         effective_draft_lead(request.initial_agent.as_deref(), &active_agent_keys);
@@ -615,7 +615,8 @@ pub(crate) fn run_editorial_session_core(
                     let run_id = run_id.clone();
                     let log_session = log_session.clone();
                     let ai_provider_config = ai_provider_config.clone();
-                    let timeout = remaining_session_duration(time_budget_anchor, max_session_minutes);
+                    let timeout =
+                        remaining_session_duration(time_budget_anchor, max_session_minutes);
                     let use_api_agent = api_agent_keys.contains(spec.key);
                     let cost_guard = if use_api_agent {
                         provider_cost_guard_for(
@@ -705,7 +706,8 @@ pub(crate) fn run_editorial_session_core(
             .all(|agent| agent.tone == "ok" && agent.status == "READY");
         if consensus_ready {
             let path = session_dir.join("texto-final.md");
-            write_text_file(&path, &current_draft)?;
+            let public_final_text = strip_leading_maestro_status(&current_draft);
+            write_text_file(&path, &public_final_text)?;
             final_path = path;
             break;
         }
@@ -753,8 +755,9 @@ pub(crate) fn run_editorial_session_core(
             if agent.status == "READY" {
                 continue;
             }
-            let fingerprint =
-                review_complaint_fingerprint(&read_text_file(Path::new(&agent.output_path)).unwrap_or_default());
+            let fingerprint = review_complaint_fingerprint(
+                &read_text_file(Path::new(&agent.output_path)).unwrap_or_default(),
+            );
             let history = agent_review_fingerprints
                 .entry(agent.name.clone())
                 .or_default();

@@ -220,6 +220,20 @@ pub(crate) fn extract_maestro_status(output: &str) -> Option<&'static str> {
     })
 }
 
+pub(crate) fn strip_leading_maestro_status(output: &str) -> String {
+    let output = output.trim_start_matches('\u{feff}');
+    let mut lines = output.lines();
+    let Some(first_line) = lines.next() else {
+        return String::new();
+    };
+    let normalized = first_line.trim().to_ascii_uppercase();
+    if normalized == "MAESTRO_STATUS: READY" || normalized == "MAESTRO_STATUS: NOT_READY" {
+        lines.collect::<Vec<_>>().join("\n").trim().to_string()
+    } else {
+        output.trim().to_string()
+    }
+}
+
 pub(crate) fn extract_stdout_block(artifact: &str) -> Option<&str> {
     let marker = "## Stdout\n\n```text\n";
     let start = artifact.find(marker)? + marker.len();
@@ -253,4 +267,30 @@ pub(crate) fn api_error_message(body: &str) -> String {
     }
 
     sanitize_text(body, 180)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_leading_maestro_status;
+
+    #[test]
+    fn strip_leading_maestro_status_removes_ready_marker_from_final_text() {
+        let output = "MAESTRO_STATUS: READY\n# Titulo\n\nCorpo final.";
+        assert_eq!(
+            strip_leading_maestro_status(output),
+            "# Titulo\n\nCorpo final."
+        );
+    }
+
+    #[test]
+    fn strip_leading_maestro_status_handles_utf8_bom_marker() {
+        let output = "\u{feff}MAESTRO_STATUS: READY\r\n# Titulo";
+        assert_eq!(strip_leading_maestro_status(output), "# Titulo");
+    }
+
+    #[test]
+    fn strip_leading_maestro_status_preserves_normal_markdown() {
+        let output = "# Titulo\n\nMAESTRO_STATUS: READY aparece no corpo.";
+        assert_eq!(strip_leading_maestro_status(output), output);
+    }
 }

@@ -775,18 +775,30 @@ mod tests {
 
     #[test]
     fn redacts_cloudflare_token_prefixes() {
-        let text = redact_secrets("cfat_secret123 cfut_secret123 cfk_secret123");
+        let text = redact_secrets(
+            &[
+                ["cfat", "_", "secret123"].concat(),
+                ["cfut", "_", "secret123"].concat(),
+                ["cfk", "_", "secret123"].concat(),
+            ]
+            .join(" "),
+        );
         assert_eq!(text, "<redacted> <redacted> <redacted>");
     }
 
     #[test]
     fn redacts_embedded_secret_values_without_whitespace_boundary() {
+        let google_key = ["AI", "za", "12345678"].concat();
+        let cloudflare_token = ["cfut", "_", "12345678"].concat();
+        let anthropic_key = ["sk", "-ant-", "12345678"].concat();
         let text = redact_secrets(
-            r#"url=https://example.test/?key=AIza12345678 header=Authorization:Bearer cfut_12345678 json={"api_key":"sk-ant-12345678"}"#,
+            &format!(
+                r#"url=https://example.test/?key={google_key} header=Authorization:Bearer {cloudflare_token} json={{"api_key":"{anthropic_key}"}}"#
+            ),
         );
-        assert!(!text.contains("AIza12345678"));
-        assert!(!text.contains("cfut_12345678"));
-        assert!(!text.contains("sk-ant-12345678"));
+        assert!(!text.contains(&google_key));
+        assert!(!text.contains(&cloudflare_token));
+        assert!(!text.contains(&anthropic_key));
         assert!(text.contains("<redacted>"));
     }
 

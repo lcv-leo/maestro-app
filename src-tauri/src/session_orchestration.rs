@@ -51,9 +51,11 @@ use crate::logging::{write_log_record, LogEventInput, LogSession};
 use crate::provider_config::{
     api_provider_for_agent, provider_cost_rates_from_config, should_run_agent_via_api,
 };
+use crate::session_artifacts::parse_agent_artifact_name;
 use crate::session_controls::{
-    effective_draft_lead, provider_cost_guard_for, sanitize_optional_positive_f64,
-    sanitize_optional_positive_u64, selected_editorial_agent_specs,
+    api_role_max_tokens, effective_draft_lead, estimate_provider_cost_from_input_chars,
+    provider_cost_guard_for, sanitize_optional_positive_f64, sanitize_optional_positive_u64,
+    selected_editorial_agent_specs, selected_review_agent_specs,
 };
 use crate::session_evidence::process_session_evidence;
 use crate::session_minutes::build_session_minutes;
@@ -63,8 +65,8 @@ use crate::session_persistence::{
 use crate::session_resume::{parse_created_at, remaining_session_duration, session_time_exhausted};
 use crate::tauri_commands::read_ai_provider_config;
 use crate::{
-    sanitize_text, AiProviderConfig, EditorialAgentResult, EditorialSessionRequest,
-    EditorialSessionResult, ResumeSessionState, SessionContract,
+    api_input_estimate_chars, sanitize_text, AiProviderConfig, EditorialAgentResult,
+    EditorialSessionRequest, EditorialSessionResult, ResumeSessionState, SessionContract,
 };
 
 pub(crate) fn run_editorial_session_inner(
@@ -265,6 +267,7 @@ pub(crate) fn run_editorial_session_core(
     let mut agents = Vec::new();
     let mut current_draft = String::new();
     let mut current_draft_path: Option<PathBuf> = None;
+    let mut current_draft_author_key: Option<String> = None;
     let mut round = 1usize;
     let mut agent_review_fingerprints: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     let mut consecutive_all_error_rounds: u32 = 0;
@@ -311,6 +314,8 @@ pub(crate) fn run_editorial_session_core(
         agents = filter_existing_agents_to_active_set(state.existing_agents, &active_agent_keys);
         current_draft = state.current_draft;
         current_draft_path = state.current_draft_path;
+        current_draft_author_key =
+            current_draft_author_from_path(&agent_dir, current_draft_path.as_ref());
         round = state.next_review_round.max(1);
         let _ = write_log_record(
             log_session,
@@ -323,6 +328,7 @@ pub(crate) fn run_editorial_session_core(
                     "next_review_round": round,
                     "current_draft_chars": current_draft.chars().count(),
                     "current_draft_path": current_draft_path.as_ref().map(|path| path.to_string_lossy().to_string()),
+                    "current_draft_author_key": current_draft_author_key.clone(),
                     "existing_agent_artifacts": agents.len()
                 })),
             },
@@ -428,6 +434,7 @@ pub(crate) fn run_editorial_session_core(
             {
                 current_draft = draft_text.trim().to_string();
                 current_draft_path = Some(output_path);
+                current_draft_author_key = Some(spec.key.to_string());
                 break;
             }
 
@@ -559,7 +566,139 @@ pub(crate) fn run_editorial_session_core(
                 "TIME_LIMIT_REACHED",
             ));
         }
-        let review_specs = selected_editorial_agent_specs(draft_lead_key, &active_agent_keys);
+        let review_prompt = build_review_prompt(request, &run_id, &current_draft, &evidence.block);
+        let review_specs = selected_review_agent_specs(
+            draft_lead_key,
+            &active_agent_keys,
+            current_draft_author_key.as_deref(),
+        );
+        if let Some(author_key) = current_draft_author_key.as_deref() {
+            let _ = write_log_record(
+                log_session,
+                LogEventInput {
+                    level: "info".to_string(),
+                    category: "session.review.author_excluded".to_string(),
+                    message: "current draft author excluded from peer review round".to_string(),
+                    context: Some(json!({
+                        "run_id": &run_id,
+                        "round": round,
+                        "draft_author_key": author_key,
+                        "review_agents": review_specs.iter().map(|spec| spec.key).collect::<Vec<_>>(),
+                        "policy": "agent_never_reviews_own_draft"
+                    })),
+                },
+            );
+        }
+        if review_specs.is_empty() {
+            let _ = write_log_record(
+                log_session,
+                LogEventInput {
+                    level: "error".to_string(),
+                    category: "session.review.no_independent_reviewer".to_string(),
+                    message: "no independent review peer remains after excluding the draft author"
+                        .to_string(),
+                    context: Some(json!({
+                        "run_id": &run_id,
+                        "round": round,
+                        "draft_author_key": current_draft_author_key.clone(),
+                        "active_agents": active_agent_keys.clone(),
+                        "policy": "select_at_least_two_agents_for_independent_editorial_consensus"
+                    })),
+                },
+            );
+            let minutes_path = session_dir.join("ata-da-sessao.md");
+            write_text_file(
+                &minutes_path,
+                &build_session_minutes(request, &run_id, &agents, false, None),
+            )?;
+            let context = SessionResultContext {
+                run_id: &run_id,
+                session_dir: &session_dir,
+                prompt_path: &prompt_path,
+                protocol_path: &protocol_path,
+                active_agents: &active_agent_keys,
+                max_session_cost_usd,
+                max_session_minutes,
+                observed_cost_usd: cost_ledger.total_observed_cost_usd,
+                links_path: evidence.links_path.as_ref(),
+                attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
+                human_log_path: &human_log_path,
+            };
+            return Ok(editorial_session_result(
+                &context,
+                None,
+                &minutes_path,
+                current_draft_path,
+                agents,
+                false,
+                "PAUSED_REVIEWERS_UNAVAILABLE",
+            ));
+        }
+        if let Some(max_cost_usd) = max_session_cost_usd {
+            let projected_round_cost_usd = review_specs
+                .iter()
+                .filter(|spec| api_agent_keys.contains(spec.key))
+                .filter_map(|spec| {
+                    let provider = api_provider_for_agent(spec.key)?;
+                    let rates = provider_cost_rates.get(spec.key).copied()?;
+                    let input_estimate_chars =
+                        api_input_estimate_chars(&review_prompt, &evidence.attachments, provider);
+                    Some(estimate_provider_cost_from_input_chars(
+                        input_estimate_chars,
+                        api_role_max_tokens("review"),
+                        rates,
+                    ))
+                })
+                .sum::<f64>();
+            if projected_round_cost_usd > 0.0
+                && cost_ledger.total_observed_cost_usd + projected_round_cost_usd > max_cost_usd
+            {
+                let _ = write_log_record(
+                    log_session,
+                    LogEventInput {
+                        level: "warn".to_string(),
+                        category: "session.cost.review_round_blocked".to_string(),
+                        message: "review round not started because remaining budget cannot cover all independent reviewers".to_string(),
+                        context: Some(json!({
+                            "run_id": &run_id,
+                            "round": round,
+                            "observed_cost_usd": cost_ledger.total_observed_cost_usd,
+                            "projected_review_round_cost_usd": projected_round_cost_usd,
+                            "max_session_cost_usd": max_cost_usd,
+                            "review_agents": review_specs.iter().map(|spec| spec.key).collect::<Vec<_>>(),
+                            "policy": "do_not_start_partial_review_round_when_cost_cap_would_interrupt_it"
+                        })),
+                    },
+                );
+                let minutes_path = session_dir.join("ata-da-sessao.md");
+                write_text_file(
+                    &minutes_path,
+                    &build_session_minutes(request, &run_id, &agents, false, None),
+                )?;
+                let context = SessionResultContext {
+                    run_id: &run_id,
+                    session_dir: &session_dir,
+                    prompt_path: &prompt_path,
+                    protocol_path: &protocol_path,
+                    active_agents: &active_agent_keys,
+                    max_session_cost_usd,
+                    max_session_minutes,
+                    observed_cost_usd: cost_ledger.total_observed_cost_usd,
+                    links_path: evidence.links_path.as_ref(),
+                    attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
+                    human_log_path: &human_log_path,
+                };
+                return Ok(editorial_session_result(
+                    &context,
+                    None,
+                    &minutes_path,
+                    current_draft_path,
+                    agents,
+                    false,
+                    "COST_LIMIT_REACHED",
+                ));
+            }
+        }
         let enforce_sequential_budget = max_session_cost_usd.is_some()
             && review_specs
                 .iter()
@@ -567,7 +706,6 @@ pub(crate) fn run_editorial_session_core(
         let mut round_results = Vec::new();
         if enforce_sequential_budget {
             for spec in review_specs {
-                let prompt = build_review_prompt(request, &run_id, &current_draft, &evidence.block);
                 let output_path =
                     agent_dir.join(format!("round-{round:03}-{}-review.md", spec.key));
                 let timeout = remaining_session_duration(time_budget_anchor, max_session_minutes);
@@ -586,7 +724,7 @@ pub(crate) fn run_editorial_session_core(
                     &run_id,
                     spec,
                     "review",
-                    prompt,
+                    review_prompt.clone(),
                     &evidence.attachments,
                     &output_path,
                     timeout,
@@ -607,8 +745,7 @@ pub(crate) fn run_editorial_session_core(
             let review_handles = review_specs
                 .into_iter()
                 .map(|spec| {
-                    let prompt =
-                        build_review_prompt(request, &run_id, &current_draft, &evidence.block);
+                    let prompt = review_prompt.clone();
                     let attachments = evidence.attachments.clone();
                     let output_path =
                         agent_dir.join(format!("round-{round:03}-{}-review.md", spec.key));
@@ -952,6 +1089,7 @@ pub(crate) fn run_editorial_session_core(
             {
                 current_draft = revised_text.trim().to_string();
                 current_draft_path = Some(output_path);
+                current_draft_author_key = Some(spec.key.to_string());
                 revised = true;
                 break;
             }
@@ -1004,4 +1142,14 @@ pub(crate) fn run_editorial_session_core(
         true,
         "READY_UNANIMOUS",
     ))
+}
+
+fn current_draft_author_from_path(agent_dir: &Path, path: Option<&PathBuf>) -> Option<String> {
+    let name = path?.file_name()?.to_str()?;
+    let artifact = parse_agent_artifact_name(agent_dir, name)?;
+    if matches!(artifact.role.as_str(), "draft" | "revision") {
+        Some(artifact.agent)
+    } else {
+        None
+    }
 }

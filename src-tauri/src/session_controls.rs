@@ -73,6 +73,20 @@ pub(crate) fn selected_editorial_agent_specs(
         .collect()
 }
 
+pub(crate) fn selected_review_agent_specs(
+    first_key: &str,
+    active_agents: &[String],
+    current_draft_author_key: Option<&str>,
+) -> Vec<EditorialAgentSpec> {
+    let author = current_draft_author_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    selected_editorial_agent_specs(first_key, active_agents)
+        .into_iter()
+        .filter(|spec| author != Some(spec.key))
+        .collect()
+}
+
 pub(crate) fn effective_draft_lead(
     requested: Option<&str>,
     active_agents: &[String],
@@ -161,4 +175,35 @@ pub(crate) fn usage_tokens(parsed: &Value) -> (Option<u64>, Option<u64>) {
         .or_else(|| parsed.pointer("/usage/output_tokens"))
         .and_then(Value::as_u64);
     (input, output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::selected_review_agent_specs;
+
+    #[test]
+    fn selected_review_agent_specs_excludes_current_draft_author() {
+        let active = vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "gemini".to_string(),
+            "deepseek".to_string(),
+        ];
+
+        let selected = selected_review_agent_specs("deepseek", &active, Some("deepseek"));
+        let keys = selected
+            .into_iter()
+            .map(|spec| spec.key)
+            .collect::<Vec<_>>();
+
+        assert_eq!(keys, vec!["claude", "codex", "gemini"]);
+    }
+
+    #[test]
+    fn selected_review_agent_specs_returns_empty_when_only_author_is_active() {
+        let active = vec!["deepseek".to_string()];
+        let selected = selected_review_agent_specs("deepseek", &active, Some("deepseek"));
+
+        assert!(selected.is_empty());
+    }
 }

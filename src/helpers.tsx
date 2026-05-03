@@ -229,6 +229,7 @@ export function humanizeAgentStatus(status: string) {
   if (normalized === 'TIME_LIMIT_REACHED') return 'Limite de tempo atingido';
   if (normalized === 'COST_LIMIT_REACHED') return 'Limite de custo atingido';
   if (normalized === 'PAUSED_COST_RATES_MISSING') return 'Tarifas de custo ausentes';
+  if (normalized === 'PAUSED_REVIEWERS_UNAVAILABLE') return 'Sem revisor independente';
   if (normalized === 'ALL_PEERS_FAILING') return 'Todos os peers em erro';
   if (normalized === 'PAUSED_WITH_REAL_AGENT_OUTPUTS') return 'Aguardando ajustes';
   return status

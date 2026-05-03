@@ -4,6 +4,28 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.11] - 2026-05-03
+
+Production-log hotfix for v0.5.10 session behavior and diagnostics.
+
+### Fixed
+- Review rounds now exclude the current draft/revision author. An agent can no longer review its own draft, including resumed sessions where the current author is recovered from the latest `round-NNN-...-{draft|revision}.md` artifact.
+- Sessions with no independent reviewer left after that exclusion now pause explicitly as `PAUSED_REVIEWERS_UNAVAILABLE`, with a user-facing "Sem revisor independente" status and guidance to select at least two active agents before resuming.
+- Cost-capped API review rounds now preflight the projected cost of the whole independent review round before starting. If the remaining budget cannot cover all API reviewers, Maestro pauses before launching a partial review round.
+- Sanitized JSON logs now preserve diagnostic field names such as `cloudflare_api_token_env_scope` while still redacting secret values. Field names are no longer corrupted into redacted fragments.
+- Resume-start telemetry no longer reports misleading `prompt_chars: 0` or fake protocol metadata when the prompt/protocol are loaded from the saved session rather than the current frontend editor.
+- Blocked-session frontend logs now persist only the agent count and latest 12 agent summaries instead of embedding the full growing agent history in one NDJSON event.
+- Test fixtures no longer contain literal token-shaped placeholders such as `cfat_...`; redaction tests now assemble those values at runtime to avoid false-positive Secret Scanning alerts.
+
+### Validation
+- `npm run typecheck`: passed.
+- `npm run build`: passed, with the existing Vite large-chunk warning.
+- `cargo check --manifest-path src-tauri/Cargo.toml --locked`: passed.
+- `cargo test --manifest-path src-tauri/Cargo.toml --locked`: 101 passed.
+- `git diff --check`: passed; Git still warns that `src/App.tsx` CRLF will normalize to LF when touched.
+- There is no `npm test` script in `package.json`; frontend validation remains `typecheck` + production `build` for this patch.
+- Cross-review-v2 session `4f6cb687-2bd1-4d8a-af56-cc7aa0e76b49`: recovered unanimity in round 3; Claude and Gemini READY in round 2, DeepSeek READY after the requested literal diff/test evidence in round 3.
+
 ## [v0.5.10] - 2026-05-03
 
 Artifact correctness hotfix from production-session evidence. `ata-da-sessao.md` now groups agent entries by the real `round-NNN-...` artifact name instead of placing every entry under a hard-coded `Rodada 001`. `texto-final.md` is now a clean public deliverable: the internal first-line `MAESTRO_STATUS: READY|NOT_READY` protocol marker is stripped when writing the final text after unanimity, while agent artifacts keep the raw marker for audit/debugging.

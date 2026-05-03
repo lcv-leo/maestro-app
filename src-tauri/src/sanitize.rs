@@ -53,11 +53,7 @@ pub(crate) fn sanitize_text(value: &str, max_len: usize) -> String {
 
 /// Truncates large stderr/stdout text preserving head and tail with a marker in the middle.
 /// Useful for CLIs (Codex, others) that emit large preambles followed by the actual error tail.
-pub(crate) fn truncate_text_head_tail(
-    value: &str,
-    head_chars: usize,
-    tail_chars: usize,
-) -> String {
+pub(crate) fn truncate_text_head_tail(value: &str, head_chars: usize, tail_chars: usize) -> String {
     let redacted = redact_secrets(value);
     let total = redacted.chars().count();
     let cap = head_chars + tail_chars;
@@ -65,10 +61,7 @@ pub(crate) fn truncate_text_head_tail(
         return redacted;
     }
     let head: String = redacted.chars().take(head_chars).collect();
-    let tail: String = redacted
-        .chars()
-        .skip(total - tail_chars)
-        .collect();
+    let tail: String = redacted.chars().skip(total - tail_chars).collect();
     let dropped = total - cap;
     format!(
         "{head}\n\n[... {dropped} chars truncated (head {head_chars} / tail {tail_chars}) ...]\n\n{tail}"
@@ -93,13 +86,11 @@ pub(crate) fn sanitize_value(value: Value, depth: usize) -> Value {
             map.into_iter()
                 .take(120)
                 .map(|(key, value)| {
+                    let safe_key = sanitize_json_key(&key, 120);
                     if should_redact_key(&key) {
-                        (
-                            sanitize_text(&key, 80),
-                            Value::String("<redacted>".to_string()),
-                        )
+                        (safe_key, Value::String("<redacted>".to_string()))
                     } else {
-                        (sanitize_text(&key, 80), sanitize_value(value, depth - 1))
+                        (safe_key, sanitize_value(value, depth - 1))
                     }
                 })
                 .collect(),
@@ -154,10 +145,41 @@ pub(crate) fn should_redact_key(key: &str) -> bool {
         || lowered.contains("private")
 }
 
+fn sanitize_json_key(key: &str, max_len: usize) -> String {
+    key.chars()
+        .filter(|character| !character.is_control())
+        .take(max_len)
+        .collect()
+}
+
 pub(crate) fn redact_secrets(value: &str) -> String {
     secret_value_regex()
         .replace_all(value, "<redacted>")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::sanitize_value;
+
+    #[test]
+    fn sanitize_value_preserves_diagnostic_field_names_while_redacting_values() {
+        let sanitized = sanitize_value(
+            json!({
+                "cloudflare_api_token_env_scope": "process",
+                "api_token": "placeholder value",
+                "token_present": true
+            }),
+            8,
+        );
+
+        assert_eq!(sanitized["cloudflare_api_token_env_scope"], "process");
+        assert_eq!(sanitized["api_token"], "<redacted>");
+        assert_eq!(sanitized["token_present"], true);
+        assert!(sanitized.get("cloudfla<redacted>").is_none());
+    }
 }
 
 fn secret_value_regex() -> &'static Regex {

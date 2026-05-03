@@ -1425,14 +1425,19 @@ export function App() {
       context: {
         run_id: runId,
         session_name: sessionName,
-        prompt_chars: promptText.length,
+        prompt_chars: isResume && promptText.length === 0 ? null : promptText.length,
+        prompt_source: isResume && promptText.length === 0 ? 'saved_session_prompt' : 'current_editor_prompt',
         resume_mode: isResume,
         resume_next_round: resumeOptions?.nextRound ?? null,
         resume_protocol_override: Boolean(resumeOptions?.protocolText),
-        protocol_name: protocol.name,
-        protocol_lines: protocol.lines,
-        protocol_chars: protocolText.length,
-        protocol_hash: protocol.hash,
+        protocol_name: isResume
+          ? resumeOptions?.protocolName ?? 'protocolo salvo na sessao'
+          : protocol.name,
+        protocol_lines: isResume && !resumeOptions?.protocolText ? null : protocol.lines,
+        protocol_chars: isResume && !resumeOptions?.protocolText ? null : protocolText.length,
+        protocol_hash: isResume
+          ? resumeOptions?.protocolHash ?? 'saved_session_protocol'
+          : protocol.hash,
         provider_mode: providerMode,
         credential_storage_mode: credentialStorageMode,
         initial_agent: selectedInitialAgent,
@@ -1587,6 +1592,8 @@ export function App() {
               ? 'O limite de custo opcional foi atingido antes de nova chamada paga. A entrega segue indisponivel.'
               : result.status === 'PAUSED_COST_RATES_MISSING'
               ? 'Um peer via API esta selecionado, mas suas tarifas de entrada e saida ainda nao foram configuradas em Configuracoes > Agentes via API.'
+              : result.status === 'PAUSED_REVIEWERS_UNAVAILABLE'
+              ? 'Nao ha revisor independente disponivel para o rascunho atual. Selecione pelo menos dois agentes ativos e retome a sessao.'
               : result.status === 'ALL_PEERS_FAILING'
               ? 'Todos os peers ativos retornaram erro em 3 rodadas consecutivas. Sessao pausada para nao queimar quota e tempo. Verifique conectividade, chaves de API e quotas; depois retome.'
               : 'A sessao nao entregou texto final nesta chamada. Divergencias exigem novas rodadas ate unanimidade.',
@@ -1613,7 +1620,8 @@ export function App() {
             max_session_cost_usd: result.max_session_cost_usd,
             max_session_minutes: result.max_session_minutes,
             human_log_path: result.human_log_path,
-            agents: result.agents.map((agent) => ({
+            agent_count: result.agents.length,
+            latest_agents: result.agents.slice(-12).map((agent) => ({
               name: agent.name,
               role: agent.role,
               tone: agent.tone,

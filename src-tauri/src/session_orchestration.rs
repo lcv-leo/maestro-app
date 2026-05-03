@@ -100,6 +100,11 @@ pub(crate) fn run_editorial_session_core(
     fs::create_dir_all(&agent_dir)
         .map_err(|error| format!("failed to create session dir: {error}"))?;
     let _finalize_guard = FinalizeRunningArtifactsGuard::new(agent_dir.clone());
+    let cost_scope_id = format!(
+        "{run_id}::cost-scope-{}-{}",
+        log_session.id,
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    );
 
     let saved_contract = load_session_contract(&session_dir);
     let (active_agent_keys, active_agents_source) = resolve_effective_active_agents(
@@ -114,7 +119,7 @@ pub(crate) fn run_editorial_session_core(
         .first()
         .map(|spec| spec.name)
         .unwrap_or("Claude");
-    let log_context = build_active_agents_resolved_log_context(
+    let mut log_context = build_active_agents_resolved_log_context(
         &run_id,
         request.active_agents.as_ref(),
         saved_contract.as_ref(),
@@ -125,6 +130,12 @@ pub(crate) fn run_editorial_session_core(
         request.max_session_cost_usd,
         request.max_session_minutes,
     );
+    if let Some(context) = log_context.as_object_mut() {
+        context.insert(
+            "cost_scope_id".to_string(),
+            json!(cost_scope_id.clone()),
+        );
+    }
     let _ = write_log_record(
         log_session,
         LogEventInput {
@@ -154,7 +165,7 @@ pub(crate) fn run_editorial_session_core(
         resolve_time_budget_anchor(created_at, resume_state.is_some(), Utc::now());
     let ai_provider_config =
         read_ai_provider_config().unwrap_or_else(|_| AiProviderConfig::default());
-    let mut cost_ledger = load_cost_ledger(&session_dir, &run_id);
+    let mut cost_ledger = load_cost_ledger(&session_dir, &run_id, &cost_scope_id);
     let api_agent_keys = active_agent_keys
         .iter()
         .filter(|key| should_run_agent_via_api(key, &ai_provider_config))
@@ -453,7 +464,12 @@ pub(crate) fn run_editorial_session_core(
                 cancel_token,
             );
             agents.push(draft_run.clone());
-            append_agent_cost_to_ledger(&session_dir, &mut cost_ledger, &draft_run)?;
+            append_agent_cost_to_ledger(
+                &session_dir,
+                &mut cost_ledger,
+                &cost_scope_id,
+                &draft_run,
+            )?;
             if draft_run.status == "COST_LIMIT_REACHED" {
                 let minutes_path = session_dir.join("ata-da-sessao.md");
                 write_text_file(
@@ -793,7 +809,12 @@ pub(crate) fn run_editorial_session_core(
                 );
                 let cost_limit_reached = result.status == "COST_LIMIT_REACHED";
                 round_results.push(result.clone());
-                append_agent_cost_to_ledger(&session_dir, &mut cost_ledger, &result)?;
+                append_agent_cost_to_ledger(
+                    &session_dir,
+                    &mut cost_ledger,
+                    &cost_scope_id,
+                    &result,
+                )?;
                 agents.push(result);
                 if cost_limit_reached {
                     break;
@@ -858,7 +879,12 @@ pub(crate) fn run_editorial_session_core(
                     cost_estimated: None,
                 });
                 round_results.push(result.clone());
-                append_agent_cost_to_ledger(&session_dir, &mut cost_ledger, &result)?;
+                append_agent_cost_to_ledger(
+                    &session_dir,
+                    &mut cost_ledger,
+                    &cost_scope_id,
+                    &result,
+                )?;
                 agents.push(result);
             }
         }
@@ -1109,7 +1135,12 @@ pub(crate) fn run_editorial_session_core(
                 cancel_token,
             );
             agents.push(revision_run.clone());
-            append_agent_cost_to_ledger(&session_dir, &mut cost_ledger, &revision_run)?;
+            append_agent_cost_to_ledger(
+                &session_dir,
+                &mut cost_ledger,
+                &cost_scope_id,
+                &revision_run,
+            )?;
             if revision_run.status == "COST_LIMIT_REACHED" {
                 let minutes_path = session_dir.join("ata-da-sessao.md");
                 write_text_file(
@@ -1209,5 +1240,52 @@ fn current_draft_author_from_path(agent_dir: &Path, path: Option<&PathBuf>) -> O
         Some(artifact.agent)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::current_draft_author_from_path;
+
+    #[test]
+    fn resume_author_recovery_reads_latest_draft_or_revision_artifact() {
+        let agent_dir = PathBuf::from("agent-runs");
+
+        assert_eq!(
+            current_draft_author_from_path(
+                &agent_dir,
+                Some(&PathBuf::from("agent-runs/round-072-codex-draft.md")),
+            ),
+            Some("codex".to_string())
+        );
+        assert_eq!(
+            current_draft_author_from_path(
+                &agent_dir,
+                Some(&PathBuf::from("agent-runs/round-073-claude-revision.md")),
+            ),
+            Some("claude".to_string())
+        );
+    }
+
+    #[test]
+    fn resume_author_recovery_ignores_review_or_invalid_artifacts() {
+        let agent_dir = PathBuf::from("agent-runs");
+
+        assert_eq!(
+            current_draft_author_from_path(
+                &agent_dir,
+                Some(&PathBuf::from("agent-runs/round-072-codex-review.md")),
+            ),
+            None
+        );
+        assert_eq!(
+            current_draft_author_from_path(
+                &agent_dir,
+                Some(&PathBuf::from("agent-runs/not-an-artifact.md")),
+            ),
+            None
+        );
     }
 }

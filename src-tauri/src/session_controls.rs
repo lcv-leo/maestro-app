@@ -35,14 +35,10 @@ pub(crate) fn normalize_active_agents(values: Option<&Vec<String>>) -> Result<Ve
         .into_iter()
         .collect::<Vec<_>>();
     for value in candidates {
-        let normalized = value.trim().to_ascii_lowercase();
-        let key = match normalized.as_str() {
-            "claude" | "anthropic" => "claude",
-            "codex" | "openai" | "chatgpt" => "codex",
-            "gemini" | "google" => "gemini",
-            "deepseek" | "deepseek-api" => "deepseek",
-            "" => continue,
-            _ => {
+        let key = match canonical_editorial_agent_key(&value) {
+            Some(key) => key,
+            None if value.trim().is_empty() => continue,
+            None => {
                 return Err(format!(
                     "agente editorial desconhecido: {}",
                     sanitize_text(&value, 80)
@@ -57,6 +53,17 @@ pub(crate) fn normalize_active_agents(values: Option<&Vec<String>>) -> Result<Ve
         return Err("selecione de 1 a 4 peers editoriais".to_string());
     }
     Ok(selected)
+}
+
+pub(crate) fn canonical_editorial_agent_key(value: &str) -> Option<&'static str> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "claude" | "anthropic" => Some("claude"),
+        "codex" | "openai" | "chatgpt" => Some("codex"),
+        "gemini" | "google" => Some("gemini"),
+        "deepseek" | "deepseek-api" => Some("deepseek"),
+        _ => None,
+    }
 }
 
 pub(crate) fn selected_editorial_agent_specs(
@@ -79,12 +86,25 @@ pub(crate) fn selected_review_agent_specs(
     current_draft_author_key: Option<&str>,
 ) -> Vec<EditorialAgentSpec> {
     let author = current_draft_author_key
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+        .and_then(canonical_editorial_agent_key);
     selected_editorial_agent_specs(first_key, active_agents)
         .into_iter()
-        .filter(|spec| author != Some(spec.key))
+        .filter(|spec| can_agent_review_current_draft(spec.key, author))
         .collect()
+}
+
+pub(crate) fn can_agent_review_current_draft(
+    candidate_key: &str,
+    current_draft_author_key: Option<&str>,
+) -> bool {
+    // Colegiate-review invariant: the current draft/revision author is the
+    // petitioner for this cycle, not a voting reviewer of that same text.
+    // Fail closed when the candidate and author normalize to the same agent.
+    let Some(candidate) = canonical_editorial_agent_key(candidate_key) else {
+        return false;
+    };
+    let author = current_draft_author_key.and_then(canonical_editorial_agent_key);
+    author != Some(candidate)
 }
 
 pub(crate) fn effective_draft_lead(
@@ -179,7 +199,7 @@ pub(crate) fn usage_tokens(parsed: &Value) -> (Option<u64>, Option<u64>) {
 
 #[cfg(test)]
 mod tests {
-    use super::selected_review_agent_specs;
+    use super::{can_agent_review_current_draft, selected_review_agent_specs};
 
     #[test]
     fn selected_review_agent_specs_excludes_current_draft_author() {
@@ -200,10 +220,36 @@ mod tests {
     }
 
     #[test]
+    fn selected_review_agent_specs_excludes_author_aliases_case_and_whitespace() {
+        let active = vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "gemini".to_string(),
+            "deepseek".to_string(),
+        ];
+
+        let selected = selected_review_agent_specs("claude", &active, Some("  OpenAI  "));
+        let keys = selected
+            .into_iter()
+            .map(|spec| spec.key)
+            .collect::<Vec<_>>();
+
+        assert_eq!(keys, vec!["claude", "gemini", "deepseek"]);
+    }
+
+    #[test]
     fn selected_review_agent_specs_returns_empty_when_only_author_is_active() {
         let active = vec!["deepseek".to_string()];
         let selected = selected_review_agent_specs("deepseek", &active, Some("deepseek"));
 
         assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn can_agent_review_current_draft_fails_closed_for_same_normalized_agent() {
+        assert!(!can_agent_review_current_draft("codex", Some("openai")));
+        assert!(!can_agent_review_current_draft("gemini", Some(" GOOGLE ")));
+        assert!(can_agent_review_current_draft("claude", Some("codex")));
+        assert!(can_agent_review_current_draft("deepseek", None));
     }
 }

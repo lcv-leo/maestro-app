@@ -4,6 +4,29 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.14] - 2026-05-03
+
+Hotfix for resumed sessions whose permanent session `run_id` matched old cost-ledger history.
+
+### Fixed
+- Resumed executions now create a fresh `cost_scope_id` per orchestration attempt. The session `run_id` remains the stable folder/session id, while cost-limit enforcement and new ledger entries use the attempt scope.
+- Legacy ledgers whose top-level `run_id` is the same as the resumed session id no longer charge their historical entries against a newly requested resume cost limit.
+- The `session.editorial.active_agents_resolved` NDJSON event now includes `cost_scope_id`, making future budget investigations distinguishable from the permanent session id.
+- Resumed sessions now have explicit tests pinning author recovery from draft/revision artifacts, so the current author remains excluded from reviewing their own text. This formalizes Maestro's colegiate-review rule: the agent that drafts or resumes the current text is the petitioner for that cycle, not a voting reviewer of that same text.
+
+### Validation
+- `cargo test --manifest-path src-tauri/Cargo.toml --locked cost_ledger_ --lib`: 3 passed.
+- `cargo test --manifest-path src-tauri/Cargo.toml --locked selected_review_agent_specs --lib`: 3 passed.
+- `cargo test --manifest-path src-tauri/Cargo.toml --locked can_agent_review_current_draft --lib`: 1 passed.
+- `cargo test --manifest-path src-tauri/Cargo.toml --locked resume_author_recovery --lib`: 2 passed.
+- `npm run typecheck`: passed.
+- `npm run build`: passed, with the existing Vite large-chunk warning.
+- `npm audit --audit-level=moderate`: found 0 vulnerabilities.
+- `cargo check --manifest-path src-tauri/Cargo.toml --locked`: passed.
+- `cargo test --manifest-path src-tauri/Cargo.toml --locked`: 112 passed.
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --locked --no-deps --all-targets`: passed with the pre-existing `items_after_test_module` warning in `sanitize.rs`.
+- `cross-review-v2` session `a7f8e77a-ba3b-4d2d-82b5-472529563b62`: converged in round 4 with Claude, Gemini, and DeepSeek READY after literal code/test evidence was supplied.
+
 ## [v0.5.13] - 2026-05-03
 
 Hotfix for resumed sessions inheriting previous cost-ledger totals.

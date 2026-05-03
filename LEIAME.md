@@ -57,6 +57,7 @@ Em `Ajustes > Agentes via API`, informe as chaves e clique em `Salvar APIs` para
 DeepSeek usa API, nao CLI local. Para que ele opere sem digitar a chave a cada execucao, configure `MAESTRO_DEEPSEEK_API_KEY` ou `DEEPSEEK_API_KEY` no Windows, ou salve a chave pelo fluxo de APIs do app.
 
 Quando qualquer peer rodar via API, defina tambem as tarifas de entrada/saida e o limite maximo de custo da sessao em USD antes de iniciar ou retomar. O Maestro nao executa chamada paga sem teto de custo informado pelo usuario.
+Em retomadas, esse teto vale para a tentativa atual: custos de execucoes anteriores ficam preservados no historico, inclusive historicos legados sem identificador de execucao, mas nao consomem o novo limite informado.
 
 ## Modos de persistencia
 

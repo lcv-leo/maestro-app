@@ -477,6 +477,7 @@ fn default_session_contract_schema_version() -> u8 {
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct CostLedger {
     pub(crate) schema_version: u8,
+    #[serde(default)]
     pub(crate) run_id: String,
     pub(crate) total_observed_cost_usd: f64,
     pub(crate) entries: Vec<CostLedgerEntry>,
@@ -484,6 +485,8 @@ pub(crate) struct CostLedger {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct CostLedgerEntry {
+    #[serde(default)]
+    pub(crate) run_id: String,
     pub(crate) at: String,
     pub(crate) provider: String,
     pub(crate) agent: String,

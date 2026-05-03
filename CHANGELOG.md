@@ -4,6 +4,26 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.13] - 2026-05-03
+
+Hotfix for resumed sessions inheriting previous cost-ledger totals.
+
+### Fixed
+- `cost-ledger.json` now scopes `total_observed_cost_usd` to the current `run_id` when a session is resumed. Historical entries remain in the ledger, but previous runs no longer consume the new resume attempt's cost ceiling.
+- New cost entries persist their `run_id`; legacy entries without `run_id` are attributed to the ledger's saved `run_id` during load so old history remains auditable without blocking the current run.
+- Rootless legacy ledgers without a top-level `run_id` now deserialize safely and keep their entries as `__legacy_unscoped__` history instead of counting them against the resumed attempt.
+
+### Validation
+- `cargo test --manifest-path src-tauri/Cargo.toml --locked cost_ledger_ --lib`: 2 passed.
+- `npm run typecheck`: passed.
+- `npm run build`: passed, with the existing Vite large-chunk warning.
+- `npm audit --audit-level=moderate`: found 0 vulnerabilities.
+- `cargo check --manifest-path src-tauri/Cargo.toml --locked`: passed.
+- `cargo test --manifest-path src-tauri/Cargo.toml --locked`: 106 passed.
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --locked --no-deps --all-targets`: passed with the pre-existing `items_after_test_module` warning in `sanitize.rs`.
+- `git diff --check`: passed; Git still warns that `src-tauri/tauri.conf.json` CRLF will normalize to LF when touched.
+- `cross-review-v2` session `7b63c0da-140f-4083-b8d3-bad4b76ff1a3`: converged in round 2 with Claude, Gemini, and DeepSeek READY after adding top-level `CostLedger.run_id` serde compatibility and the rootless legacy-ledger regression test.
+
 ## [v0.5.12] - 2026-05-03
 
 Production-log follow-up for DeepSeek artifacts and API spend controls.

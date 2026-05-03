@@ -160,6 +160,64 @@ pub(crate) fn run_editorial_session_core(
         .filter(|key| should_run_agent_via_api(key, &ai_provider_config))
         .cloned()
         .collect::<BTreeSet<_>>();
+    if !api_agent_keys.is_empty() && max_session_cost_usd.is_none() {
+        let _ = write_log_record(
+            log_session,
+            LogEventInput {
+                level: "warn".to_string(),
+                category: "session.cost.limit_required".to_string(),
+                message: "API usage requires an explicit session cost limit before paid providers are called"
+                    .to_string(),
+                context: Some(json!({
+                    "run_id": &run_id,
+                    "api_agents": api_agent_keys.iter().cloned().collect::<Vec<_>>(),
+                    "active_agents": active_agent_keys.clone(),
+                    "policy": "paid_api_calls_require_operator_defined_max_session_cost_usd"
+                })),
+            },
+        );
+        let prompt_path = session_dir.join("prompt.md");
+        let protocol_path = session_dir.join("protocolo.md");
+        let _ = write_text_file(
+            &prompt_path,
+            &format!(
+                "# Prompt da Sessao\n\nSessao: {}\nRun: `{}`\nAgente redator inicial: `{}`\n\n{}",
+                sanitize_text(&request.session_name, 200),
+                run_id,
+                draft_lead_key,
+                prompt
+            ),
+        );
+        let _ = write_text_file(&protocol_path, &request.protocol_text);
+        let minutes_path = session_dir.join("ata-da-sessao.md");
+        write_text_file(
+            &minutes_path,
+            &build_session_minutes(request, &run_id, &[], false, None),
+        )?;
+        return Ok(EditorialSessionResult {
+            run_id,
+            session_dir: session_dir.to_string_lossy().to_string(),
+            final_markdown_path: None,
+            session_minutes_path: minutes_path.to_string_lossy().to_string(),
+            prompt_path: prompt_path.to_string_lossy().to_string(),
+            protocol_path: protocol_path.to_string_lossy().to_string(),
+            draft_path: None,
+            agents: Vec::new(),
+            consensus_ready: false,
+            status: "PAUSED_COST_LIMIT_REQUIRED".to_string(),
+            active_agents: active_agent_keys,
+            max_session_cost_usd,
+            max_session_minutes,
+            observed_cost_usd: Some(cost_ledger.total_observed_cost_usd),
+            links_path: None,
+            attachments_manifest_path: None,
+            human_log_path: Some(
+                human_log_path_for(&log_session.path)
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+        });
+    }
     let mut provider_cost_rates = BTreeMap::new();
     for agent_key in &api_agent_keys {
         match provider_cost_rates_from_config(agent_key, &ai_provider_config) {

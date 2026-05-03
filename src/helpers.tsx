@@ -228,7 +228,10 @@ export function humanizeAgentStatus(status: string) {
   if (normalized === 'PAUSED_DRAFT_UNAVAILABLE') return 'Rascunho indisponivel';
   if (normalized === 'TIME_LIMIT_REACHED') return 'Limite de tempo atingido';
   if (normalized === 'COST_LIMIT_REACHED') return 'Limite de custo atingido';
+  if (normalized === 'PAUSED_COST_LIMIT_REQUIRED') return 'Limite de custo necessario';
   if (normalized === 'PAUSED_COST_RATES_MISSING') return 'Tarifas de custo ausentes';
+  if (normalized.startsWith('PROVIDER_INCOMPLETE_RESPONSE')) return 'Resposta incompleta do provedor';
+  if (normalized.startsWith('PROVIDER_EMPTY_CONTENT')) return 'Resposta vazia do provedor';
   if (normalized === 'PAUSED_REVIEWERS_UNAVAILABLE') return 'Sem revisor independente';
   if (normalized === 'ALL_PEERS_FAILING') return 'Todos os peers em erro';
   if (normalized === 'PAUSED_WITH_REAL_AGENT_OUTPUTS') return 'Aguardando ajustes';

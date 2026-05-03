@@ -4,6 +4,24 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.12] - 2026-05-03
+
+Production-log follow-up for DeepSeek artifacts and API spend controls.
+
+### Fixed
+- DeepSeek API responses now persist only the final assistant `message.content` as agent stdout. Responses that contain only `reasoning_content`, empty content, or `finish_reason=length` are recorded as provider failures with concise diagnostics; raw provider JSON is no longer treated as an editorial draft/review artifact.
+- DeepSeek API cancellation now uses tone `blocked` with status `STOPPED_BY_USER`, matching the CLI cancellation path instead of surfacing an operator stop as an error.
+- Sessions with API-backed peers now require an explicit USD session cost limit before any paid provider call is started. The frontend blocks start/resume with a user-facing warning, and the backend returns `PAUSED_COST_LIMIT_REQUIRED` as a hard safety gate if a caller bypasses the UI.
+
+### Validation
+- `npm run typecheck`: passed.
+- `npm run build`: passed, with the existing Vite large-chunk warning.
+- `cargo check --manifest-path src-tauri/Cargo.toml --locked`: passed.
+- `cargo test --manifest-path src-tauri/Cargo.toml --locked deepseek_ --lib`: 6 passed.
+- `cargo test --manifest-path src-tauri/Cargo.toml --locked`: 105 passed.
+- `git diff --check`: passed; Git still warns that `src/App.tsx` CRLF will normalize to LF when touched.
+- `cross-review-v2` session `d84e5aa7-24fd-460d-97b3-f55226e10f10`: round 3 unanimous READY; outcome `converged` / `unanimous_ready`.
+
 ## [v0.5.11] - 2026-05-03
 
 Production-log hotfix for v0.5.10 session behavior and diagnostics.

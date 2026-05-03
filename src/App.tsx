@@ -244,6 +244,8 @@ export function App() {
     (agent) => agentUsesApi(agent) && !providerRatesConfigured(providerForAgent[agent]),
   );
   const costRatesRequired = agentsMissingCostRates.length > 0;
+  const apiAgentsSelected = activeAgents.filter((agent) => agentUsesApi(agent));
+  const apiCostLimitRequired = apiAgentsSelected.length > 0 && maxSessionCostUsd.trim().length === 0;
   const activeApiAttachmentProviders = activeAgents
     .filter((agent) => agentUsesApi(agent))
     .map((agent) => providerForAgent[agent])
@@ -1104,6 +1106,15 @@ export function App() {
     if (!activeAgents.includes(initialAgent)) {
       throw new Error('O agente da primeira versao precisa estar entre os peers ativos.');
     }
+    const apiAgentLabels = activeAgents
+      .filter((agent) => agentUsesApi(agent))
+      .map((agent) => initialAgentOptions.find((option) => option.key === agent)?.label ?? agent);
+    const maxCostUsd = parseOptionalPositiveNumber(maxSessionCostUsd, 'Limite de custo');
+    if (apiAgentLabels.length > 0 && maxCostUsd == null) {
+      throw new Error(
+        `Defina um limite de custo em USD para usar peers via API (${apiAgentLabels.join(', ')}). Chamadas pagas nao rodam sem teto definido pelo usuario.`,
+      );
+    }
     const missingRateLabels = activeAgents
       .filter((agent) => agentUsesApi(agent))
       .filter((agent) => {
@@ -1120,7 +1131,7 @@ export function App() {
     }
     return {
       activeAgents,
-      maxSessionCostUsd: parseOptionalPositiveNumber(maxSessionCostUsd, 'Limite de custo'),
+      maxSessionCostUsd: maxCostUsd,
       maxSessionMinutes: parseOptionalPositiveInteger(maxSessionMinutes, 'Limite de tempo'),
       attachments: promptAttachments,
       links: parseSessionLinks(),
@@ -1590,6 +1601,8 @@ export function App() {
               ? 'O limite de tempo opcional foi atingido. A entrega segue indisponivel ate nova sessao ou retomada ajustada.'
               : result.status === 'COST_LIMIT_REACHED'
               ? 'O limite de custo opcional foi atingido antes de nova chamada paga. A entrega segue indisponivel.'
+              : result.status === 'PAUSED_COST_LIMIT_REQUIRED'
+              ? 'Defina um limite de custo em USD para usar peers via API. Chamadas pagas nao rodam sem teto configurado pelo usuario.'
               : result.status === 'PAUSED_COST_RATES_MISSING'
               ? 'Um peer via API esta selecionado, mas suas tarifas de entrada e saida ainda nao foram configuradas em Configuracoes > Agentes via API.'
               : result.status === 'PAUSED_REVIEWERS_UNAVAILABLE'
@@ -2248,6 +2261,18 @@ export function App() {
                       </span>
                     </div>
                   )}
+                  {apiCostLimitRequired && (
+                    <div className="session-warning" role="status">
+                      <AlertTriangle size={16} />
+                      <span>
+                        Defina um limite de custo em USD para peers via API:{' '}
+                        {apiAgentsSelected
+                          .map((agent) => initialAgentOptions.find((option) => option.key === agent)?.label ?? agent)
+                          .join(', ')}
+                        .
+                      </span>
+                    </div>
+                  )}
                   <div className="limit-grid">
                     <label title="Verificado entre rodadas e como timeout por chamada. Em branco = sem teto.">
                       <Clock3 size={16} />
@@ -2260,14 +2285,14 @@ export function App() {
                         disabled={isRunPreparing}
                       />
                     </label>
-                    <label title="Aplica-se apenas a peers em modo API. Peers via CLI rodam sob assinatura. Em branco = sem teto.">
+                    <label title="Aplica-se apenas a peers em modo API. Chamadas pagas exigem teto definido pelo usuario.">
                       <Database size={16} />
                       <span>Custo max. USD</span>
                       <input
                         value={maxSessionCostUsd}
                         onChange={(event) => setMaxSessionCostUsd(event.target.value)}
                         inputMode="decimal"
-                        placeholder="5.00 (em branco = sem teto)"
+                        placeholder="5.00"
                         disabled={isRunPreparing}
                       />
                     </label>

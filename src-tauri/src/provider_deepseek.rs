@@ -312,69 +312,76 @@ pub(crate) async fn run_deepseek_api_agent(
                 .zip(usage_output_tokens)
                 .map(|(input, output)| provider_cost(input, output, guard.rates))
         });
-        let stdout = parsed
-            .pointer("/choices/0/message/content")
+        let stdout = match deepseek_assistant_content(&parsed) {
+            Ok(content) => content,
+            Err(status) => {
+                return write_deepseek_error_result(
+                    log_session,
+                    run_id,
+                    role,
+                    output_path,
+                    &model,
+                    &status,
+                    started.elapsed().as_millis(),
+                );
+            }
+        };
+        let model_reported = parsed
+            .get("model")
             .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(body_text.trim())
-            .to_string();
-            let model_reported = parsed
-                .get("model")
-                .and_then(Value::as_str)
-                .unwrap_or(&model);
-            let status = if role == "review" {
-                if stdout.trim().is_empty() {
-                    "AGENT_FAILED_EMPTY"
-                } else {
-                    extract_maestro_status(&stdout).unwrap_or("NOT_READY")
-                }
-            } else if stdout.trim().is_empty() {
-                "EMPTY_DRAFT"
+            .unwrap_or(&model);
+        let status = if role == "review" {
+            if stdout.trim().is_empty() {
+                "AGENT_FAILED_EMPTY"
             } else {
-                "DRAFT_CREATED"
-            };
-            let tone = if status == "READY" || status == "DRAFT_CREATED" {
-                "ok"
-            } else if status == "EMPTY_DRAFT" || status == "AGENT_FAILED_EMPTY" {
-                "error"
-            } else {
-                "warn"
-            };
-            let artifact = format!(
-                "# {name} - {role}\n\n- CLI: `{cli}`\n- Provider: `deepseek`\n- Model: `{}`\n- Model reported: `{}`\n- Key source: `{}`\n- Status: `{status}`\n- Exit code: `0`\n- Duration ms: `{}`\n- Prompt chars: `{}`\n- Stdout chars: `{}`\n- Usage input tokens: `{}`\n- Usage output tokens: `{}`\n- Cost USD: `{}`\n- Stderr chars: `0`\n\n## Stdout\n\n```text\n{}\n```\n\n## Stderr\n\n```text\n\n```\n",
-                model,
-                sanitize_text(model_reported, 120),
-                sanitize_text(&key_source, 120),
-                started.elapsed().as_millis(),
-                prompt.chars().count(),
-                stdout.chars().count(),
-                usage_input_tokens
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "unknown".to_string()),
-                usage_output_tokens
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "unknown".to_string()),
-                cost_usd
-                    .map(|value| format!("{value:.8}"))
-                    .unwrap_or_else(|| "unknown".to_string()),
-                stdout
-            );
-            let _ = write_text_file(output_path, &artifact);
-            let result = EditorialAgentResult {
-                name: name.to_string(),
-                role: role.to_string(),
-                cli: cli.to_string(),
-                tone: tone.to_string(),
-                status: status.to_string(),
-                duration_ms: started.elapsed().as_millis(),
-                exit_code: Some(0),
-                output_path: output_path.to_string_lossy().to_string(),
-                usage_input_tokens,
-                usage_output_tokens,
-                cost_usd,
-                cost_estimated: cost_usd.map(|_| true),
-            };
+                extract_maestro_status(&stdout).unwrap_or("NOT_READY")
+            }
+        } else if stdout.trim().is_empty() {
+            "EMPTY_DRAFT"
+        } else {
+            "DRAFT_CREATED"
+        };
+        let tone = if status == "READY" || status == "DRAFT_CREATED" {
+            "ok"
+        } else if status == "EMPTY_DRAFT" || status == "AGENT_FAILED_EMPTY" {
+            "error"
+        } else {
+            "warn"
+        };
+        let artifact = format!(
+            "# {name} - {role}\n\n- CLI: `{cli}`\n- Provider: `deepseek`\n- Model: `{}`\n- Model reported: `{}`\n- Key source: `{}`\n- Status: `{status}`\n- Exit code: `0`\n- Duration ms: `{}`\n- Prompt chars: `{}`\n- Stdout chars: `{}`\n- Usage input tokens: `{}`\n- Usage output tokens: `{}`\n- Cost USD: `{}`\n- Stderr chars: `0`\n\n## Stdout\n\n```text\n{}\n```\n\n## Stderr\n\n```text\n\n```\n",
+            model,
+            sanitize_text(model_reported, 120),
+            sanitize_text(&key_source, 120),
+            started.elapsed().as_millis(),
+            prompt.chars().count(),
+            stdout.chars().count(),
+            usage_input_tokens
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            usage_output_tokens
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            cost_usd
+                .map(|value| format!("{value:.8}"))
+                .unwrap_or_else(|| "unknown".to_string()),
+            stdout
+        );
+        let _ = write_text_file(output_path, &artifact);
+        let result = EditorialAgentResult {
+            name: name.to_string(),
+            role: role.to_string(),
+            cli: cli.to_string(),
+            tone: tone.to_string(),
+            status: status.to_string(),
+            duration_ms: started.elapsed().as_millis(),
+            exit_code: Some(0),
+            output_path: output_path.to_string_lossy().to_string(),
+            usage_input_tokens,
+            usage_output_tokens,
+            cost_usd,
+            cost_estimated: cost_usd.map(|_| true),
+        };
         log_editorial_agent_finished(
             log_session,
             run_id,
@@ -413,7 +420,7 @@ pub(crate) fn write_deepseek_error_result(
         name: name.to_string(),
         role: role.to_string(),
         cli: cli.to_string(),
-        tone: "error".to_string(),
+        tone: deepseek_error_tone(&safe_status).to_string(),
         status: safe_status,
         duration_ms,
         exit_code: None,
@@ -433,6 +440,47 @@ pub(crate) fn write_deepseek_error_result(
         false,
     );
     result
+}
+
+fn deepseek_assistant_content(parsed: &Value) -> Result<String, String> {
+    if let Some(content) = parsed
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(content.to_string());
+    }
+
+    let finish_reason = parsed
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let reasoning_chars = parsed
+        .pointer("/choices/0/message/reasoning_content")
+        .and_then(Value::as_str)
+        .map(|value| value.trim().chars().count())
+        .unwrap_or(0);
+    let status = if finish_reason.eq_ignore_ascii_case("length") || reasoning_chars > 0 {
+        "PROVIDER_INCOMPLETE_RESPONSE"
+    } else {
+        "PROVIDER_EMPTY_CONTENT"
+    };
+
+    Err(sanitize_text(
+        &format!(
+            "{status}: DeepSeek did not return final assistant content; finish_reason={finish_reason}; reasoning_content_chars={reasoning_chars}; raw provider JSON omitted from artifact"
+        ),
+        240,
+    ))
+}
+
+fn deepseek_error_tone(status: &str) -> &'static str {
+    if status.trim().eq_ignore_ascii_case("STOPPED_BY_USER") {
+        "blocked"
+    } else {
+        "error"
+    }
 }
 
 pub(crate) fn deepseek_model() -> String {
@@ -521,5 +569,71 @@ mod tests {
                 "deepseek-v4-pro".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn deepseek_assistant_content_extracts_final_content_only() {
+        let value = json!({
+            "choices": [
+                {
+                    "message": {
+                        "reasoning_content": "internal reasoning",
+                        "content": "MAESTRO_STATUS: READY\nFinal text."
+                    },
+                    "finish_reason": "stop"
+                }
+            ]
+        });
+
+        assert_eq!(
+            deepseek_assistant_content(&value).unwrap(),
+            "MAESTRO_STATUS: READY\nFinal text."
+        );
+    }
+
+    #[test]
+    fn deepseek_assistant_content_rejects_reasoning_only_json() {
+        let value = json!({
+            "choices": [
+                {
+                    "message": {
+                        "reasoning_content": "reasoned for a long time",
+                        "content": ""
+                    },
+                    "finish_reason": "length"
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2}
+        });
+
+        let error = deepseek_assistant_content(&value).unwrap_err();
+
+        assert!(error.starts_with("PROVIDER_INCOMPLETE_RESPONSE"));
+        assert!(error.contains("raw provider JSON omitted"));
+    }
+
+    #[test]
+    fn deepseek_assistant_content_rejects_empty_content_without_reasoning() {
+        let value = json!({
+            "choices": [
+                {
+                    "message": {
+                        "content": ""
+                    },
+                    "finish_reason": "stop"
+                }
+            ]
+        });
+
+        let error = deepseek_assistant_content(&value).unwrap_err();
+
+        assert!(error.starts_with("PROVIDER_EMPTY_CONTENT"));
+        assert!(error.contains("raw provider JSON omitted"));
+    }
+
+    #[test]
+    fn deepseek_stop_by_user_is_blocked_not_error() {
+        assert_eq!(deepseek_error_tone("STOPPED_BY_USER"), "blocked");
+        assert_eq!(deepseek_error_tone("PROVIDER_EMPTY_CONTENT"), "error");
     }
 }

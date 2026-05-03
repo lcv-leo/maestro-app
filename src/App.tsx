@@ -5,11 +5,9 @@ import {
   CheckCircle2,
   Clock3,
   Database,
-  Eye,
   EyeOff,
   FileText,
   FilePlus2,
-  GitBranch,
   HardDriveDownload,
   KeyRound,
   ListChecks,
@@ -17,796 +15,100 @@ import {
   Play,
   RefreshCw,
   Search,
-  Settings,
   ShieldCheck,
   Square,
   Upload,
   Globe2,
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
-import type { ChangeEvent, ComponentType } from 'react';
+import type { ChangeEvent } from 'react';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import packageJson from '../package.json';
 import { logEvent } from './diagnostics';
 import { useEscapeKey } from './hooks/useEscapeKey';
+import {
+  aiProviderRows,
+  attachmentLimits,
+  contentPipelines,
+  credentialStorageModes,
+  defaultActiveAgents,
+  finalArtifacts,
+  idleActivityFeed,
+  idleOperation,
+  idlePhases,
+  importChannels,
+  initialAgentOptions,
+  initialAgents,
+  initialAiProviderChecks,
+  initialBootstrapChecks,
+  initialCloudflarePermissionChecks,
+  initialDiscussionRounds,
+  initialEvidenceRows,
+  initialProtocolReadingGates,
+  navGroups,
+  navItems,
+  providerRateRows,
+  settingsTabs,
+  storageModeSummaries,
+  verbosityOptions,
+  webEvidenceTools,
+} from './constants';
+import {
+  attachmentDeliveryHint,
+  attachmentDeliveryPlan,
+  formatBrazilDateTime,
+  formatBytes,
+  formatElapsedTime,
+  humanizeAgentStatus,
+  humanizeRunStatus,
+  latestAgentCards,
+  latestProtocolGateItems,
+  operationMeterLabel,
+  sha256,
+  stateIcon,
+  stateLabel,
+  summarizeAgentResults,
+} from './helpers';
+import type {
+  ActiveSection,
+  ActivityItem,
+  AgentCard,
+  AgentState,
+  AiCredentialKey,
+  AiProviderConfig,
+  AiProviderProbeResult,
+  AiProviderProbeRow,
+  BootstrapCheckRow,
+  BootstrapConfig,
+  CloudflareEnvSnapshot,
+  CloudflarePermissionRow,
+  CloudflareProbeResult,
+  CloudflareProviderStorageRequest,
+  CloudflareTokenSource,
+  CredentialStorageMode,
+  DependencyPreflight,
+  DiscussionRound,
+  EditorialSessionResult,
+  EvidenceRow,
+  InitialAgentKey,
+  LinkAuditResult,
+  OperationSnapshot,
+  PhaseItem,
+  PromptAttachmentPayload,
+  ProtocolReadingGate,
+  ProtocolSnapshot,
+  ProviderMode,
+  ProviderRateKey,
+  ResumableSessionInfo,
+  SessionRunOptions,
+  SettingsTab,
+  VerbosityMode,
+} from './types';
 
 const PostEditor = lazy(() => import('./editor/posteditor/PostEditor'));
 
 const APP_VERSION = `v${packageJson.version}`;
 
-type ProtocolSnapshot = {
-  name: string;
-  size: number;
-  lines: number;
-  hash: string;
-};
-
-type AgentState = 'ready' | 'blocked' | 'evidence' | 'running';
-type VerbosityMode = 'resumo' | 'detalhado' | 'diagnostico';
-type PhaseState = 'done' | 'active' | 'waiting';
-type ProviderMode = 'cli' | 'api' | 'hybrid';
-type AiCredentialKey = 'openai' | 'anthropic' | 'gemini' | 'deepseek';
-type InitialAgentKey = 'claude' | 'codex' | 'gemini' | 'deepseek';
-type ProviderRateKey = AiCredentialKey;
-type NativeAttachmentProvider = Exclude<AiCredentialKey, 'deepseek'>;
-type CredentialStorageMode = 'local_json' | 'windows_env' | 'cloudflare';
-type CloudflareTokenSource = 'prompt_each_launch' | 'windows_env' | 'local_encrypted';
-type ActiveSection = 'session' | 'protocols' | 'evidence' | 'agents' | 'settings' | 'setup';
-type SettingsTab = 'providers' | 'cloudflare';
-type RunStatus = 'idle' | 'preparing' | 'running' | 'paused' | 'blocked' | 'completed';
-type ActivityLevel = 'summary' | 'detail' | 'diagnostic';
-type NavItem = { section: ActiveSection; label: string; icon: ComponentType<{ size?: number }> };
-
-type OperationSnapshot = {
-  title: string;
-  progress: number;
-  current: string;
-  eta: string;
-  status: RunStatus;
-};
-
-type AgentCard = {
-  name: string;
-  cli: string;
-  state: AgentState;
-  note: string;
-};
-
-type ActivityItem = {
-  level: ActivityLevel;
-  time: string;
-  title: string;
-  detail: string;
-};
-
-type PhaseItem = {
-  label: string;
-  detail: string;
-  state: PhaseState;
-};
-
-type DiscussionRound = {
-  round: string;
-  status: string;
-  note: string;
-};
-
-type EvidenceRow = {
-  label: string;
-  value: string;
-  tone: 'idle' | 'ok' | 'warn' | 'danger' | 'info';
-};
-
-type CloudflarePermissionRow = {
-  label: string;
-  value: string;
-  tone: 'pending' | 'blocked' | 'ok' | 'warn' | 'error';
-};
-
-type BootstrapCheckRow = {
-  label: string;
-  value: string;
-  tone: 'pending' | 'blocked' | 'ok' | 'warn';
-};
-
-type BootstrapConfig = {
-  schema_version: number;
-  credential_storage_mode: CredentialStorageMode;
-  cloudflare_account_id: string | null;
-  cloudflare_api_token_source: CloudflareTokenSource;
-  cloudflare_api_token_env_var: string;
-  cloudflare_persistence_database: string;
-  cloudflare_secret_store: string;
-  windows_env_prefix: string;
-  updated_at: string;
-};
-
-type CloudflareEnvSnapshot = {
-  account_id: string | null;
-  account_id_env_var: string | null;
-  account_id_env_scope: string | null;
-  api_token_present: boolean;
-  api_token_env_var: string | null;
-  api_token_env_scope: string | null;
-};
-
-type DependencyPreflight = {
-  checks: BootstrapCheckRow[];
-};
-
-type CloudflareProbeResult = {
-  rows: CloudflarePermissionRow[];
-};
-
-type CloudflareProviderStorageRequest = {
-  account_id: string;
-  api_token: string | null;
-  api_token_env_var: string;
-  persistence_database: string;
-  secret_store: string;
-};
-
-type AiProviderConfig = {
-  schema_version: number;
-  provider_mode: ProviderMode;
-  credential_storage_mode: CredentialStorageMode;
-  openai_api_key: string | null;
-  anthropic_api_key: string | null;
-  gemini_api_key: string | null;
-  deepseek_api_key: string | null;
-  openai_api_key_remote: boolean;
-  anthropic_api_key_remote: boolean;
-  gemini_api_key_remote: boolean;
-  deepseek_api_key_remote: boolean;
-  openai_input_usd_per_million: number | null;
-  openai_output_usd_per_million: number | null;
-  anthropic_input_usd_per_million: number | null;
-  anthropic_output_usd_per_million: number | null;
-  gemini_input_usd_per_million: number | null;
-  gemini_output_usd_per_million: number | null;
-  deepseek_input_usd_per_million: number | null;
-  deepseek_output_usd_per_million: number | null;
-  cloudflare_secret_store_id: string | null;
-  cloudflare_secret_store_name: string | null;
-  updated_at: string;
-};
-
-type AiProviderProbeRow = {
-  label: string;
-  value: string;
-  tone: 'pending' | 'blocked' | 'ok' | 'warn' | 'error';
-};
-
-type AiProviderProbeResult = {
-  rows: AiProviderProbeRow[];
-  checked_at: string;
-};
-
-type LinkAuditRow = {
-  url: string;
-  status: string;
-  tone: 'ok' | 'warn' | 'blocked' | 'error';
-};
-
-type LinkAuditResult = {
-  urls_found: number;
-  checked: number;
-  ok: number;
-  failed: number;
-  rows: LinkAuditRow[];
-};
-
-type EditorialAgentResult = {
-  name: string;
-  cli: string;
-  tone: 'ok' | 'warn' | 'blocked' | 'error';
-  status: string;
-  duration_ms: number;
-  exit_code: number | null;
-  role: string;
-  output_path: string;
-  usage_input_tokens?: number | null;
-  usage_output_tokens?: number | null;
-  cost_usd?: number | null;
-  cost_estimated?: boolean | null;
-};
-
-type EditorialSessionResult = {
-  run_id: string;
-  session_dir: string;
-  final_markdown_path: string | null;
-  session_minutes_path: string;
-  prompt_path: string;
-  protocol_path: string;
-  draft_path: string | null;
-  agents: EditorialAgentResult[];
-  consensus_ready: boolean;
-  status: string;
-  active_agents: InitialAgentKey[];
-  max_session_cost_usd: number | null;
-  max_session_minutes: number | null;
-  observed_cost_usd: number | null;
-  links_path: string | null;
-  attachments_manifest_path: string | null;
-  human_log_path: string | null;
-};
-
-type PromptAttachmentPayload = {
-  name: string;
-  media_type: string | null;
-  size_bytes: number;
-  data_base64: string;
-};
-
-type AttachmentDeliveryPlan = {
-  attachment: PromptAttachmentPayload;
-  nativeProviders: NativeAttachmentProvider[];
-  manifestProviders: AiCredentialKey[];
-  fallbackReason: string | null;
-};
-
-type SessionRunOptions = {
-  activeAgents: InitialAgentKey[];
-  maxSessionCostUsd: number | null;
-  maxSessionMinutes: number | null;
-  attachments: PromptAttachmentPayload[];
-  links: string[];
-};
-
-type ResumableSessionInfo = {
-  run_id: string;
-  session_name: string;
-  session_dir: string;
-  prompt_path: string;
-  protocol_path: string;
-  draft_path: string | null;
-  final_markdown_path: string | null;
-  next_round: number;
-  last_activity_unix: number;
-  artifact_count: number;
-  protocol_lines: number;
-  status: string;
-  saved_active_agents: InitialAgentKey[];
-  saved_initial_agent: string | null;
-  saved_max_session_cost_usd: number | null;
-  saved_max_session_minutes: number | null;
-};
-
-type ProtocolReadingGate = {
-  agent: string;
-  progress: number;
-  status: string;
-};
-
-const initialAgents: AgentCard[] = [
-  { name: 'Claude', cli: 'claude', state: 'blocked', note: 'aguardando sessao editorial' },
-  { name: 'Codex', cli: 'codex', state: 'blocked', note: 'aguardando sessao editorial' },
-  { name: 'Gemini', cli: 'gemini', state: 'blocked', note: 'aguardando sessao editorial' },
-  { name: 'DeepSeek', cli: 'deepseek-api', state: 'blocked', note: 'aguardando chave de API' },
-  { name: 'Maestro', cli: 'motor local', state: 'blocked', note: 'aguardando verificacoes iniciais' },
-];
-
-const initialEvidenceRows: EvidenceRow[] = [
-  { label: 'DOI', value: 'nao iniciado', tone: 'idle' },
-  { label: 'Links', value: 'nao iniciado', tone: 'idle' },
-  { label: 'ABNT', value: 'nao iniciado', tone: 'idle' },
-  { label: 'Quarentena', value: 'nao iniciado', tone: 'idle' },
-];
-
-const initialProtocolReadingGates: ProtocolReadingGate[] = [
-  { agent: 'Claude', progress: 0, status: 'Aguardando' },
-  { agent: 'Codex', progress: 0, status: 'Aguardando' },
-  { agent: 'Gemini', progress: 0, status: 'Aguardando' },
-  { agent: 'DeepSeek', progress: 0, status: 'Aguardando' },
-];
-
-const initialDiscussionRounds: DiscussionRound[] = [
-  { round: '--', status: 'Sem rodada', note: 'Submeta um prompt para criar a primeira ata operacional.' },
-];
-
-const finalArtifacts = [
-  { name: 'texto-final.md', detail: 'somente entregue com unanimidade dos agentes' },
-  { name: 'ata-da-sessao.md', detail: 'prompt, protocolo, rounds, divergencias e decisoes' },
-];
-
-const importChannels = [
-  { provider: 'ChatGPT', pattern: 'chatgpt.com/share/<id>', status: 'snapshot publico' },
-  { provider: 'Claude', pattern: 'claude.ai/share/...', status: 'snapshot com artifacts' },
-  { provider: 'Gemini', pattern: 'g.co/gemini/share/...', status: 'link publico normalizado' },
-];
-
-const contentPipelines = [
-  { label: 'Editor PostEditor', value: 'mesma funcionalidade e HTML' },
-  { label: 'Markdown puro', value: 'ler + gerar' },
-  { label: 'Markdown + HTML', value: 'preservar tabelas e midia' },
-  { label: 'PDF', value: 'importar, extrair e exportar' },
-  { label: 'D1 mainsite_posts', value: 'sincronizar com BigData' },
-];
-
-const webEvidenceTools = [
-  { label: 'fetch', value: 'HEAD/GET, redirects, hash' },
-  { label: 'curl', value: 'replay com segredos ocultos' },
-  { label: 'web search', value: 'provedores configuraveis' },
-  { label: 'navegador assistido', value: 'CAPTCHA/login com humano' },
-];
-
-const initialBootstrapChecks: BootstrapCheckRow[] = [
-  { label: 'WebView2', value: 'verificacao pendente', tone: 'pending' },
-  { label: 'Claude CLI', value: 'verificacao pendente', tone: 'pending' },
-  { label: 'Codex CLI', value: 'verificacao pendente', tone: 'pending' },
-  { label: 'Gemini CLI', value: 'verificacao pendente', tone: 'pending' },
-  { label: 'Cloudflare env', value: 'verificacao pendente', tone: 'pending' },
-  { label: 'Wrangler', value: 'aguardando autorizacao', tone: 'pending' },
-];
-
-const initialCloudflarePermissionChecks: CloudflarePermissionRow[] = [
-  { label: 'Token ativo', value: 'pendente de verificacao', tone: 'pending' },
-  { label: 'Conta acessivel', value: 'pendente de verificacao', tone: 'pending' },
-  { label: 'D1 Read/Edit', value: 'pendente de verificacao', tone: 'pending' },
-  { label: 'Secrets Store', value: 'pendente de verificacao', tone: 'pending' },
-];
-
-const initialAiProviderChecks: AiProviderProbeRow[] = [
-  { label: 'OpenAI / Codex', value: 'pendente de verificacao', tone: 'pending' },
-  { label: 'Anthropic / Claude', value: 'pendente de verificacao', tone: 'pending' },
-  { label: 'Google / Gemini', value: 'pendente de verificacao', tone: 'pending' },
-  { label: 'DeepSeek', value: 'pendente de verificacao', tone: 'pending' },
-];
-
-const credentialStorageModes = [
-  { mode: 'local_json', label: 'JSON local', detail: 'configuracoes e segredos em JSON ignorado' },
-  { mode: 'windows_env', label: 'Env var Windows', detail: 'segredos em env var; configs em JSON' },
-  { mode: 'cloudflare', label: 'Cloudflare', detail: 'maestro_db + Secrets Store remoto (execucao local exige MAESTRO_*_API_KEY em env)' },
-] satisfies Array<{ mode: CredentialStorageMode; label: string; detail: string }>;
-
-const storageModeSummaries: Record<CredentialStorageMode, { title: string; detail: string }> = {
-  local_json: {
-    title: 'JSON local',
-    detail: 'Tudo fica em arquivos JSON locais ignorados pelo Git.',
-  },
-  windows_env: {
-    title: 'Env var hibrido',
-    detail: 'Tokens e API keys ficam em env vars do Windows; demais configuracoes ficam em JSON local.',
-  },
-  cloudflare: {
-    title: 'Cloudflare remoto',
-    detail:
-      'Configuracoes em D1 maestro_db; segredos centralizados no Cloudflare Secrets Store. Importante: o app nao busca segredos remotos em runtime; para executar peers via API localmente, mantenha MAESTRO_OPENAI_API_KEY / MAESTRO_ANTHROPIC_API_KEY / MAESTRO_GEMINI_API_KEY / MAESTRO_DEEPSEEK_API_KEY em env vars (ou na config local). Esse modo e escolha de armazenamento canonico, nao alimenta execucao local sozinho.',
-  },
-};
-
-const aiProviderRows = [
-  {
-    key: 'openai',
-    name: 'OpenAI / Codex',
-    cli: 'codex',
-    secretLabel: 'OpenAI API key',
-    meta: 'project id, organization id e model pin opcionais',
-  },
-  {
-    key: 'anthropic',
-    name: 'Anthropic / Claude',
-    cli: 'claude',
-    secretLabel: 'Anthropic API key',
-    meta: 'workspace, anthropic-version e model pin',
-  },
-  {
-    key: 'gemini',
-    name: 'Google / Gemini',
-    cli: 'gemini',
-    secretLabel: 'Gemini API key',
-    meta: 'Developer API ou Vertex AI, projeto e regiao',
-  },
-  {
-    key: 'deepseek',
-    name: 'DeepSeek',
-    cli: 'deepseek-api',
-    secretLabel: 'DeepSeek API key',
-    meta: 'API oficial DeepSeek; melhor modelo disponivel via /models',
-  },
-] satisfies Array<{
-  key: AiCredentialKey;
-  name: string;
-  cli: string;
-  secretLabel: string;
-  meta: string;
-}>;
-
-const providerRateRows = [
-  {
-    key: 'openai',
-    name: 'OpenAI / Codex',
-    hint: 'Usado quando o peer operar por API com uso observado.',
-  },
-  {
-    key: 'anthropic',
-    name: 'Anthropic / Claude',
-    hint: 'Usado quando o peer operar por API com uso observado.',
-  },
-  {
-    key: 'gemini',
-    name: 'Google / Gemini',
-    hint: 'Usado quando o peer operar por API com uso observado.',
-  },
-  {
-    key: 'deepseek',
-    name: 'DeepSeek',
-    hint: 'Obrigatorio para sessoes com DeepSeek via API.',
-  },
-] satisfies Array<{ key: ProviderRateKey; name: string; hint: string }>;
-
-const initialAgentOptions = [
-  { key: 'claude', label: 'Claude', detail: 'primeira versao e revisoes' },
-  { key: 'codex', label: 'Codex', detail: 'primeira versao e revisoes' },
-  { key: 'gemini', label: 'Gemini', detail: 'primeira versao e revisoes' },
-  { key: 'deepseek', label: 'DeepSeek', detail: 'primeira versao e revisoes via API' },
-] satisfies Array<{ key: InitialAgentKey; label: string; detail: string }>;
-
-const defaultActiveAgents = initialAgentOptions.map((option) => option.key);
-const attachmentLimits = {
-  maxFiles: 8,
-  maxFileBytes: 25 * 1024 * 1024,
-  maxTotalBytes: 75 * 1024 * 1024,
-  maxNativeApiBytes: 20 * 1024 * 1024,
-};
-
-const verbosityOptions = [
-  { mode: 'resumo', label: 'Resumo', icon: EyeOff },
-  { mode: 'detalhado', label: 'Detalhado', icon: Eye },
-  { mode: 'diagnostico', label: 'Diagnostico', icon: ListChecks },
-] satisfies Array<{ mode: VerbosityMode; label: string; icon: ComponentType<{ size?: number }> }>;
-
-const navGroups: Array<{ label: string; items: NavItem[] }> = [
-  {
-    label: 'Fluxo editorial',
-    items: [
-      { section: 'session', label: 'Sessao', icon: GitBranch },
-      { section: 'protocols', label: 'Protocolos', icon: FileText },
-      { section: 'evidence', label: 'Evidencias', icon: Globe2 },
-    ],
-  },
-  {
-    label: 'Operacao',
-    items: [
-      { section: 'agents', label: 'Agentes', icon: Bot },
-      { section: 'settings', label: 'Ajustes', icon: Settings },
-      { section: 'setup', label: 'Setup', icon: HardDriveDownload },
-    ],
-  },
-];
-
-const navItems: NavItem[] = navGroups.flatMap((group) => group.items);
-
-const settingsTabs = [
-  {
-    tab: 'providers',
-    label: 'Agentes via API',
-    detail: 'Chaves, modo e tabela de tarifas',
-    icon: KeyRound,
-  },
-  {
-    tab: 'cloudflare',
-    label: 'Cloudflare',
-    detail: 'Bootstrap, D1 e Secrets Store',
-    icon: Database,
-  },
-] satisfies Array<{ tab: SettingsTab; label: string; detail: string; icon: ComponentType<{ size?: number }> }>;
-
-const idleOperation: OperationSnapshot = {
-  title: 'Aguardando sessao editorial',
-  progress: 0,
-  current: 'Nenhum prompt foi submetido nesta execucao.',
-  eta: 'ocioso',
-  status: 'idle',
-};
-
-const idlePhases: PhaseItem[] = [
-  { label: 'Protocolo', detail: 'aguardando prompt', state: 'waiting' },
-  { label: 'Verificacoes', detail: 'nao iniciadas', state: 'waiting' },
-  { label: 'Agentes', detail: 'nao iniciados', state: 'waiting' },
-  { label: 'Entrega', detail: 'bloqueada ate unanimidade', state: 'waiting' },
-];
-
-const idleActivityFeed: ActivityItem[] = [
-  {
-    level: 'summary',
-    time: 'pronto',
-    title: 'Runtime carregado',
-    detail: 'Logs estruturados ativos. Ao submeter um prompt, o monitor deve registrar cada etapa visivel.',
-  },
-  {
-    level: 'diagnostic',
-    time: '--:--:--',
-    title: 'Diagnostico',
-    detail: 'Ao relatar falhas, anexe o arquivo mais recente da pasta data/logs.',
-  },
-];
-
-function stateLabel(state: AgentState) {
-  if (state === 'ready') return 'Aprovado';
-  if (state === 'running') return 'Em andamento';
-  if (state === 'evidence') return 'Precisa de revisao';
-  return 'Aguardando';
-}
-
-function stateIcon(state: AgentState) {
-  if (state === 'ready') return <CheckCircle2 size={16} />;
-  if (state === 'running') return <RefreshCw size={16} />;
-  if (state === 'evidence') return <Clock3 size={16} />;
-  return <AlertTriangle size={16} />;
-}
-
-async function sha256(text: string) {
-  const bytes = new TextEncoder().encode(text);
-  const buffer = await crypto.subtle.digest('SHA-256', bytes);
-  return [...new Uint8Array(buffer)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
-}
-
-function formatElapsedTime(totalSeconds: number) {
-  const safeSeconds = Math.max(0, Math.floor(totalSeconds));
-  const hours = Math.floor(safeSeconds / 3600);
-  const minutes = Math.floor((safeSeconds % 3600) / 60);
-  const seconds = safeSeconds % 60;
-  return [hours, minutes, seconds].map((value) => value.toString().padStart(2, '0')).join(':');
-}
-
-function formatBytes(bytes: number) {
-  if (bytes < 1024) return `${bytes.toLocaleString('pt-BR')} B`;
-  const kib = bytes / 1024;
-  if (kib < 1024) return `${kib.toLocaleString('pt-BR', { maximumFractionDigits: 1 })} KiB`;
-  const mib = kib / 1024;
-  return `${mib.toLocaleString('pt-BR', { maximumFractionDigits: 1 })} MiB`;
-}
-
-function normalizedAttachmentMediaType(attachment: PromptAttachmentPayload) {
-  const media = attachment.media_type?.trim().toLowerCase();
-  if (!media) return 'application/octet-stream';
-  if (media === 'image/jpg') return 'image/jpeg';
-  return media;
-}
-
-function attachmentExtension(name: string) {
-  const lastSegment = name.split(/[\\/]/).pop() ?? name;
-  const index = lastSegment.lastIndexOf('.');
-  if (index < 0 || index === lastSegment.length - 1) return '';
-  return lastSegment.slice(index + 1).toLowerCase();
-}
-
-function isTextLikeAttachment(attachment: PromptAttachmentPayload) {
-  const media = normalizedAttachmentMediaType(attachment);
-  if (
-    media.startsWith('text/') ||
-    media.includes('json') ||
-    media.includes('xml') ||
-    media.includes('markdown') ||
-    media.includes('csv') ||
-    media.includes('yaml')
-  ) {
-    return true;
-  }
-  return ['txt', 'md', 'markdown', 'json', 'csv', 'tsv', 'html', 'htm', 'xml', 'yaml', 'yml', 'log'].includes(
-    attachmentExtension(attachment.name),
-  );
-}
-
-function isImageAttachment(attachment: PromptAttachmentPayload) {
-  return ['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(normalizedAttachmentMediaType(attachment));
-}
-
-function isPdfAttachment(attachment: PromptAttachmentPayload) {
-  return normalizedAttachmentMediaType(attachment) === 'application/pdf' || attachmentExtension(attachment.name) === 'pdf';
-}
-
-function isKnownDocumentAttachment(attachment: PromptAttachmentPayload) {
-  if (isTextLikeAttachment(attachment) || isPdfAttachment(attachment)) return true;
-  const media = normalizedAttachmentMediaType(attachment);
-  if (
-    [
-      'application/msword',
-      'application/rtf',
-      'application/vnd.ms-excel',
-      'application/vnd.ms-powerpoint',
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-      'application/vnd.oasis.opendocument.text',
-      'application/vnd.oasis.opendocument.spreadsheet',
-      'application/vnd.oasis.opendocument.presentation',
-    ].includes(media)
-  ) {
-    return true;
-  }
-  return ['doc', 'docx', 'rtf', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'odp'].includes(
-    attachmentExtension(attachment.name),
-  );
-}
-
-// Keep this predictor aligned with src-tauri/src/lib.rs provider_supports_native_attachment.
-function providerSupportsNativeAttachment(provider: NativeAttachmentProvider, attachment: PromptAttachmentPayload) {
-  if (attachment.size_bytes > attachmentLimits.maxNativeApiBytes) return false;
-  if (provider === 'openai') return isImageAttachment(attachment) || isKnownDocumentAttachment(attachment);
-  if (provider === 'anthropic') return isImageAttachment(attachment) || isPdfAttachment(attachment);
-  return (
-    isImageAttachment(attachment) ||
-    normalizedAttachmentMediaType(attachment).startsWith('audio/') ||
-    normalizedAttachmentMediaType(attachment).startsWith('video/') ||
-    isPdfAttachment(attachment) ||
-    isTextLikeAttachment(attachment) ||
-    isKnownDocumentAttachment(attachment)
-  );
-}
-
-function attachmentDeliveryPlan(
-  attachment: PromptAttachmentPayload,
-  activeApiProviders: AiCredentialKey[],
-): AttachmentDeliveryPlan {
-  const nativeProviders = activeApiProviders.filter(
-    (provider): provider is NativeAttachmentProvider =>
-      provider !== 'deepseek' && providerSupportsNativeAttachment(provider, attachment),
-  );
-  const manifestProviders = activeApiProviders.filter(
-    (provider) => provider === 'deepseek' || !nativeProviders.includes(provider as NativeAttachmentProvider),
-  );
-  let fallbackReason: string | null = null;
-  if (manifestProviders.length > 0 || nativeProviders.length === 0) {
-    fallbackReason =
-      attachment.size_bytes > attachmentLimits.maxNativeApiBytes
-        ? `excede envio nativo (${formatBytes(attachmentLimits.maxNativeApiBytes)})`
-        : activeApiProviders.length === 0
-          ? 'peers ativos usam CLI'
-          : manifestProviders.length > 0 && manifestProviders.every((provider) => provider === 'deepseek')
-            ? 'API text-only'
-            : nativeProviders.length > 0
-              ? 'sem suporte nativo nesses peers'
-              : 'tipo sem suporte nativo nos peers API ativos';
-  }
-  return { attachment, nativeProviders, manifestProviders, fallbackReason };
-}
-
-function providerShortLabel(provider: AiCredentialKey) {
-  if (provider === 'openai') return 'OpenAI';
-  if (provider === 'anthropic') return 'Anthropic';
-  if (provider === 'gemini') return 'Gemini';
-  return 'DeepSeek';
-}
-
-function attachmentDeliveryHint(plan: AttachmentDeliveryPlan) {
-  const parts: string[] = [];
-  if (plan.nativeProviders.length > 0) {
-    parts.push(`Nativo previsto: ${plan.nativeProviders.map(providerShortLabel).join(', ')}`);
-  }
-  if (plan.manifestProviders.length > 0) {
-    const reason = plan.fallbackReason ? ` (${plan.fallbackReason})` : '';
-    parts.push(`Manifesto/previews: ${plan.manifestProviders.map(providerShortLabel).join(', ')}${reason}`);
-  }
-  if (parts.length === 0 && plan.fallbackReason) {
-    parts.push(`Manifesto/previews: ${plan.fallbackReason}`);
-  }
-  return parts.join(' · ');
-}
-
-function formatBrazilDateTime(value: Date | number) {
-  return new Intl.DateTimeFormat('pt-BR', {
-    timeZone: 'America/Sao_Paulo',
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  }).format(value);
-}
-
-function humanizeRunStatus(status: RunStatus) {
-  if (status === 'idle') return 'Aguardando';
-  if (status === 'preparing') return 'Preparando';
-  if (status === 'running') return 'Em andamento';
-  if (status === 'paused') return 'Aguardando ajustes';
-  if (status === 'completed') return 'Concluido';
-  return 'Bloqueado';
-}
-
-function operationMeterLabel(status: RunStatus) {
-  if (status === 'running') return 'Em andamento';
-  if (status === 'completed') return 'Concluido';
-  if (status === 'paused') return 'Aguardando ajustes';
-  if (status === 'blocked') return 'Bloqueado';
-  if (status === 'preparing') return 'Preparando';
-  return 'Aguardando';
-}
-
-function humanizeAgentStatus(status: string) {
-  const normalized = status.trim().toUpperCase();
-  if (normalized === 'READY') return 'Aprovado';
-  if (normalized === 'NOT_READY') return 'Precisa de ajustes';
-  if (normalized === 'NEEDS_EVIDENCE') return 'Precisa de verificacao';
-  if (normalized === 'DRAFT_CREATED') return 'Rascunho gerado';
-  if (normalized === 'CLI_NOT_FOUND') return 'CLI nao encontrada';
-  if (normalized === 'API_KEY_NOT_AVAILABLE') return 'Chave de API ausente';
-  if (normalized === 'REMOTE_SECRET_NOT_READABLE') return 'Segredo remoto nao legivel localmente';
-  if (normalized === 'READY_UNANIMOUS') return 'Texto liberado';
-  if (normalized === 'PAUSED_DRAFT_UNAVAILABLE') return 'Rascunho indisponivel';
-  if (normalized === 'TIME_LIMIT_REACHED') return 'Limite de tempo atingido';
-  if (normalized === 'COST_LIMIT_REACHED') return 'Limite de custo atingido';
-  if (normalized === 'PAUSED_COST_RATES_MISSING') return 'Tarifas de custo ausentes';
-  if (normalized === 'ALL_PEERS_FAILING') return 'Todos os peers em erro';
-  if (normalized === 'PAUSED_WITH_REAL_AGENT_OUTPUTS') return 'Aguardando ajustes';
-  return status
-    .replace(/_/g, ' ')
-    .toLowerCase()
-    .replace(/(^|\s)\S/g, (value) => value.toUpperCase());
-}
-
-function humanizeRole(role: string) {
-  if (role === 'draft') return 'Rascunho';
-  if (role === 'revision') return 'Ajuste';
-  if (role === 'review') return 'Revisao';
-  return 'Atividade';
-}
-
-function agentStateFromTone(tone: EditorialAgentResult['tone']): AgentState {
-  if (tone === 'ok') return 'ready';
-  if (tone === 'warn') return 'evidence';
-  return 'blocked';
-}
-
-function agentResultRank(agent: EditorialAgentResult) {
-  const match = agent.output_path.match(/round-(\d{3})-/i);
-  const round = match ? Number.parseInt(match[1], 10) : 0;
-  const roleRank = agent.role === 'review' ? 3 : agent.role === 'revision' ? 2 : agent.role === 'draft' ? 1 : 0;
-  return round * 10 + roleRank;
-}
-
-function latestAgentResults(agents: EditorialAgentResult[]) {
-  const byName = new Map<string, EditorialAgentResult>();
-  for (const agent of agents) {
-    const current = byName.get(agent.name);
-    if (!current || agentResultRank(agent) >= agentResultRank(current)) {
-      byName.set(agent.name, agent);
-    }
-  }
-  return ['Claude', 'Codex', 'Gemini', 'DeepSeek']
-    .map((name) => byName.get(name))
-    .filter((agent): agent is EditorialAgentResult => Boolean(agent));
-}
-
-function latestAgentCards(agents: EditorialAgentResult[]): AgentCard[] {
-  return latestAgentResults(agents).map((agent) => ({
-    name: agent.name,
-    cli: agent.cli,
-    state: agentStateFromTone(agent.tone),
-    note: `${humanizeRole(agent.role)}: ${humanizeAgentStatus(agent.status)}; ${formatElapsedTime(
-      Math.round(agent.duration_ms / 1000),
-    )}`,
-  }));
-}
-
-function latestProtocolGateItems(agents: EditorialAgentResult[]): ProtocolReadingGate[] {
-  return latestAgentResults(agents).map((agent) => ({
-    agent: agent.name,
-    progress: agent.tone === 'ok' ? 100 : agent.tone === 'warn' ? 70 : 35,
-    status: agent.tone === 'ok' ? 'Protocolo lido na ultima rodada' : humanizeAgentStatus(agent.status),
-  }));
-}
-
-function countAgentRounds(agents: EditorialAgentResult[]) {
-  return new Set(
-    agents
-      .map((agent) => agent.output_path.match(/round-(\d{3})-/i)?.[1])
-      .filter((round): round is string => Boolean(round)),
-  ).size;
-}
-
-function summarizeAgentResults(agents: EditorialAgentResult[]) {
-  const rounds = countAgentRounds(agents);
-  const latest = latestAgentResults(agents);
-  const latestText = latest.map((agent) => `${agent.name}: ${humanizeAgentStatus(agent.status)}`).join('; ');
-  const failures = agents.filter((agent) => agent.tone === 'error' || agent.tone === 'blocked').length;
-  const failureText = failures
-    ? ` ${failures.toLocaleString('pt-BR')} falha(s) operacional(is) registrada(s) no diagnostico.`
-    : '';
-  return `${rounds.toLocaleString('pt-BR')} rodada(s) registradas. Ultimo estado: ${latestText || 'sem avaliacao registrada'}.${failureText}`;
-}
 
 export function App() {
   const inputRef = useRef<HTMLInputElement>(null);

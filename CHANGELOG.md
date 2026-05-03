@@ -4,6 +4,39 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.9] - 2026-05-02
+
+Pure refactor batch — frontend split. Extracted three new modules from [src/App.tsx](src/App.tsx) per `docs/code-split-plan.md` (frontend track). No behavior change. Per advisor's explicit guidance, scope is **pure data only**: types, constants, pure helpers. NO sub-component extraction. NO hook refactor.
+
+### Extracted from App.tsx (3 modules, ~849 lines moved)
+**[src/types.ts](src/types.ts)** (~253 lines, 41 type exports): All type aliases (lines 37-279 of v0.5.8 App.tsx) — `ProtocolSnapshot`, `AgentState`, `VerbosityMode`, `PhaseState`, `ProviderMode`, `AiCredentialKey`, `InitialAgentKey`, `ProviderRateKey`, `NativeAttachmentProvider`, `CredentialStorageMode`, `CloudflareTokenSource`, `ActiveSection`, `SettingsTab`, `RunStatus`, `ActivityLevel`, `NavItem`, `OperationSnapshot`, `AgentCard`, `ActivityItem`, `PhaseItem`, `DiscussionRound`, `EvidenceRow`, `CloudflarePermissionRow`, `BootstrapCheckRow`, `BootstrapConfig`, `CloudflareEnvSnapshot`, `DependencyPreflight`, `CloudflareProbeResult`, `CloudflareProviderStorageRequest`, `AiProviderConfig`, `AiProviderProbeRow`, `AiProviderProbeResult`, `LinkAuditRow`, `LinkAuditResult`, `EditorialAgentResult`, `EditorialSessionResult`, `PromptAttachmentPayload`, `AttachmentDeliveryPlan`, `SessionRunOptions`, `ResumableSessionInfo`, `ProtocolReadingGate`. Imports `ComponentType` from React for `NavItem.icon`.
+
+**[src/constants.ts](src/constants.ts)** (~287 lines, 25 const exports): All initial seed values + static option tables (lines 281-523 of v0.5.8 App.tsx) — `initialAgents`, `initialEvidenceRows`, `initialProtocolReadingGates`, `initialDiscussionRounds`, `finalArtifacts`, `importChannels`, `contentPipelines`, `webEvidenceTools`, `initialBootstrapChecks`, `initialCloudflarePermissionChecks`, `initialAiProviderChecks`, `credentialStorageModes`, `storageModeSummaries`, `aiProviderRows`, `providerRateRows`, `initialAgentOptions`, `defaultActiveAgents`, `attachmentLimits`, `verbosityOptions`, `navGroups`, `navItems`, `settingsTabs`, `idleOperation`, `idlePhases`, `idleActivityFeed`. Imports lucide-react icons used by these tables (Bot, Database, Eye, EyeOff, FileText, GitBranch, Globe2, HardDriveDownload, KeyRound, ListChecks, Settings).
+
+**[src/helpers.tsx](src/helpers.tsx)** (~309 lines, 27 function exports): All pure helper functions (lines 525-809 of v0.5.8 App.tsx) — `stateLabel`, `stateIcon` (returns JSX, hence the .tsx extension), `sha256`, `formatElapsedTime`, `formatBytes`, `normalizedAttachmentMediaType`, `attachmentExtension`, `isTextLikeAttachment`, `isImageAttachment`, `isPdfAttachment`, `isKnownDocumentAttachment`, `providerSupportsNativeAttachment`, `attachmentDeliveryPlan`, `providerShortLabel`, `attachmentDeliveryHint`, `formatBrazilDateTime`, `humanizeRunStatus`, `operationMeterLabel`, `humanizeAgentStatus`, `humanizeRole`, `agentStateFromTone`, `agentResultRank`, `latestAgentResults`, `latestAgentCards`, `latestProtocolGateItems`, `countAgentRounds`, `summarizeAgentResults`. Imports types from `./types` and `attachmentLimits` from `./constants`, plus 4 lucide icons (AlertTriangle, CheckCircle2, Clock3, RefreshCw) used by `stateIcon`.
+
+### Visibility delta
+The only modification to the moved code is `type X` → `export type X`, `const Y` → `export const Y`, `function Z` → `export function Z` (TypeScript's equivalent of the Rust `pub(crate)` visibility upgrade in earlier batches). All function bodies, type structures, constant initializers, and JSX are preserved verbatim.
+
+### Out of scope (deferred — explicit operator-validated boundaries)
+- Sub-component extraction (no `<SettingsPanel />`, `<SessionHeader />`, etc.). The 3000-line App() component stays intact; this batch is data-only.
+- Hook refactor or useEffect/useCallback rewrites. The 28 preexisting `aria-label` linter warnings and 4 hook-deps warnings (`react-hooks/exhaustive-deps` complaints) in the App() body are NOT addressed here — they predate v0.5.9 and the build pipeline (`tsc --noEmit && vite build`) passes clean without them.
+- Service module extraction (no separate `services/` folder for invoke wrappers). Future batch.
+
+### App.tsx trim
+`src/App.tsx` lucide-react import block trimmed: removed `Eye`, `Settings`, `GitBranch` (no longer referenced after constants.ts move). Removed `ComponentType` from `'react'` import (only used by the moved `NavItem` type, which now imports it inside types.ts). Type imports trimmed to drop names not actually referenced in App.tsx body (`EditorialAgentResult`, `NativeAttachmentProvider`, `RunStatus`).
+
+### Validation
+- `npm run build`: clean. `tsc --noEmit` succeeds; vite production bundle generates dist/ with same chunk shape as v0.5.8 (chunk-jRWAZmH_.js + index + lib + PostEditor).
+- App.tsx: 3775 → 3077 lines (−698 net).
+- types.ts: 253 lines new.
+- constants.ts: 287 lines new.
+- helpers.tsx: 309 lines new.
+- Total moved: 849 lines (lib weight stays comparable, just split across modules).
+
+### Versioning
+Patch bump (v0.5.8 → v0.5.9) — pure refactor, no signature/dep/feature changes for end users.
+
 ## [v0.5.8] - 2026-05-02
 
 Pure refactor batch — extracted [src-tauri/src/session_orchestration.rs](src-tauri/src/session_orchestration.rs) (~1004 lines incl. doc header) per `docs/code-split-plan.md`. **Largest single split since v0.4.0.** No behavior change.

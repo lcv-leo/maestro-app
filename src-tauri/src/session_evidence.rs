@@ -19,6 +19,7 @@ const ATTACHMENT_MAX_FILE_BYTES: u64 = 25 * 1024 * 1024;
 const ATTACHMENT_MAX_TOTAL_BYTES: u64 = 75 * 1024 * 1024;
 const ATTACHMENT_MAX_INLINE_PREVIEW_BYTES: usize = 128 * 1024;
 const ATTACHMENT_MAX_TOTAL_INLINE_PREVIEW_BYTES: usize = 512 * 1024;
+const HEX_LOWER: &[u8; 16] = b"0123456789abcdef";
 
 #[derive(Clone, Deserialize)]
 pub(crate) struct PromptAttachmentRequest {
@@ -176,7 +177,7 @@ pub(crate) fn persist_session_attachments(
         let file_name = attachment_file_name(index, &original_name);
         let path = attachment_dir.join(&file_name);
         fs::write(&path, &data).map_err(|error| format!("failed to write attachment: {error}"))?;
-        let sha256 = format!("{:x}", Sha256::digest(&data));
+        let sha256 = sha256_hex(&data);
         let media_type = item
             .media_type
             .as_deref()
@@ -203,6 +204,16 @@ pub(crate) fn persist_session_attachments(
         entries.push(entry);
     }
     Ok(entries)
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    let digest = Sha256::digest(data);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest.iter() {
+        output.push(HEX_LOWER[(byte >> 4) as usize] as char);
+        output.push(HEX_LOWER[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 
 fn attachment_file_name(index: usize, original_name: &str) -> String {
@@ -472,6 +483,10 @@ mod tests {
         assert!(evidence.block.contains("https://example.com/source"));
         assert!(evidence.block.contains("notes.md"));
         assert!(evidence.block.contains("hello evidence"));
+        assert_eq!(
+            evidence.attachments[0].sha256,
+            "9af4c73b2a919f220f4b008e466b52808a1987122d95ff0f2dde00968e36e844"
+        );
         assert!(session_dir.join("links.md").exists());
         assert!(session_dir
             .join("attachments")

@@ -34,3 +34,7 @@ e92ad9b3f0a5632c5acd862873d28a119d43dd4bb8cd96abbecf4a6d4701d16f  src/editor/pos
 494f1a3362435dc4f501f837824aade51cb45f93c22700733d123e4d4a36c393  src/editor/posteditor/editor/SlashCommands.ts
 718815e8300b16e0a965570dcc9f0a3da1f4d6a8291b18b3f4f15005483c9e53  src/editor/posteditor/editor/utils.ts
 ```
+
+---
+
+<p align="center"><sub>© LCV Ideas &amp; Software<br>LEONARDO CARDOZO VARGAS TECNOLOGIA DA INFORMACAO LTDA<br>Rua Pais Leme, 215 Conj 1713  - Pinheiros<br>São Paulo - SP<br>CEP 05.424-150<br>CNPJ: 66.584.678/0001-77<br>IM 05.424-150</sub></p>

@@ -132,3 +132,7 @@ Link checking, sanitization, correction proposals, and cross-review escalation a
 GitHub Releases, GitHub Packages, GitHub Pages, and GitHub Sponsors are planned from day zero. Releases publish a portable Windows ZIP; GitHub Packages publishes a GHCR/OCI automation mirror, not NuGet. See `docs/release-engineering-plan.md`.
 
 Version tags, changelog headings, and release labels use the `vX.X.X` format.
+
+---
+
+<p align="center"><sub>© LCV Ideas &amp; Software<br>LEONARDO CARDOZO VARGAS TECNOLOGIA DA INFORMACAO LTDA<br>Rua Pais Leme, 215 Conj 1713  - Pinheiros<br>São Paulo - SP<br>CEP 05.424-150<br>CNPJ: 66.584.678/0001-77<br>IM 05.424-150</sub></p>

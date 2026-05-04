@@ -10,7 +10,9 @@
     "preview": "vite preview --host 127.0.0.1 --port 4173",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "format:public": "prettier --write \"**/README.md\" \"**/index.html\"",
+    "format:public:check": "prettier --check \"**/README.md\" \"**/index.html\""
   },
   "engines": {
     "node": ">=24"
@@ -21,7 +23,8 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "6.0.1",
     "typescript": "6.0.3",
-    "vite": "8.0.10"
+    "vite": "8.0.10",
+    "prettier": "^3.8.3"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.0",

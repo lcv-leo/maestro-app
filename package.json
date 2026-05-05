@@ -11,8 +11,8 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "typecheck": "tsc --noEmit",
-    "format:public": "prettier --write \"**/README.md\" \"**/index.html\"",
-    "format:public:check": "prettier --check \"**/README.md\" \"**/index.html\""
+    "format:public": "prettier --write \"**/index.html\"",
+    "format:public:check": "prettier --check \"**/index.html\""
   },
   "engines": {
     "node": ">=24"

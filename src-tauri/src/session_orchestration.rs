@@ -54,8 +54,8 @@ use crate::provider_config::{
 use crate::session_artifacts::parse_agent_artifact_name;
 use crate::session_controls::{
     api_role_max_tokens, effective_draft_lead, estimate_provider_cost_from_input_chars,
-    provider_cost_guard_for, sanitize_optional_positive_f64, sanitize_optional_positive_u64,
-    selected_editorial_agent_specs, selected_review_agent_specs,
+    independent_review_agent_specs, provider_cost_guard_for, sanitize_optional_positive_f64,
+    sanitize_optional_positive_u64, selected_editorial_agent_specs, ReviewPanelSelectionError,
 };
 use crate::session_evidence::process_session_evidence;
 use crate::session_minutes::build_session_minutes;
@@ -131,10 +131,7 @@ pub(crate) fn run_editorial_session_core(
         request.max_session_minutes,
     );
     if let Some(context) = log_context.as_object_mut() {
-        context.insert(
-            "cost_scope_id".to_string(),
-            json!(cost_scope_id.clone()),
-        );
+        context.insert("cost_scope_id".to_string(), json!(cost_scope_id.clone()));
     }
     let _ = write_log_record(
         log_session,
@@ -640,11 +637,64 @@ pub(crate) fn run_editorial_session_core(
                 "TIME_LIMIT_REACHED",
             ));
         }
-        let review_prompt = build_review_prompt(request, &run_id, &current_draft, &evidence.block);
-        let review_specs = selected_review_agent_specs(
+        let review_specs = match independent_review_agent_specs(
             draft_lead_key,
             &active_agent_keys,
             current_draft_author_key.as_deref(),
+        ) {
+            Ok(specs) => specs,
+            Err(ReviewPanelSelectionError::DraftAuthorUnknown) => {
+                let _ = write_log_record(
+                    log_session,
+                    LogEventInput {
+                        level: "error".to_string(),
+                        category: "session.tribunal.draft_author_unknown".to_string(),
+                        message: "review cycle blocked because the current draft author could not be verified".to_string(),
+                        context: Some(json!({
+                            "run_id": &run_id,
+                            "round": round,
+                            "current_draft_path": current_draft_path.as_ref().map(|path| path.to_string_lossy().to_string()),
+                            "active_agents": active_agent_keys.clone(),
+                            "policy": "fail_closed_no_self_review_without_known_petitioner"
+                        })),
+                    },
+                );
+                let minutes_path = session_dir.join("ata-da-sessao.md");
+                write_text_file(
+                    &minutes_path,
+                    &build_session_minutes(request, &run_id, &agents, false, None),
+                )?;
+                let context = SessionResultContext {
+                    run_id: &run_id,
+                    session_dir: &session_dir,
+                    prompt_path: &prompt_path,
+                    protocol_path: &protocol_path,
+                    active_agents: &active_agent_keys,
+                    max_session_cost_usd,
+                    max_session_minutes,
+                    observed_cost_usd: cost_ledger.total_observed_cost_usd,
+                    links_path: evidence.links_path.as_ref(),
+                    attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
+                    human_log_path: &human_log_path,
+                };
+                return Ok(editorial_session_result(
+                    &context,
+                    None,
+                    &minutes_path,
+                    current_draft_path,
+                    agents,
+                    false,
+                    "PAUSED_DRAFT_AUTHOR_UNKNOWN",
+                ));
+            }
+        };
+        let draft_author_key = current_draft_author_key.as_deref().unwrap_or("unknown");
+        let review_prompt = build_review_prompt(
+            request,
+            &run_id,
+            &current_draft,
+            draft_author_key,
+            &evidence.block,
         );
         if let Some(author_key) = current_draft_author_key.as_deref() {
             let _ = write_log_record(

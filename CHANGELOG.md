@@ -4,6 +4,28 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.15] - 2026-05-05
+
+Hardening of Maestro's judicial-collegiate editorial model.
+
+### Fixed
+- Review panel selection now fails closed when the current draft/revision author cannot be verified. A resumed session with an unreadable or unparseable current-author artifact now pauses with `PAUSED_DRAFT_AUTHOR_UNKNOWN` instead of risking self-review.
+- The backend now uses the same canonical no-self-review rule for all review panel selection: the current text author is the petitioner for that cycle and cannot vote as reviewer of the same text.
+- The fail-closed diagnostic policy is logged as `fail_closed_no_self_review_without_known_petitioner` under `session.tribunal.draft_author_unknown` so incident response can grep for the exact tribunal-rule block.
+
+### Changed
+- Draft, review, and revision prompts now explicitly describe Maestro's tribunal-style cycle: the redactor is the petitioner, reviewers are an independent editorial panel, votes are `READY`/`NOT_READY`, and revisions are new deliberative cycles inside the same append-only case file.
+- User-facing status labels now render `PAUSED_DRAFT_AUTHOR_UNKNOWN` as "Autor do rascunho nao identificado".
+
+### Validation
+- `npm run typecheck`
+- `npm run build` (pre-existing Vite large-chunk warning only)
+- `cargo test --manifest-path src-tauri\Cargo.toml --locked independent_review_agent_specs --lib` (3 passed)
+- `cargo test --manifest-path src-tauri\Cargo.toml --locked` (118 passed)
+- `cargo clippy --manifest-path src-tauri\Cargo.toml --locked --no-deps --all-targets` (pre-existing `sanitize.rs` `items_after_test_module` warning only)
+- `git diff --check` (CRLF normalization warnings on existing config files only)
+- `cross-review-v2` session `b02655ca-cd23-4361-b25b-f3f673ce1ce0`: Claude, Gemini, and DeepSeek unanimous READY. Grok was excluded from the clean quorum because the runtime reported an xAI provider-auth error unrelated to this delta.
+
 ## [v0.5.14] - 2026-05-03
 
 Hotfix for resumed sessions whose permanent session `run_id` matched old cost-ledger history.

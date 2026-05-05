@@ -20,6 +20,11 @@ pub(crate) struct ProviderCostGuard {
     pub(crate) rates: ProviderCostRates,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReviewPanelSelectionError {
+    DraftAuthorUnknown,
+}
+
 pub(crate) fn all_agent_keys() -> Vec<String> {
     editorial_agent_specs()
         .into_iter()
@@ -85,12 +90,26 @@ pub(crate) fn selected_review_agent_specs(
     active_agents: &[String],
     current_draft_author_key: Option<&str>,
 ) -> Vec<EditorialAgentSpec> {
-    let author = current_draft_author_key
-        .and_then(canonical_editorial_agent_key);
+    let author = current_draft_author_key.and_then(canonical_editorial_agent_key);
     selected_editorial_agent_specs(first_key, active_agents)
         .into_iter()
         .filter(|spec| can_agent_review_current_draft(spec.key, author))
         .collect()
+}
+
+pub(crate) fn independent_review_agent_specs(
+    first_key: &str,
+    active_agents: &[String],
+    current_draft_author_key: Option<&str>,
+) -> Result<Vec<EditorialAgentSpec>, ReviewPanelSelectionError> {
+    let Some(author) = current_draft_author_key.and_then(canonical_editorial_agent_key) else {
+        return Err(ReviewPanelSelectionError::DraftAuthorUnknown);
+    };
+    Ok(selected_review_agent_specs(
+        first_key,
+        active_agents,
+        Some(author),
+    ))
 }
 
 pub(crate) fn can_agent_review_current_draft(
@@ -199,7 +218,10 @@ pub(crate) fn usage_tokens(parsed: &Value) -> (Option<u64>, Option<u64>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{can_agent_review_current_draft, selected_review_agent_specs};
+    use super::{
+        can_agent_review_current_draft, independent_review_agent_specs,
+        selected_review_agent_specs, ReviewPanelSelectionError,
+    };
 
     #[test]
     fn selected_review_agent_specs_excludes_current_draft_author() {
@@ -251,5 +273,43 @@ mod tests {
         assert!(!can_agent_review_current_draft("gemini", Some(" GOOGLE ")));
         assert!(can_agent_review_current_draft("claude", Some("codex")));
         assert!(can_agent_review_current_draft("deepseek", None));
+    }
+
+    #[test]
+    fn independent_review_agent_specs_requires_known_current_author() {
+        let active = vec!["claude".to_string(), "codex".to_string()];
+
+        assert!(matches!(
+            independent_review_agent_specs("claude", &active, None),
+            Err(ReviewPanelSelectionError::DraftAuthorUnknown)
+        ));
+        assert!(matches!(
+            independent_review_agent_specs("claude", &active, Some("unknown")),
+            Err(ReviewPanelSelectionError::DraftAuthorUnknown)
+        ));
+    }
+
+    #[test]
+    fn independent_review_agent_specs_returns_only_non_author_panel() {
+        let active = vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "gemini".to_string(),
+        ];
+        let selected = independent_review_agent_specs("claude", &active, Some("anthropic"))
+            .unwrap()
+            .into_iter()
+            .map(|spec| spec.key)
+            .collect::<Vec<_>>();
+
+        assert_eq!(selected, vec!["codex", "gemini"]);
+    }
+
+    #[test]
+    fn independent_review_agent_specs_returns_empty_when_only_author_is_active() {
+        let active = vec!["claude".to_string()];
+        let selected = independent_review_agent_specs("claude", &active, Some("claude")).unwrap();
+
+        assert!(selected.is_empty());
     }
 }

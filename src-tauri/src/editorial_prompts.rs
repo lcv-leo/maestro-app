@@ -149,6 +149,7 @@ Run: `{run_id}`
 Sessao: {}
 
 Voce e o agente redator escolhido para abrir a sessao editorial. Leia integralmente o protocolo abaixo antes de escrever.
+Neste ciclo, voce atua como impetrante/redator: provoca o colegiado com um texto completo, mas nao vota como revisor do proprio texto.
 Gere um rascunho em Markdown puro para a solicitacao do operador.
 Nao crie arquivos locais. Escreva a resposta inteira somente na saida padrao da CLI.
 Nao invente links. Se faltar evidencia, marque explicitamente `[EVIDENCIA_PENDENTE]`.
@@ -175,6 +176,7 @@ pub(crate) fn build_review_prompt(
     request: &EditorialSessionRequest,
     run_id: &str,
     draft: &str,
+    draft_author_key: &str,
     evidence_block: &str,
 ) -> String {
     format!(
@@ -185,6 +187,14 @@ Sessao: {}
 
 Leia integralmente o protocolo editorial e revise o rascunho abaixo.
 Responda em Markdown.
+
+## Rito colegiado obrigatorio
+
+- Autor/impetrante do texto em julgamento: `{}`.
+- Voce atua somente como revisor independente do colegiado editorial.
+- O autor do rascunho/revisao jamais pode votar como revisor do proprio texto.
+- Se esta chamada indicar que voce e o autor do texto, marque `MAESTRO_STATUS: NOT_READY` e registre `SELF_REVIEW_BLOCKED`; o backend deve bloquear esse caso antes da chamada.
+- `READY` e voto favoravel sem objecao impeditiva; `NOT_READY` e voto com ressalva impeditiva.
 
 Obrigatorio:
 - A primeira linha deve ser exatamente `MAESTRO_STATUS: READY` ou `MAESTRO_STATUS: NOT_READY`.
@@ -210,6 +220,7 @@ Obrigatorio:
 {}
 "#,
         sanitize_text(&request.session_name, 200),
+        sanitize_text(draft_author_key, 80),
         request.prompt,
         request.protocol_text,
         draft,
@@ -251,6 +262,7 @@ Rodada de revisao: `{round}`
 Sessao: {}
 
 Leia integralmente o protocolo editorial, o rascunho atual e as manifestacoes dos peers.
+Isto e um novo ciclo deliberativo dentro dos mesmos autos: preserve o historico, responda aos votos do colegiado e produza uma versao revisada completa.
 Sua tarefa e produzir uma nova versao completa do texto em Markdown puro, incorporando todas as correcoes concretas.
 Nao entregue comentarios sobre o processo. Entregue apenas o texto revisado.
 Nao crie arquivos locais. Escreva a resposta inteira somente na saida padrao da CLI.
@@ -284,4 +296,51 @@ Nao invente links. Se faltar evidencia, preserve marcador `[EVIDENCIA_PENDENTE]`
         review_notes,
         evidence_block
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_draft_prompt, build_review_prompt, build_revision_prompt};
+    use crate::EditorialSessionRequest;
+
+    fn test_request() -> EditorialSessionRequest {
+        EditorialSessionRequest {
+            run_id: "run-test".to_string(),
+            session_name: "Sessao teste".to_string(),
+            prompt: "Escreva um artigo.".to_string(),
+            protocol_name: "protocolo.md".to_string(),
+            protocol_text: "Regra editorial completa com mais de cem caracteres para simular o protocolo integral usado pelo Maestro em producao.".to_string(),
+            protocol_hash: "hash".to_string(),
+            initial_agent: Some("claude".to_string()),
+            active_agents: Some(vec!["claude".to_string(), "codex".to_string()]),
+            max_session_cost_usd: Some(1.0),
+            max_session_minutes: None,
+            attachments: None,
+            links: None,
+        }
+    }
+
+    #[test]
+    fn draft_prompt_marks_redactor_as_petitioner_not_reviewer() {
+        let prompt = build_draft_prompt(&test_request(), "run-test", "");
+
+        assert!(prompt.contains("impetrante/redator"));
+        assert!(prompt.contains("nao vota como revisor do proprio texto"));
+    }
+
+    #[test]
+    fn review_prompt_carries_tribunal_self_review_guard() {
+        let prompt = build_review_prompt(&test_request(), "run-test", "rascunho", "claude", "");
+
+        assert!(prompt.contains("Rito colegiado obrigatorio"));
+        assert!(prompt.contains("Autor/impetrante do texto em julgamento: `claude`"));
+        assert!(prompt.contains("SELF_REVIEW_BLOCKED"));
+    }
+
+    #[test]
+    fn revision_prompt_names_append_only_deliberative_cycle() {
+        let prompt = build_revision_prompt(&test_request(), "run-test", 2, "rascunho", &[], "");
+
+        assert!(prompt.contains("novo ciclo deliberativo dentro dos mesmos autos"));
+    }
 }

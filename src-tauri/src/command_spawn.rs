@@ -131,7 +131,6 @@ pub(crate) fn command_check(label: &str, command: &str, args: &[&str]) -> Value 
     }
 }
 
-
 pub(crate) struct CommandProgressContext<'a> {
     pub(crate) log_session: &'a LogSession,
     pub(crate) run_id: &'a str,
@@ -442,8 +441,10 @@ mod tests {
     fn pipe_reader_retains_short_payloads_without_truncation() {
         let payload = b"hello world".to_vec();
         let counter = Arc::new(AtomicU64::new(0));
-        let (buffer, pipe_error) =
-            read_pipe_to_end_counting_classified(Some(Cursor::new(payload.clone())), Arc::clone(&counter));
+        let (buffer, pipe_error) = read_pipe_to_end_counting_classified(
+            Some(Cursor::new(payload.clone())),
+            Arc::clone(&counter),
+        );
         assert_eq!(buffer, payload);
         assert!(pipe_error.is_none());
         assert_eq!(counter.load(Ordering::Relaxed), payload.len() as u64);
@@ -514,7 +515,9 @@ mod tests {
         let oversize = (MAX_PIPE_BYTES as usize) + 8192;
         let counter = Arc::new(AtomicU64::new(0));
         let (buffer, pipe_error) = read_pipe_to_end_counting_classified(
-            Some(CapThenError { remaining: oversize }),
+            Some(CapThenError {
+                remaining: oversize,
+            }),
             Arc::clone(&counter),
         );
         assert_eq!(buffer.len(), MAX_PIPE_BYTES as usize);

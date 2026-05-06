@@ -44,7 +44,9 @@ use crate::{
     ResumeSessionState, SessionArtifact,
 };
 
-pub(crate) fn inspect_resumable_session_dir(path: &Path) -> Result<Option<ResumableSessionInfo>, String> {
+pub(crate) fn inspect_resumable_session_dir(
+    path: &Path,
+) -> Result<Option<ResumableSessionInfo>, String> {
     let session_dir = checked_data_child_path(path)?;
     let run_id = session_dir
         .file_name()
@@ -153,7 +155,9 @@ pub(crate) fn load_resume_session_state(agent_dir: &Path) -> Result<ResumeSessio
     })
 }
 
-pub(crate) fn find_latest_draft_artifact(agent_dir: &Path) -> Result<Option<SessionArtifact>, String> {
+pub(crate) fn find_latest_draft_artifact(
+    agent_dir: &Path,
+) -> Result<Option<SessionArtifact>, String> {
     let artifacts = read_agent_artifacts(agent_dir)?;
     find_latest_draft_artifact_from_artifacts(&artifacts)
 }
@@ -188,7 +192,9 @@ fn artifact_resume_rank(artifact: &SessionArtifact) -> (usize, usize) {
     (artifact.round, role_rank)
 }
 
-pub(crate) fn load_agent_results_from_dir(agent_dir: &Path) -> Result<Vec<EditorialAgentResult>, String> {
+pub(crate) fn load_agent_results_from_dir(
+    agent_dir: &Path,
+) -> Result<Vec<EditorialAgentResult>, String> {
     let mut artifacts = read_agent_artifacts(agent_dir)?;
     artifacts.sort_by(|left, right| {
         left.round
@@ -242,7 +248,7 @@ pub(crate) fn parse_agent_artifact_name(agent_dir: &Path, name: &str) -> Option<
     let stem = rest.strip_suffix(".md")?;
     let (agent, role) = stem.rsplit_once('-')?;
     let agent = match agent {
-        "claude" | "codex" | "gemini" | "deepseek" => agent,
+        "claude" | "codex" | "gemini" | "deepseek" | "grok" => agent,
         _ => return None,
     };
     if !matches!(role, "draft" | "review" | "revision") {
@@ -260,7 +266,9 @@ pub(crate) fn parse_agent_artifact_name(agent_dir: &Path, name: &str) -> Option<
     })
 }
 
-pub(crate) fn parse_agent_artifact_result(artifact: &SessionArtifact) -> Option<EditorialAgentResult> {
+pub(crate) fn parse_agent_artifact_result(
+    artifact: &SessionArtifact,
+) -> Option<EditorialAgentResult> {
     let text = read_text_file(&artifact.path).ok()?;
     let cli = extract_bullet_code_value(&text, "CLI").unwrap_or_else(|| artifact.agent.clone());
     let status = extract_bullet_code_value(&text, "Status").unwrap_or_else(|| {

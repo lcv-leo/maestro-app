@@ -140,8 +140,7 @@ pub(crate) async fn send_with_retry_async(
                         LogEventInput {
                             level: "warn".to_string(),
                             category: "session.provider.retry_after_429".to_string(),
-                            message: "provider returned HTTP 429; sleeping until retry"
-                                .to_string(),
+                            message: "provider returned HTTP 429; sleeping until retry".to_string(),
                             context: Some(json!({
                                 "run_id": run_id,
                                 "provider": provider_label,
@@ -176,8 +175,7 @@ pub(crate) async fn send_with_retry_async(
                         LogEventInput {
                             level: "warn".to_string(),
                             category: "session.provider.retry_network".to_string(),
-                            message: "provider network error; retrying after backoff"
-                                .to_string(),
+                            message: "provider network error; retrying after backoff".to_string(),
                             context: Some(json!({
                                 "run_id": run_id,
                                 "provider": provider_label,

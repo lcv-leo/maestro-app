@@ -60,7 +60,10 @@ pub(crate) fn remaining_session_duration(
     }
 }
 
-pub(crate) fn session_time_exhausted(created_at: DateTime<Utc>, max_session_minutes: Option<u64>) -> bool {
+pub(crate) fn session_time_exhausted(
+    created_at: DateTime<Utc>,
+    max_session_minutes: Option<u64>,
+) -> bool {
     remaining_session_duration(created_at, max_session_minutes)
         .map(|duration| duration.as_secs() < 2)
         .unwrap_or(false)
@@ -81,6 +84,7 @@ pub(crate) fn humanize_agent_name(value: &str) -> String {
         "codex" => "Codex".to_string(),
         "gemini" => "Gemini".to_string(),
         "deepseek" => "DeepSeek".to_string(),
+        "grok" => "Grok".to_string(),
         other => other
             .replace('_', " ")
             .split_whitespace()

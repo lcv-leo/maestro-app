@@ -82,6 +82,10 @@ pub(crate) fn deepseek_args() -> Vec<String> {
     Vec::new()
 }
 
+pub(crate) fn grok_args() -> Vec<String> {
+    Vec::new()
+}
+
 pub(crate) fn editorial_agent_specs() -> Vec<EditorialAgentSpec> {
     vec![
         EditorialAgentSpec {
@@ -108,6 +112,12 @@ pub(crate) fn editorial_agent_specs() -> Vec<EditorialAgentSpec> {
             command: "deepseek-api",
             args: deepseek_args,
         },
+        EditorialAgentSpec {
+            key: "grok",
+            name: "Grok",
+            command: "grok-api",
+            args: grok_args,
+        },
     ]
 }
 
@@ -121,6 +131,7 @@ pub(crate) fn resolve_initial_agent_key(value: Option<&str>) -> (&'static str, O
         "codex" | "openai" | "chatgpt" => ("codex", None),
         "gemini" | "google" => ("gemini", None),
         "deepseek" | "deepseek-api" => ("deepseek", None),
+        "grok" | "xai" | "grok-api" => ("grok", None),
         "" => ("claude", None),
         _ => ("claude", Some(sanitize_text(value, 80))),
     }

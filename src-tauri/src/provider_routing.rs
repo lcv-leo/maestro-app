@@ -55,6 +55,7 @@ pub(crate) fn api_cli_for_agent(agent_key: &str) -> &'static str {
         "codex" => "openai-api",
         "gemini" => "gemini-api",
         "deepseek" => "deepseek-api",
+        "grok" => "grok-api",
         _ => "provider-api",
     }
 }
@@ -65,6 +66,7 @@ pub(crate) fn provider_label_for_agent(agent_key: &str) -> &'static str {
         "codex" => "OpenAI / Codex",
         "gemini" => "Google / Gemini",
         "deepseek" => "DeepSeek",
+        "grok" => "Grok / xAI",
         _ => "Provedor API",
     }
 }
@@ -75,6 +77,7 @@ pub(crate) fn provider_remote_present(config: &AiProviderConfig, agent_key: &str
         "codex" => config.openai_api_key_remote,
         "gemini" => config.gemini_api_key_remote,
         "deepseek" => config.deepseek_api_key_remote,
+        "grok" => config.grok_api_key_remote,
         _ => false,
     }
 }
@@ -99,6 +102,10 @@ pub(crate) fn provider_key_for_agent(
         "deepseek" => effective_provider_key(
             config.deepseek_api_key.as_deref(),
             &["MAESTRO_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY"],
+        ),
+        "grok" => effective_provider_key(
+            config.grok_api_key.as_deref(),
+            &["MAESTRO_GROK_API_KEY", "GROK_API_KEY", "XAI_API_KEY"],
         ),
         _ => None,
     }

@@ -287,7 +287,7 @@ pub(crate) fn run_cli_adapter_smoke(
                 "protocol_name": sanitize_text(&request.protocol_name, 160),
                 "protocol_lines": request.protocol_lines,
                 "protocol_hash_prefix": sanitize_short(&request.protocol_hash, 16),
-                "agents": ["claude", "codex", "gemini", "deepseek"]
+                "agents": ["claude", "codex", "gemini"]
             })),
         },
     );

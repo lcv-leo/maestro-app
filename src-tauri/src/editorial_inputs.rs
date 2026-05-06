@@ -32,9 +32,7 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
-use crate::{
-    write_text_file, EffectiveAgentInput, PreparedAgentInput, SessionContract,
-};
+use crate::{write_text_file, EffectiveAgentInput, PreparedAgentInput, SessionContract};
 
 pub(crate) fn effective_agent_input(
     command: &str,

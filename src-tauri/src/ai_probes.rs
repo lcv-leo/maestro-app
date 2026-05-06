@@ -63,6 +63,7 @@ pub(crate) fn run_ai_provider_probe(config: &AiProviderConfig) -> AiProviderProb
             probe_anthropic_api(&client, config),
             probe_gemini_api(&client, config),
             probe_deepseek_api(&client, config),
+            probe_grok_api(&client, config),
         ],
         checked_at: Utc::now().to_rfc3339(),
     }
@@ -127,6 +128,21 @@ fn probe_deepseek_api(client: &Client, config: &AiProviderConfig) -> AiProviderP
         .bearer_auth(&key)
         .send();
     summarize_ai_probe_response("DeepSeek", response)
+}
+
+fn probe_grok_api(client: &Client, config: &AiProviderConfig) -> AiProviderProbeRow {
+    let Some((key, _source)) = effective_provider_key(
+        config.grok_api_key.as_deref(),
+        &["MAESTRO_GROK_API_KEY", "GROK_API_KEY", "XAI_API_KEY"],
+    ) else {
+        return missing_provider_key_row("Grok / xAI", config.grok_api_key_remote);
+    };
+
+    let response = client
+        .get("https://api.x.ai/v1/models")
+        .bearer_auth(&key)
+        .send();
+    summarize_ai_probe_response("Grok / xAI", response)
 }
 
 fn missing_provider_key_row(label: &str, remote_present: bool) -> AiProviderProbeRow {

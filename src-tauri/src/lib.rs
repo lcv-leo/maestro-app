@@ -16,58 +16,55 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 #[cfg(test)]
 use serde_json::Value;
-use std::{
-    path::PathBuf,
-    process::Output,
-    time::Duration,
-};
 #[cfg(test)]
 use std::{fs, path::Path, thread};
+use std::{path::PathBuf, process::Output, time::Duration};
 use tauri::Manager;
 
 mod ai_probes;
 mod api_payloads;
 mod app_init;
 mod app_paths;
-mod cloudflare_commands;
-mod editorial_io;
-mod session_cancel;
-mod session_commands;
-mod session_orchestration;
-mod tauri_commands;
 mod cli_adapter;
 mod cloudflare;
+mod cloudflare_commands;
 mod command_path;
 mod command_spawn;
 mod config_persistence;
 mod editorial_agent_runners;
 mod editorial_helpers;
 mod editorial_inputs;
+mod editorial_io;
 mod editorial_prompts;
 mod human_logs;
 mod link_audit;
 mod logging;
 mod provider_config;
 mod provider_deepseek;
+mod provider_grok;
 mod provider_retry;
 mod provider_routing;
 mod provider_runners;
 mod sanitize;
 mod session_artifacts;
+mod session_cancel;
+mod session_commands;
 mod session_controls;
 mod session_evidence;
 mod session_minutes;
+mod session_orchestration;
 mod session_persistence;
 mod session_resume;
+mod tauri_commands;
 
 // Re-export the sanitization helpers so existing `use crate::sanitize_text`
 // and similar imports across all 18+ sibling modules continue to resolve
 // without per-file edits. Only the home of the implementation moved.
+#[cfg(test)]
+pub(crate) use crate::sanitize::{redact_secrets, should_redact_key};
 pub(crate) use crate::sanitize::{
     sanitize_short, sanitize_text, sanitize_value, truncate_text_head_tail,
 };
-#[cfg(test)]
-pub(crate) use crate::sanitize::{redact_secrets, should_redact_key};
 
 // Re-export the provider_config surface so existing `crate::sanitize_ai_provider_config`
 // and similar unqualified call sites in lib.rs (and mod tests via `super::*`)
@@ -75,9 +72,9 @@ pub(crate) use crate::sanitize::{redact_secrets, should_redact_key};
 // moved. v0.3.40. Helpers consumed exclusively inside provider_config.rs
 // (`normalize_provider_mode`, `provider_env_value`, `sanitize_optional_cost_rate`,
 // `sanitize_optional_secret`) are not re-exported here.
-pub(crate) use crate::provider_config::sanitize_ai_provider_config;
 #[cfg(test)]
 use crate::config_persistence::persist_ai_provider_cloudflare_marker;
+pub(crate) use crate::provider_config::sanitize_ai_provider_config;
 
 // Re-export the config_persistence surface so existing
 // `crate::persist_ai_provider_config` and similar unqualified call sites in
@@ -105,30 +102,30 @@ pub(crate) use crate::provider_routing::{
 // are not re-exported here. `API_NATIVE_ATTACHMENT_MAX_FILE_BYTES` is
 // `#[cfg(test)]`-gated because only `lib.rs::tests` exercises the cap
 // directly; production code goes through `api_payloads.rs` internally.
+#[cfg(test)]
+use crate::api_payloads::API_NATIVE_ATTACHMENT_MAX_FILE_BYTES;
 pub(crate) use crate::api_payloads::{
     anthropic_api_user_content, api_input_estimate_chars, gemini_api_user_parts, openai_api_input,
 };
-#[cfg(test)]
-use crate::api_payloads::API_NATIVE_ATTACHMENT_MAX_FILE_BYTES;
 
 // Re-export the app_paths surface used throughout this file. The functions
 // keep their pre-extraction call sites (`sessions_dir()`, `app_root()`, etc.)
 // untouched; only the home of the implementation moved per
 // `docs/code-split-plan.md`. See `app_paths.rs` for documentation.
-use crate::app_paths::{app_root, human_log_path_for, logs_dir};
-pub(crate) use crate::app_paths::{checked_data_child_path, sanitize_path_segment};
 #[cfg(test)]
-pub(crate) use crate::app_paths::sessions_dir;
+use crate::app_paths::active_or_early_logs_dir;
 #[cfg(test)]
 use crate::app_paths::safe_run_id_from_entry;
 #[cfg(test)]
-use crate::app_paths::active_or_early_logs_dir;
+pub(crate) use crate::app_paths::sessions_dir;
+use crate::app_paths::{app_root, human_log_path_for, logs_dir};
+pub(crate) use crate::app_paths::{checked_data_child_path, sanitize_path_segment};
 #[cfg(test)]
 use crate::cloudflare::ai_provider_secret_values;
 use crate::command_path::{command_search_dirs, resolve_command};
 #[cfg(test)]
 use crate::editorial_helpers::{
-    finalize_running_agent_artifacts, filter_existing_agents_to_active_set,
+    filter_existing_agents_to_active_set, finalize_running_agent_artifacts,
     resolve_effective_active_agents, review_complaint_fingerprint, FinalizeRunningArtifactsGuard,
 };
 #[cfg(test)]
@@ -140,13 +137,13 @@ use crate::editorial_prompts::{
 };
 use crate::logging::{create_log_session, write_log_record, LogEventInput, LogSession};
 #[cfg(test)]
+use crate::session_artifacts::{inspect_resumable_session_dir, load_resume_session_state};
+#[cfg(test)]
 use crate::session_persistence::{load_session_contract, write_session_contract};
 #[cfg(test)]
 use crate::session_resume::{
     extract_saved_initial_agent, extract_saved_prompt, extract_saved_session_name,
 };
-#[cfg(test)]
-use crate::session_artifacts::{inspect_resumable_session_dir, load_resume_session_state};
 // Items below are only referenced from `mod tests` and cargo flags them as unused
 // when compiled without the test cfg. Re-importing inside the test module avoids
 // `#[cfg(test)]` annotations on the main use list.
@@ -193,6 +190,8 @@ pub(crate) struct AiProviderConfig {
     #[serde(default)]
     pub(crate) deepseek_api_key: Option<String>,
     #[serde(default)]
+    pub(crate) grok_api_key: Option<String>,
+    #[serde(default)]
     pub(crate) openai_api_key_remote: bool,
     #[serde(default)]
     pub(crate) anthropic_api_key_remote: bool,
@@ -200,6 +199,8 @@ pub(crate) struct AiProviderConfig {
     pub(crate) gemini_api_key_remote: bool,
     #[serde(default)]
     pub(crate) deepseek_api_key_remote: bool,
+    #[serde(default)]
+    pub(crate) grok_api_key_remote: bool,
     #[serde(default)]
     openai_input_usd_per_million: Option<f64>,
     #[serde(default)]
@@ -216,6 +217,10 @@ pub(crate) struct AiProviderConfig {
     deepseek_input_usd_per_million: Option<f64>,
     #[serde(default)]
     deepseek_output_usd_per_million: Option<f64>,
+    #[serde(default)]
+    grok_input_usd_per_million: Option<f64>,
+    #[serde(default)]
+    grok_output_usd_per_million: Option<f64>,
     #[serde(default)]
     cloudflare_secret_store_id: Option<String>,
     #[serde(default)]
@@ -541,10 +546,12 @@ impl Default for AiProviderConfig {
             anthropic_api_key: None,
             gemini_api_key: None,
             deepseek_api_key: None,
+            grok_api_key: None,
             openai_api_key_remote: false,
             anthropic_api_key_remote: false,
             gemini_api_key_remote: false,
             deepseek_api_key_remote: false,
+            grok_api_key_remote: false,
             openai_input_usd_per_million: None,
             openai_output_usd_per_million: None,
             anthropic_input_usd_per_million: None,
@@ -553,6 +560,8 @@ impl Default for AiProviderConfig {
             gemini_output_usd_per_million: None,
             deepseek_input_usd_per_million: None,
             deepseek_output_usd_per_million: None,
+            grok_input_usd_per_million: None,
+            grok_output_usd_per_million: None,
             cloudflare_secret_store_id: None,
             cloudflare_secret_store_name: None,
             updated_at: Utc::now().to_rfc3339(),
@@ -571,14 +580,8 @@ pub(crate) struct RuntimeProfile {
     pub(crate) log_session_id: String,
 }
 
-
 use crate::cloudflare_commands::{
     cloudflare_env_snapshot, dependency_preflight, verify_cloudflare_credentials,
-};
-use crate::tauri_commands::{
-    audit_links, diagnostics_snapshot, open_data_file, read_ai_provider_config,
-    read_bootstrap_config, run_cli_adapter_smoke, runtime_profile, verify_ai_provider_credentials,
-    write_ai_provider_config, write_bootstrap_config, write_log_event,
 };
 use crate::session_commands::{
     list_resumable_sessions, resume_editorial_session, run_editorial_session,
@@ -587,29 +590,21 @@ use crate::session_commands::{
 pub(crate) use crate::session_orchestration::{
     run_editorial_session_core, run_editorial_session_inner,
 };
-
-
-pub(crate) use crate::app_init::{
-    hidden_command, initialize_app_root, install_process_panic_hook,
+use crate::tauri_commands::{
+    audit_links, diagnostics_snapshot, open_data_file, read_ai_provider_config,
+    read_bootstrap_config, run_cli_adapter_smoke, runtime_profile, verify_ai_provider_credentials,
+    write_ai_provider_config, write_bootstrap_config, write_log_event,
 };
+
 #[cfg(test)]
 use crate::app_init::write_early_crash_record;
-
-
-
-
-
-
-
+pub(crate) use crate::app_init::{hidden_command, initialize_app_root, install_process_panic_hook};
 
 pub(crate) use crate::editorial_io::{
     api_error_message, command_working_dir_for_output, extract_maestro_status,
     extract_stdout_block, log_editorial_agent_finished, log_editorial_agent_running,
     log_editorial_agent_spawned, read_text_file, write_text_file,
 };
-
-
-
 
 #[derive(Clone)]
 pub(crate) struct SessionArtifact {
@@ -618,19 +613,6 @@ pub(crate) struct SessionArtifact {
     pub(crate) role: String,
     pub(crate) path: PathBuf,
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -733,11 +715,11 @@ mod tests {
     use crate::command_spawn::{apply_editorial_agent_environment, classify_pipe_error};
     use crate::editorial_inputs::{effective_agent_input, prepare_agent_input};
     use crate::editorial_prompts::{claude_args, gemini_args};
-    use crate::session_minutes::build_blocked_minutes_decision;
     use crate::link_audit::{extract_public_urls, is_public_http_url};
     use crate::provider_retry::parse_retry_after_header;
     use crate::session_artifacts::{parse_agent_artifact_name, parse_agent_artifact_result};
     use crate::session_controls::{normalize_active_agents, provider_cost};
+    use crate::session_minutes::build_blocked_minutes_decision;
     use crate::session_resume::{count_known_session_markdown_artifacts, protocol_backup_stats};
 
     fn test_manifest_attachment(
@@ -794,11 +776,9 @@ mod tests {
         let google_key = ["AI", "za", "12345678"].concat();
         let cloudflare_token = ["cfut", "_", "12345678"].concat();
         let anthropic_key = ["sk", "-ant-", "12345678"].concat();
-        let text = redact_secrets(
-            &format!(
-                r#"url=https://example.test/?key={google_key} header=Authorization:Bearer {cloudflare_token} json={{"api_key":"{anthropic_key}"}}"#
-            ),
-        );
+        let text = redact_secrets(&format!(
+            r#"url=https://example.test/?key={google_key} header=Authorization:Bearer {cloudflare_token} json={{"api_key":"{anthropic_key}"}}"#
+        ));
         assert!(!text.contains(&google_key));
         assert!(!text.contains(&cloudflare_token));
         assert!(!text.contains(&anthropic_key));
@@ -946,19 +926,28 @@ mod tests {
             .into_iter()
             .map(|spec| spec.key)
             .collect::<Vec<_>>();
-        assert_eq!(claude_order, vec!["claude", "codex", "gemini", "deepseek"]);
+        assert_eq!(
+            claude_order,
+            vec!["claude", "codex", "gemini", "deepseek", "grok"]
+        );
 
         let codex_order = ordered_editorial_agent_specs("codex")
             .into_iter()
             .map(|spec| spec.key)
             .collect::<Vec<_>>();
-        assert_eq!(codex_order, vec!["codex", "claude", "gemini", "deepseek"]);
+        assert_eq!(
+            codex_order,
+            vec!["codex", "claude", "gemini", "deepseek", "grok"]
+        );
 
         let gemini_order = ordered_editorial_agent_specs("gemini")
             .into_iter()
             .map(|spec| spec.key)
             .collect::<Vec<_>>();
-        assert_eq!(gemini_order, vec!["gemini", "claude", "codex", "deepseek"]);
+        assert_eq!(
+            gemini_order,
+            vec!["gemini", "claude", "codex", "deepseek", "grok"]
+        );
 
         let deepseek_order = ordered_editorial_agent_specs("deepseek")
             .into_iter()
@@ -966,7 +955,16 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             deepseek_order,
-            vec!["deepseek", "claude", "codex", "gemini"]
+            vec!["deepseek", "claude", "codex", "gemini", "grok"]
+        );
+
+        let grok_order = ordered_editorial_agent_specs("grok")
+            .into_iter()
+            .map(|spec| spec.key)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            grok_order,
+            vec!["grok", "claude", "codex", "gemini", "deepseek"]
         );
     }
 
@@ -1020,10 +1018,12 @@ mod tests {
             anthropic_api_key: Some("sk-ant-test-value".to_string()),
             gemini_api_key: Some("AIza-test-value".to_string()),
             deepseek_api_key: Some("ds-test-value".to_string()),
+            grok_api_key: Some("xai-test-value".to_string()),
             openai_api_key_remote: false,
             anthropic_api_key_remote: false,
             gemini_api_key_remote: false,
             deepseek_api_key_remote: false,
+            grok_api_key_remote: false,
             openai_input_usd_per_million: Some(2.50),
             openai_output_usd_per_million: Some(10.0),
             anthropic_input_usd_per_million: Some(3.0),
@@ -1032,6 +1032,8 @@ mod tests {
             gemini_output_usd_per_million: Some(5.0),
             deepseek_input_usd_per_million: Some(0.55),
             deepseek_output_usd_per_million: Some(2.19),
+            grok_input_usd_per_million: Some(3.0),
+            grok_output_usd_per_million: Some(15.0),
             cloudflare_secret_store_id: None,
             cloudflare_secret_store_name: None,
             updated_at: "old".to_string(),
@@ -1047,10 +1049,12 @@ mod tests {
         assert!(text.contains("\"anthropic_api_key_remote\": true"));
         assert!(text.contains("\"gemini_api_key_remote\": true"));
         assert!(text.contains("\"deepseek_api_key_remote\": true"));
+        assert!(text.contains("\"grok_api_key_remote\": true"));
         assert!(!text.contains("sk-test-value"));
         assert!(!text.contains("sk-ant-test-value"));
         assert!(!text.contains("AIza-test-value"));
         assert!(!text.contains("ds-test-value"));
+        assert!(!text.contains("xai-test-value"));
         let _ = fs::remove_file(path);
     }
 
@@ -1064,10 +1068,12 @@ mod tests {
             anthropic_api_key: None,
             gemini_api_key: Some("AIza-test-value".to_string()),
             deepseek_api_key: Some("ds-test-value".to_string()),
+            grok_api_key: Some("xai-test-value".to_string()),
             openai_api_key_remote: false,
             anthropic_api_key_remote: false,
             gemini_api_key_remote: false,
             deepseek_api_key_remote: false,
+            grok_api_key_remote: false,
             openai_input_usd_per_million: Some(2.50),
             openai_output_usd_per_million: Some(10.0),
             anthropic_input_usd_per_million: Some(3.0),
@@ -1076,6 +1082,8 @@ mod tests {
             gemini_output_usd_per_million: Some(5.0),
             deepseek_input_usd_per_million: Some(0.55),
             deepseek_output_usd_per_million: Some(2.19),
+            grok_input_usd_per_million: Some(3.0),
+            grok_output_usd_per_million: Some(15.0),
             cloudflare_secret_store_id: None,
             cloudflare_secret_store_name: None,
             updated_at: "old".to_string(),
@@ -1083,10 +1091,11 @@ mod tests {
 
         let values = ai_provider_secret_values(&config);
 
-        assert_eq!(values.len(), 3);
+        assert_eq!(values.len(), 4);
         assert!(values.contains_key("MAESTRO_OPENAI_API_KEY"));
         assert!(values.contains_key("MAESTRO_GEMINI_API_KEY"));
         assert!(values.contains_key("MAESTRO_DEEPSEEK_API_KEY"));
+        assert!(values.contains_key("MAESTRO_GROK_API_KEY"));
         assert!(!values.contains_key("MAESTRO_ANTHROPIC_API_KEY"));
     }
 
@@ -1140,11 +1149,7 @@ mod tests {
             "active_agents": ["claude"],
             "initial_agent": "claude"
         }"#;
-        write_text_file(
-            &session_dir.join("session-contract.json"),
-            legacy_payload,
-        )
-        .unwrap();
+        write_text_file(&session_dir.join("session-contract.json"), legacy_payload).unwrap();
         let loaded = load_session_contract(&session_dir).expect("legacy contract should parse");
         assert_eq!(loaded.created_at, "2026-04-01T12:00:00.000000+00:00");
         assert_eq!(loaded.active_agents, vec!["claude".to_string()]);
@@ -1178,9 +1183,9 @@ mod tests {
 
     #[test]
     fn resolve_effective_active_agents_falls_back_to_default_when_both_missing() {
-        let (effective, source) = resolve_effective_active_agents(None, None)
-            .expect("default fallback should resolve");
-        assert_eq!(effective.len(), 4);
+        let (effective, source) =
+            resolve_effective_active_agents(None, None).expect("default fallback should resolve");
+        assert_eq!(effective.len(), 5);
         assert_eq!(source, "default_all");
     }
 
@@ -1189,7 +1194,7 @@ mod tests {
         let saved: Vec<String> = Vec::new();
         let (effective, source) = resolve_effective_active_agents(None, Some(&saved))
             .expect("empty saved contract should fall through, not error");
-        assert_eq!(effective.len(), 4);
+        assert_eq!(effective.len(), 5);
         assert_eq!(source, "default_all");
     }
 
@@ -1324,7 +1329,11 @@ mod tests {
         ];
         let active = vec!["claude".to_string(), "codex".to_string()];
         let filtered = filter_existing_agents_to_active_set(existing, &active);
-        assert_eq!(filtered.len(), 2, "alias names must normalize to active keys");
+        assert_eq!(
+            filtered.len(),
+            2,
+            "alias names must normalize to active keys"
+        );
     }
 
     #[test]
@@ -1395,11 +1404,7 @@ mod tests {
         let _ = fs::remove_dir_all(&session_dir);
         fs::create_dir_all(&session_dir).unwrap();
         write_text_file(&session_dir.join("prompt.md"), "Sessao: Teste\n\nbody").unwrap();
-        write_text_file(
-            &session_dir.join("protocolo.md"),
-            &"Linha\n".repeat(120),
-        )
-        .unwrap();
+        write_text_file(&session_dir.join("protocolo.md"), &"Linha\n".repeat(120)).unwrap();
         let agent_dir = session_dir.join("agent-runs");
         fs::create_dir_all(&agent_dir).unwrap();
         let contract = SessionContract {
@@ -1432,11 +1437,7 @@ mod tests {
         let _ = fs::remove_dir_all(&session_dir);
         fs::create_dir_all(&session_dir).unwrap();
         write_text_file(&session_dir.join("prompt.md"), "Sessao: Teste\n\nbody").unwrap();
-        write_text_file(
-            &session_dir.join("protocolo.md"),
-            &"Linha\n".repeat(120),
-        )
-        .unwrap();
+        write_text_file(&session_dir.join("protocolo.md"), &"Linha\n".repeat(120)).unwrap();
         fs::create_dir_all(session_dir.join("agent-runs")).unwrap();
 
         let info = inspect_resumable_session_dir(&session_dir)
@@ -1651,14 +1652,14 @@ mod tests {
         let envs: Vec<(String, String)> = command
             .get_envs()
             .filter_map(|(key, value)| {
-                Some((
-                    key.to_str()?.to_string(),
-                    value?.to_str()?.to_string(),
-                ))
+                Some((key.to_str()?.to_string(), value?.to_str()?.to_string()))
             })
             .collect();
         let envs_map: std::collections::BTreeMap<_, _> = envs.into_iter().collect();
-        assert_eq!(envs_map.get("PYTHONIOENCODING").map(String::as_str), Some("utf-8"));
+        assert_eq!(
+            envs_map.get("PYTHONIOENCODING").map(String::as_str),
+            Some("utf-8")
+        );
         assert_eq!(envs_map.get("PYTHONUTF8").map(String::as_str), Some("1"));
         assert_eq!(envs_map.get("LC_ALL").map(String::as_str), Some("C.UTF-8"));
         assert_eq!(envs_map.get("LANG").map(String::as_str), Some("C.UTF-8"));
@@ -1674,15 +1675,14 @@ mod tests {
         let envs: Vec<(String, String)> = command
             .get_envs()
             .filter_map(|(key, value)| {
-                Some((
-                    key.to_str()?.to_string(),
-                    value?.to_str()?.to_string(),
-                ))
+                Some((key.to_str()?.to_string(), value?.to_str()?.to_string()))
             })
             .collect();
         let envs_map: std::collections::BTreeMap<_, _> = envs.into_iter().collect();
         assert_eq!(
-            envs_map.get("GEMINI_CLI_TRUST_WORKSPACE").map(String::as_str),
+            envs_map
+                .get("GEMINI_CLI_TRUST_WORKSPACE")
+                .map(String::as_str),
             Some("true")
         );
     }

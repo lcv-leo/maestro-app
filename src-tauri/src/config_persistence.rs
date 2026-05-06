@@ -102,12 +102,14 @@ pub(crate) fn persist_ai_provider_cloudflare_marker(
         anthropic_api_key: None,
         gemini_api_key: None,
         deepseek_api_key: None,
+        grok_api_key: None,
         openai_api_key_remote: config.openai_api_key.is_some() || config.openai_api_key_remote,
         anthropic_api_key_remote: config.anthropic_api_key.is_some()
             || config.anthropic_api_key_remote,
         gemini_api_key_remote: config.gemini_api_key.is_some() || config.gemini_api_key_remote,
         deepseek_api_key_remote: config.deepseek_api_key.is_some()
             || config.deepseek_api_key_remote,
+        grok_api_key_remote: config.grok_api_key.is_some() || config.grok_api_key_remote,
         openai_input_usd_per_million: config.openai_input_usd_per_million,
         openai_output_usd_per_million: config.openai_output_usd_per_million,
         anthropic_input_usd_per_million: config.anthropic_input_usd_per_million,
@@ -116,6 +118,8 @@ pub(crate) fn persist_ai_provider_cloudflare_marker(
         gemini_output_usd_per_million: config.gemini_output_usd_per_million,
         deepseek_input_usd_per_million: config.deepseek_input_usd_per_million,
         deepseek_output_usd_per_million: config.deepseek_output_usd_per_million,
+        grok_input_usd_per_million: config.grok_input_usd_per_million,
+        grok_output_usd_per_million: config.grok_output_usd_per_million,
         cloudflare_secret_store_id: config.cloudflare_secret_store_id.clone(),
         cloudflare_secret_store_name: config.cloudflare_secret_store_name.clone(),
         updated_at: config.updated_at.clone(),
@@ -180,6 +184,7 @@ pub(crate) fn enrich_ai_provider_config_from_cloudflare(
         config.anthropic_api_key_remote |= remote.anthropic_api_key_remote;
         config.gemini_api_key_remote |= remote.gemini_api_key_remote;
         config.deepseek_api_key_remote |= remote.deepseek_api_key_remote;
+        config.grok_api_key_remote |= remote.grok_api_key_remote;
         config.cloudflare_secret_store_id = remote
             .cloudflare_secret_store_id
             .or(config.cloudflare_secret_store_id);
@@ -275,6 +280,12 @@ pub(crate) fn read_ai_provider_cloudflare_metadata(
         deepseek_output_usd_per_million: metadata
             .get("deepseek_output_usd_per_million")
             .and_then(Value::as_f64),
+        grok_input_usd_per_million: metadata
+            .get("grok_input_usd_per_million")
+            .and_then(Value::as_f64),
+        grok_output_usd_per_million: metadata
+            .get("grok_output_usd_per_million")
+            .and_then(Value::as_f64),
         ..AiProviderConfig::default()
     };
 
@@ -285,6 +296,7 @@ pub(crate) fn read_ai_provider_cloudflare_metadata(
                 "MAESTRO_ANTHROPIC_API_KEY" => config.anthropic_api_key_remote = true,
                 "MAESTRO_GEMINI_API_KEY" => config.gemini_api_key_remote = true,
                 "MAESTRO_DEEPSEEK_API_KEY" => config.deepseek_api_key_remote = true,
+                "MAESTRO_GROK_API_KEY" => config.grok_api_key_remote = true,
                 _ => {}
             }
         }

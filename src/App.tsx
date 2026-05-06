@@ -109,6 +109,7 @@ const PostEditor = lazy(() => import('./editor/posteditor/PostEditor'));
 
 const APP_VERSION = `v${packageJson.version}`;
 
+const agentIsApiOnly = (agent: InitialAgentKey) => agent === 'deepseek' || agent === 'grok';
 
 export function App() {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -148,18 +149,21 @@ export function App() {
     anthropic: '',
     gemini: '',
     deepseek: '',
+    grok: '',
   });
   const [providerInputUsdPerMillion, setProviderInputUsdPerMillion] = useState<Record<ProviderRateKey, string>>({
     openai: '',
     anthropic: '',
     gemini: '',
     deepseek: '',
+    grok: '',
   });
   const [providerOutputUsdPerMillion, setProviderOutputUsdPerMillion] = useState<Record<ProviderRateKey, string>>({
     openai: '',
     anthropic: '',
     gemini: '',
     deepseek: '',
+    grok: '',
   });
   const [sessionRunId, setSessionRunId] = useState<string | null>(null);
   const [lastSessionMinutesPath, setLastSessionMinutesPath] = useState<string | null>(null);
@@ -229,13 +233,14 @@ export function App() {
     codex: 'openai',
     gemini: 'gemini',
     deepseek: 'deepseek',
+    grok: 'grok',
   };
   const agentUsesApi = (agent: InitialAgentKey) => {
     if (providerMode === 'api') return true;
     if (providerMode === 'cli') return false;
-    // "hybrid" is deterministic by agent identity: DeepSeek goes API
+    // "hybrid" is deterministic by agent identity: DeepSeek and Grok go API
     // (no CLI integration in maestro-app), the other peers stay on CLI.
-    return agent === 'deepseek';
+    return agentIsApiOnly(agent);
   };
   const providerRatesConfigured = (provider: AiCredentialKey) =>
     providerInputUsdPerMillion[provider].trim().length > 0 &&
@@ -261,20 +266,20 @@ export function App() {
   }, [activeAgents, initialAgent]);
 
   useEffect(() => {
-    // CLI mode is incompatible with DeepSeek (no CLI integration in maestro-app).
+    // CLI mode is incompatible with API-only peers (DeepSeek and Grok).
     // Defense in depth: catches config-load AND resume-contract paths that call
     // setActiveAgents/setInitialAgent directly while providerMode is already 'cli'
     // (peer review v0.3.38: codex + deepseek raised this — providerMode-only deps
-    // would miss saved-contract restore that injects DeepSeek without flipping mode).
+    // would miss saved-contract restore that injects API-only peers without flipping mode).
     // Reads activeAgents/initialAgent directly (not via setState updater closure)
     // so the React-hooks/preserve-manual-memoization lint sees them as real deps;
     // both setState calls are guarded so no render loop is possible.
     if (providerMode !== 'cli') return;
-    if (activeAgents.includes('deepseek')) {
-      const filtered = activeAgents.filter((agent) => agent !== 'deepseek');
+    if (activeAgents.some(agentIsApiOnly)) {
+      const filtered = activeAgents.filter((agent) => !agentIsApiOnly(agent));
       setActiveAgents(filtered.length === 0 ? ['claude'] : filtered);
     }
-    if (initialAgent === 'deepseek') {
+    if (agentIsApiOnly(initialAgent)) {
       setInitialAgent('claude');
     }
   }, [providerMode, activeAgents, initialAgent]);
@@ -608,10 +613,12 @@ export function App() {
       anthropic_api_key: aiCredentials.anthropic.trim() || null,
       gemini_api_key: aiCredentials.gemini.trim() || null,
       deepseek_api_key: aiCredentials.deepseek.trim() || null,
+      grok_api_key: aiCredentials.grok.trim() || null,
       openai_api_key_remote: false,
       anthropic_api_key_remote: false,
       gemini_api_key_remote: false,
       deepseek_api_key_remote: false,
+      grok_api_key_remote: false,
       openai_input_usd_per_million: parseOptionalPositiveNumber(
         providerInputUsdPerMillion.openai,
         'Tarifa OpenAI de entrada',
@@ -652,6 +659,16 @@ export function App() {
         'Tarifa DeepSeek de saida',
         10000,
       ),
+      grok_input_usd_per_million: parseOptionalPositiveNumber(
+        providerInputUsdPerMillion.grok,
+        'Tarifa Grok de entrada',
+        10000,
+      ),
+      grok_output_usd_per_million: parseOptionalPositiveNumber(
+        providerOutputUsdPerMillion.grok,
+        'Tarifa Grok de saida',
+        10000,
+      ),
       cloudflare_secret_store_id: null,
       cloudflare_secret_store_name: null,
       updated_at: new Date().toISOString(),
@@ -684,6 +701,7 @@ export function App() {
         anthropic: config.anthropic_api_key ?? '',
         gemini: config.gemini_api_key ?? '',
         deepseek: config.deepseek_api_key ?? '',
+        grok: config.grok_api_key ?? '',
       });
       applyProviderRatesFromConfig(config);
       const remoteCount = [
@@ -691,6 +709,7 @@ export function App() {
         config.anthropic_api_key_remote,
         config.gemini_api_key_remote,
         config.deepseek_api_key_remote,
+        config.grok_api_key_remote,
       ].filter(Boolean).length;
       setAiConfigStatus(
         remoteCount > 0
@@ -710,6 +729,7 @@ export function App() {
           anthropic_key_present: Boolean(config.anthropic_api_key),
           gemini_key_present: Boolean(config.gemini_api_key),
           deepseek_key_present: Boolean(config.deepseek_api_key),
+          grok_key_present: Boolean(config.grok_api_key),
           openai_rate_input_configured: config.openai_input_usd_per_million != null,
           openai_rate_output_configured: config.openai_output_usd_per_million != null,
           anthropic_rate_input_configured: config.anthropic_input_usd_per_million != null,
@@ -718,10 +738,13 @@ export function App() {
           gemini_rate_output_configured: config.gemini_output_usd_per_million != null,
           deepseek_cost_input_configured: config.deepseek_input_usd_per_million != null,
           deepseek_cost_output_configured: config.deepseek_output_usd_per_million != null,
+          grok_cost_input_configured: config.grok_input_usd_per_million != null,
+          grok_cost_output_configured: config.grok_output_usd_per_million != null,
           openai_remote_present: config.openai_api_key_remote,
           anthropic_remote_present: config.anthropic_api_key_remote,
           gemini_remote_present: config.gemini_api_key_remote,
           deepseek_remote_present: config.deepseek_api_key_remote,
+          grok_remote_present: config.grok_api_key_remote,
         },
       });
     } catch (error) {
@@ -748,6 +771,7 @@ export function App() {
         anthropic: saved.anthropic_api_key ?? '',
         gemini: saved.gemini_api_key ?? '',
         deepseek: saved.deepseek_api_key ?? '',
+        grok: saved.grok_api_key ?? '',
       });
       applyProviderRatesFromConfig(saved);
       const storageLabel = aiConfigStorageLabel(saved.credential_storage_mode);
@@ -771,6 +795,7 @@ export function App() {
           anthropic_key_present: Boolean(saved.anthropic_api_key),
           gemini_key_present: Boolean(saved.gemini_api_key),
           deepseek_key_present: Boolean(saved.deepseek_api_key),
+          grok_key_present: Boolean(saved.grok_api_key),
           openai_rate_input_configured: saved.openai_input_usd_per_million != null,
           openai_rate_output_configured: saved.openai_output_usd_per_million != null,
           anthropic_rate_input_configured: saved.anthropic_input_usd_per_million != null,
@@ -779,10 +804,13 @@ export function App() {
           gemini_rate_output_configured: saved.gemini_output_usd_per_million != null,
           deepseek_cost_input_configured: saved.deepseek_input_usd_per_million != null,
           deepseek_cost_output_configured: saved.deepseek_output_usd_per_million != null,
+          grok_cost_input_configured: saved.grok_input_usd_per_million != null,
+          grok_cost_output_configured: saved.grok_output_usd_per_million != null,
           openai_remote_present: saved.openai_api_key_remote,
           anthropic_remote_present: saved.anthropic_api_key_remote,
           gemini_remote_present: saved.gemini_api_key_remote,
           deepseek_remote_present: saved.deepseek_api_key_remote,
+          grok_remote_present: saved.grok_api_key_remote,
         },
       });
       return saved;
@@ -1066,7 +1094,7 @@ export function App() {
         if (current.length === 1) return current;
         return current.filter((item) => item !== agent);
       }
-      return [...current, agent].filter((item, index, items) => items.indexOf(item) === index).slice(0, 4);
+      return [...current, agent].filter((item, index, items) => items.indexOf(item) === index).slice(0, 5);
     });
   }
 
@@ -1100,8 +1128,8 @@ export function App() {
   }
 
   function currentSessionRunOptions(): SessionRunOptions {
-    if (activeAgents.length < 1 || activeAgents.length > 4) {
-      throw new Error('Selecione de 1 a 4 peers para a sessao.');
+    if (activeAgents.length < 1 || activeAgents.length > 5) {
+      throw new Error('Selecione de 1 a 5 peers para a sessao.');
     }
     if (!activeAgents.includes(initialAgent)) {
       throw new Error('O agente da primeira versao precisa estar entre os peers ativos.');
@@ -1660,6 +1688,7 @@ export function App() {
         { name: 'Codex', cli: 'codex', state: 'blocked', note: 'falha antes de resultado estruturado' },
         { name: 'Gemini', cli: 'gemini', state: 'blocked', note: 'falha antes de resultado estruturado' },
         { name: 'DeepSeek', cli: 'deepseek-api', state: 'blocked', note: 'falha antes de resultado estruturado' },
+        { name: 'Grok', cli: 'grok-api', state: 'blocked', note: 'falha antes de resultado estruturado' },
         { name: 'Maestro', cli: 'motor local', state: 'blocked', note: 'consulte diagnostico e arquivos da sessao' },
       ]);
       void logEvent({
@@ -1730,6 +1759,7 @@ export function App() {
         config.anthropic_input_usd_per_million == null ? '' : String(config.anthropic_input_usd_per_million),
       gemini: config.gemini_input_usd_per_million == null ? '' : String(config.gemini_input_usd_per_million),
       deepseek: config.deepseek_input_usd_per_million == null ? '' : String(config.deepseek_input_usd_per_million),
+      grok: config.grok_input_usd_per_million == null ? '' : String(config.grok_input_usd_per_million),
     });
     setProviderOutputUsdPerMillion({
       openai: config.openai_output_usd_per_million == null ? '' : String(config.openai_output_usd_per_million),
@@ -1737,20 +1767,21 @@ export function App() {
         config.anthropic_output_usd_per_million == null ? '' : String(config.anthropic_output_usd_per_million),
       gemini: config.gemini_output_usd_per_million == null ? '' : String(config.gemini_output_usd_per_million),
       deepseek: config.deepseek_output_usd_per_million == null ? '' : String(config.deepseek_output_usd_per_million),
+      grok: config.grok_output_usd_per_million == null ? '' : String(config.grok_output_usd_per_million),
     });
   }
 
   function chooseProviderMode(nextMode: ProviderMode) {
     setProviderMode(nextMode);
     if (nextMode === 'cli') {
-      // CLI mode is incompatible with DeepSeek (no CLI integration available).
-      // Drop DeepSeek from the peer set and reassign the initial agent so the
+      // CLI mode is incompatible with API-only peers (DeepSeek and Grok).
+      // Drop them from the peer set and reassign the initial agent so the
       // operator can never enter a state where the run silently falls back to API.
       setActiveAgents((current) => {
-        const filtered = current.filter((agent) => agent !== 'deepseek');
+        const filtered = current.filter((agent) => !agentIsApiOnly(agent));
         return filtered.length === 0 ? ['claude'] : filtered;
       });
-      setInitialAgent((current) => (current === 'deepseek' ? 'claude' : current));
+      setInitialAgent((current) => (agentIsApiOnly(current) ? 'claude' : current));
     }
     void saveAiProviderConfig(nextMode);
     void logEvent({
@@ -1871,17 +1902,19 @@ export function App() {
         anthropic_key_present: aiCredentials.anthropic.length > 0,
         gemini_key_present: aiCredentials.gemini.length > 0,
         deepseek_key_present: aiCredentials.deepseek.length > 0,
+        grok_key_present: aiCredentials.grok.length > 0,
       },
     });
 
     const saved = await saveAiProviderConfig();
     if (!saved) {
-      setAiProviderRowsState([
-        { label: 'OpenAI / Codex', value: 'verificacao nao executada: falha ao salvar', tone: 'error' },
-        { label: 'Anthropic / Claude', value: 'verificacao nao executada: falha ao salvar', tone: 'error' },
-        { label: 'Google / Gemini', value: 'verificacao nao executada: falha ao salvar', tone: 'error' },
-        { label: 'DeepSeek', value: 'verificacao nao executada: falha ao salvar', tone: 'error' },
-      ]);
+      setAiProviderRowsState(
+        aiProviderRows.map((provider) => ({
+          label: provider.name,
+          value: 'verificacao nao executada: falha ao salvar',
+          tone: 'error',
+        })),
+      );
       setIsVerifyingAiProviders(false);
       return;
     }
@@ -1906,12 +1939,13 @@ export function App() {
         },
       });
     } catch (error) {
-      setAiProviderRowsState([
-        { label: 'OpenAI / Codex', value: 'falha local na verificacao', tone: 'error' },
-        { label: 'Anthropic / Claude', value: 'falha local na verificacao', tone: 'error' },
-        { label: 'Google / Gemini', value: 'falha local na verificacao', tone: 'error' },
-        { label: 'DeepSeek', value: 'falha local na verificacao', tone: 'error' },
-      ]);
+      setAiProviderRowsState(
+        aiProviderRows.map((provider) => ({
+          label: provider.name,
+          value: 'falha local na verificacao',
+          tone: 'error',
+        })),
+      );
       void logEvent({
         level: 'error',
         category: 'settings.ai_provider.verify_failed',
@@ -2197,7 +2231,7 @@ export function App() {
                   </div>
                   <div className="initial-agent-buttons">
                     {initialAgentOptions.map((option) => {
-                      const cliBlocksDeepseek = providerMode === 'cli' && option.key === 'deepseek';
+                      const cliBlocksApiOnlyAgent = providerMode === 'cli' && agentIsApiOnly(option.key);
                       return (
                         <button
                           className={initialAgent === option.key ? 'active' : ''}
@@ -2205,10 +2239,10 @@ export function App() {
                           key={option.key}
                           onClick={() => setInitialAgent(option.key)}
                           aria-pressed={initialAgent === option.key}
-                          disabled={isRunPreparing || cliBlocksDeepseek}
+                          disabled={isRunPreparing || cliBlocksApiOnlyAgent}
                           title={
-                            cliBlocksDeepseek
-                              ? 'DeepSeek so roda via API. Troque para Hibrido ou API para incluir.'
+                            cliBlocksApiOnlyAgent
+                              ? `${option.label} so roda via API. Troque para Hibrido ou API para incluir.`
                               : option.detail
                           }
                         >
@@ -2226,7 +2260,7 @@ export function App() {
                     </div>
                     <div className="initial-agent-buttons">
                       {initialAgentOptions.map((option) => {
-                        const cliBlocksDeepseek = providerMode === 'cli' && option.key === 'deepseek';
+                        const cliBlocksApiOnlyAgent = providerMode === 'cli' && agentIsApiOnly(option.key);
                         const isLastSelected =
                           activeAgents.length === 1 && activeAgents.includes(option.key);
                         return (
@@ -2236,10 +2270,10 @@ export function App() {
                             key={option.key}
                             onClick={() => toggleActiveAgent(option.key)}
                             aria-pressed={activeAgents.includes(option.key)}
-                            disabled={isRunPreparing || cliBlocksDeepseek || isLastSelected}
+                            disabled={isRunPreparing || cliBlocksApiOnlyAgent || isLastSelected}
                             title={
-                              cliBlocksDeepseek
-                                ? 'DeepSeek so roda via API. Troque para Hibrido ou API para incluir.'
+                              cliBlocksApiOnlyAgent
+                                ? `${option.label} so roda via API. Troque para Hibrido ou API para incluir.`
                                 : option.detail
                             }
                           >
@@ -2924,11 +2958,11 @@ export function App() {
               <div className="provider-mode-note">
                 <strong>Execucao API real por peer</strong>
                 <span>
-                  <strong>API</strong> roda os 4 peers via provedores oficiais.
-                  {' '}<strong>Hibrido</strong> reserva DeepSeek para API (nao tem CLI) e
+                  <strong>API</strong> roda os 5 peers via provedores oficiais.
+                  {' '}<strong>Hibrido</strong> reserva DeepSeek e Grok para API (nao tem CLI) e
                   Claude, Codex, Gemini para CLI, sempre, independentemente das chaves.
-                  {' '}<strong>CLI</strong> roda os 3 peers com CLI; DeepSeek fica desabilitado
-                  porque nao possui integracao CLI.
+                  {' '}<strong>CLI</strong> roda os 3 peers com CLI; DeepSeek e Grok ficam desabilitados
+                  porque nao possuem integracao CLI.
                   Tarifas continuam obrigatorias para qualquer chamada de API.
                 </span>
               </div>

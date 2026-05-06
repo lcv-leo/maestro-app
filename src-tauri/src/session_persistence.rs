@@ -14,7 +14,7 @@
 //   - `append_agent_cost_to_ledger` — appends one entry (provider/role/cost/
 //     estimated flag) and rewrites the file with the recomputed total.
 //   - `api_provider_from_cli` — short helper that maps a peer CLI name
-//     (`openai-api`/`anthropic-api`/`gemini-api`/`deepseek-api`) to the
+//     (`openai-api`/`anthropic-api`/`gemini-api`/`deepseek-api`/`grok-api`) to the
 //     provider id stored in the ledger; returns None for non-API CLIs.
 //
 // What stays in lib.rs (consumed via `pub(crate)` imports):
@@ -61,7 +61,10 @@ pub(crate) fn load_session_contract(session_dir: &Path) -> Option<SessionContrac
     }
 }
 
-pub(crate) fn write_session_contract(session_dir: &Path, contract: &SessionContract) -> Result<(), String> {
+pub(crate) fn write_session_contract(
+    session_dir: &Path,
+    contract: &SessionContract,
+) -> Result<(), String> {
     let bytes = serde_json::to_string_pretty(contract)
         .map_err(|error| format!("failed to serialize session contract: {error}"))?;
     write_text_file(&session_contract_path(session_dir), &bytes)
@@ -145,6 +148,7 @@ pub(crate) fn api_provider_from_cli(cli: &str) -> Option<&'static str> {
         "openai-api" => Some("openai"),
         "gemini-api" => Some("gemini"),
         "deepseek-api" => Some("deepseek"),
+        "grok-api" => Some("grok"),
         _ => None,
     }
 }

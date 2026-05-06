@@ -62,6 +62,7 @@ pub(crate) fn filter_existing_agents_to_active_set(
                 "codex" | "openai" | "chatgpt" => "codex",
                 "gemini" | "google" => "gemini",
                 "deepseek" | "deepseek-api" => "deepseek",
+                "grok" | "xai" | "grok-api" => "grok",
                 _ => key.as_str(),
             };
             active_set.contains(normalized)
@@ -175,7 +176,9 @@ pub(crate) fn finalize_running_agent_artifacts(agent_dir: &Path) {
             "- Status: `AGENT_FAILED_NO_OUTPUT`",
             1,
         );
-        let with_note = if rewritten.contains("\n> Sessao finalizada com este artefato ainda em RUNNING") {
+        let with_note = if rewritten
+            .contains("\n> Sessao finalizada com este artefato ainda em RUNNING")
+        {
             rewritten
         } else {
             format!(

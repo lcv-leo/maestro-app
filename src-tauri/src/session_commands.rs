@@ -33,7 +33,9 @@ use chrono::Utc;
 use serde_json::json;
 use std::fs;
 
-use crate::app_paths::{checked_data_child_path, sanitize_path_segment, sessions_dir, safe_run_id_from_entry};
+use crate::app_paths::{
+    checked_data_child_path, safe_run_id_from_entry, sanitize_path_segment, sessions_dir,
+};
 use crate::editorial_io::{read_text_file, write_text_file};
 use crate::editorial_prompts::resolve_initial_agent_key;
 use crate::logging::{write_log_record, LogEventInput, LogSession};
@@ -347,29 +349,27 @@ fn resume_editorial_session_blocking(
     let cancel_token = session_cancel::register_session_cancel(&request.run_id);
     let _cancel_guard = session_cancel::CancelTokenGuard::new(request.run_id.clone());
 
-    let result = match run_editorial_session_core(
-        &request,
-        &log_session,
-        Some(resume_state),
-        &cancel_token,
-    ) {
-        Ok(result) => result,
-        Err(error) => {
-            let _ = write_log_record(
-                &log_session,
-                LogEventInput {
-                    level: "error".to_string(),
-                    category: "session.resume.failed".to_string(),
-                    message: "editorial session resume failed before structured result".to_string(),
-                    context: Some(json!({
-                        "run_id": sanitize_short(&request.run_id, 120),
-                        "error": sanitize_text(&error, 500)
-                    })),
-                },
-            );
-            return Err(error);
-        }
-    };
+    let result =
+        match run_editorial_session_core(&request, &log_session, Some(resume_state), &cancel_token)
+        {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = write_log_record(
+                    &log_session,
+                    LogEventInput {
+                        level: "error".to_string(),
+                        category: "session.resume.failed".to_string(),
+                        message: "editorial session resume failed before structured result"
+                            .to_string(),
+                        context: Some(json!({
+                            "run_id": sanitize_short(&request.run_id, 120),
+                            "error": sanitize_text(&error, 500)
+                        })),
+                    },
+                );
+                return Err(error);
+            }
+        };
 
     let _ = write_log_record(
         &log_session,

@@ -119,6 +119,7 @@ pub(crate) fn api_cost_preflight_result(
             "openai" => "codex",
             "gemini" => "gemini",
             "deepseek" => "deepseek",
+            "grok" => "grok",
             other => other,
         }),
         estimated_cost,
@@ -166,7 +167,15 @@ pub(crate) fn write_provider_error_result(
     status: &str,
     duration_ms: u128,
 ) -> EditorialAgentResult {
-    write_provider_failure_result(invocation, model, status, "error", status, duration_ms, None)
+    write_provider_failure_result(
+        invocation,
+        model,
+        status,
+        "error",
+        status,
+        duration_ms,
+        None,
+    )
 }
 
 pub(crate) fn write_provider_failure_result(
@@ -459,37 +468,32 @@ pub(crate) async fn run_openai_api_agent(
         .post(endpoint)
         .bearer_auth(&api_key)
         .json(&body);
-    let response = match send_with_retry_async(
-        log_session,
-        run_id,
-        "openai",
-        cancel_token,
-        request_builder,
-    )
-    .await
-    {
-        Ok(response) => response,
-        Err(ProviderRequestOutcome::Cancelled) => {
-            return write_provider_failure_result(
-                &invocation,
-                &model,
-                "STOPPED_BY_USER",
-                "blocked",
-                "Sessao parada pelo operador antes da resposta do provedor.",
-                started.elapsed().as_millis(),
-                None,
-            );
-        }
-        Err(ProviderRequestOutcome::Network(error)) => {
-            let status = sanitize_text(&format!("PROVIDER_NETWORK_ERROR: {error}"), 240);
-            return write_provider_error_result(
-                &invocation,
-                &model,
-                &status,
-                started.elapsed().as_millis(),
-            );
-        }
-    };
+    let response =
+        match send_with_retry_async(log_session, run_id, "openai", cancel_token, request_builder)
+            .await
+        {
+            Ok(response) => response,
+            Err(ProviderRequestOutcome::Cancelled) => {
+                return write_provider_failure_result(
+                    &invocation,
+                    &model,
+                    "STOPPED_BY_USER",
+                    "blocked",
+                    "Sessao parada pelo operador antes da resposta do provedor.",
+                    started.elapsed().as_millis(),
+                    None,
+                );
+            }
+            Err(ProviderRequestOutcome::Network(error)) => {
+                let status = sanitize_text(&format!("PROVIDER_NETWORK_ERROR: {error}"), 240);
+                return write_provider_error_result(
+                    &invocation,
+                    &model,
+                    &status,
+                    started.elapsed().as_millis(),
+                );
+            }
+        };
 
     let http_status = response.status();
     let body_text = tokio::select! {
@@ -895,37 +899,32 @@ pub(crate) async fn run_gemini_api_agent(
         .post(&endpoint)
         .query(&[("key", &api_key)])
         .json(&body);
-    let response = match send_with_retry_async(
-        log_session,
-        run_id,
-        "gemini",
-        cancel_token,
-        request_builder,
-    )
-    .await
-    {
-        Ok(response) => response,
-        Err(ProviderRequestOutcome::Cancelled) => {
-            return write_provider_failure_result(
-                &invocation,
-                &model,
-                "STOPPED_BY_USER",
-                "blocked",
-                "Sessao parada pelo operador antes da resposta do provedor.",
-                started.elapsed().as_millis(),
-                None,
-            );
-        }
-        Err(ProviderRequestOutcome::Network(error)) => {
-            let status = sanitize_text(&format!("PROVIDER_NETWORK_ERROR: {error}"), 240);
-            return write_provider_error_result(
-                &invocation,
-                &model,
-                &status,
-                started.elapsed().as_millis(),
-            );
-        }
-    };
+    let response =
+        match send_with_retry_async(log_session, run_id, "gemini", cancel_token, request_builder)
+            .await
+        {
+            Ok(response) => response,
+            Err(ProviderRequestOutcome::Cancelled) => {
+                return write_provider_failure_result(
+                    &invocation,
+                    &model,
+                    "STOPPED_BY_USER",
+                    "blocked",
+                    "Sessao parada pelo operador antes da resposta do provedor.",
+                    started.elapsed().as_millis(),
+                    None,
+                );
+            }
+            Err(ProviderRequestOutcome::Network(error)) => {
+                let status = sanitize_text(&format!("PROVIDER_NETWORK_ERROR: {error}"), 240);
+                return write_provider_error_result(
+                    &invocation,
+                    &model,
+                    &status,
+                    started.elapsed().as_millis(),
+                );
+            }
+        };
 
     let http_status = response.status();
     let body_text = tokio::select! {

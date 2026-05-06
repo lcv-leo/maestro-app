@@ -142,10 +142,11 @@ export function attachmentDeliveryPlan(
 ): AttachmentDeliveryPlan {
   const nativeProviders = activeApiProviders.filter(
     (provider): provider is NativeAttachmentProvider =>
-      provider !== 'deepseek' && providerSupportsNativeAttachment(provider, attachment),
+      provider !== 'deepseek' && provider !== 'grok' && providerSupportsNativeAttachment(provider, attachment),
   );
   const manifestProviders = activeApiProviders.filter(
-    (provider) => provider === 'deepseek' || !nativeProviders.includes(provider as NativeAttachmentProvider),
+    (provider) =>
+      provider === 'deepseek' || provider === 'grok' || !nativeProviders.includes(provider as NativeAttachmentProvider),
   );
   let fallbackReason: string | null = null;
   if (manifestProviders.length > 0 || nativeProviders.length === 0) {
@@ -154,7 +155,8 @@ export function attachmentDeliveryPlan(
         ? `excede envio nativo (${formatBytes(attachmentLimits.maxNativeApiBytes)})`
         : activeApiProviders.length === 0
           ? 'peers ativos usam CLI'
-          : manifestProviders.length > 0 && manifestProviders.every((provider) => provider === 'deepseek')
+          : manifestProviders.length > 0 &&
+              manifestProviders.every((provider) => provider === 'deepseek' || provider === 'grok')
             ? 'API text-only'
             : nativeProviders.length > 0
               ? 'sem suporte nativo nesses peers'
@@ -167,6 +169,7 @@ export function providerShortLabel(provider: AiCredentialKey) {
   if (provider === 'openai') return 'OpenAI';
   if (provider === 'anthropic') return 'Anthropic';
   if (provider === 'gemini') return 'Gemini';
+  if (provider === 'grok') return 'Grok';
   return 'DeepSeek';
 }
 
@@ -270,7 +273,7 @@ export function latestAgentResults(agents: EditorialAgentResult[]) {
       byName.set(agent.name, agent);
     }
   }
-  return ['Claude', 'Codex', 'Gemini', 'DeepSeek']
+  return ['Claude', 'Codex', 'Gemini', 'DeepSeek', 'Grok']
     .map((name) => byName.get(name))
     .filter((agent): agent is EditorialAgentResult => Boolean(agent));
 }

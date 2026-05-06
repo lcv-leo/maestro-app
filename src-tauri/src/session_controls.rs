@@ -54,8 +54,8 @@ pub(crate) fn normalize_active_agents(values: Option<&Vec<String>>) -> Result<Ve
             selected.push(key.to_string());
         }
     }
-    if selected.is_empty() || selected.len() > 4 {
-        return Err("selecione de 1 a 4 peers editoriais".to_string());
+    if selected.is_empty() || selected.len() > 5 {
+        return Err("selecione de 1 a 5 peers editoriais".to_string());
     }
     Ok(selected)
 }
@@ -67,6 +67,7 @@ pub(crate) fn canonical_editorial_agent_key(value: &str) -> Option<&'static str>
         "codex" | "openai" | "chatgpt" => Some("codex"),
         "gemini" | "google" => Some("gemini"),
         "deepseek" | "deepseek-api" => Some("deepseek"),
+        "grok" | "xai" | "grok-api" => Some("grok"),
         _ => None,
     }
 }
@@ -141,6 +142,7 @@ pub(crate) fn effective_draft_lead(
             "codex" => Some("codex"),
             "gemini" => Some("gemini"),
             "deepseek" => Some("deepseek"),
+            "grok" => Some("grok"),
             _ => None,
         })
         .unwrap_or("claude");
@@ -230,6 +232,7 @@ mod tests {
             "codex".to_string(),
             "gemini".to_string(),
             "deepseek".to_string(),
+            "grok".to_string(),
         ];
 
         let selected = selected_review_agent_specs("deepseek", &active, Some("deepseek"));
@@ -238,7 +241,7 @@ mod tests {
             .map(|spec| spec.key)
             .collect::<Vec<_>>();
 
-        assert_eq!(keys, vec!["claude", "codex", "gemini"]);
+        assert_eq!(keys, vec!["claude", "codex", "gemini", "grok"]);
     }
 
     #[test]
@@ -248,6 +251,7 @@ mod tests {
             "codex".to_string(),
             "gemini".to_string(),
             "deepseek".to_string(),
+            "grok".to_string(),
         ];
 
         let selected = selected_review_agent_specs("claude", &active, Some("  OpenAI  "));
@@ -256,7 +260,7 @@ mod tests {
             .map(|spec| spec.key)
             .collect::<Vec<_>>();
 
-        assert_eq!(keys, vec!["claude", "gemini", "deepseek"]);
+        assert_eq!(keys, vec!["claude", "gemini", "deepseek", "grok"]);
     }
 
     #[test]
@@ -271,6 +275,7 @@ mod tests {
     fn can_agent_review_current_draft_fails_closed_for_same_normalized_agent() {
         assert!(!can_agent_review_current_draft("codex", Some("openai")));
         assert!(!can_agent_review_current_draft("gemini", Some(" GOOGLE ")));
+        assert!(!can_agent_review_current_draft("grok", Some("xai")));
         assert!(can_agent_review_current_draft("claude", Some("codex")));
         assert!(can_agent_review_current_draft("deepseek", None));
     }

@@ -4,6 +4,34 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.16] - 2026-05-06
+
+Grok joins Maestro as the fifth editorial peer.
+
+### Added
+- Added Grok / xAI to the frontend provider model: API key field, provider probe row, rate-card fields, active-peer toggle, first-draft author selection, status cards, attachment delivery hints, and Cloudflare storage metadata.
+- Added `grok-api` as an API-only backend peer with `MAESTRO_GROK_API_KEY`, `GROK_API_KEY`, and `XAI_API_KEY` credential fallback. Model selection honors `MAESTRO_GROK_MODEL`, `CROSS_REVIEW_GROK_MODEL`, `GROK_MODEL`, or `XAI_MODEL`, then probes xAI `/v1/models` and prefers the strongest Grok 4 lineup available.
+- Added direct xAI execution through `https://api.x.ai/v1/responses` with `store: false`, using the same cost preflight, cancellation, usage/cost capture, artifact writing, and status parsing envelope as the other API peers.
+
+### Changed
+- Provider mode semantics now cover five peers: **API** runs Claude, Codex, Gemini, DeepSeek, and Grok through official providers; **Hybrid** routes Claude/Codex/Gemini through CLI and DeepSeek/Grok through API; **CLI** disables DeepSeek/Grok instead of pretending a local CLI path exists.
+- The backend now blocks any bypassed CLI attempt for DeepSeek or Grok with `API_ONLY_AGENT_DISABLED_IN_CLI_MODE`, so the UI rule is backed by a native guard.
+- The tribunal/no-self-review selection logic now normalizes Grok/xAI aliases and keeps the current draft author excluded from the review panel across five peers.
+
+### Validation
+- `npm run typecheck`: passed.
+- `npm run build`: passed, with the existing Vite large-chunk warning.
+- `cargo check --manifest-path src-tauri\Cargo.toml --locked`: passed.
+- `cargo test --manifest-path src-tauri\Cargo.toml --locked grok --lib`: 2 passed.
+- `cargo test --manifest-path src-tauri\Cargo.toml --locked should_run_agent_via_api --lib`: 4 passed.
+- `cargo test --manifest-path src-tauri\Cargo.toml --locked selected_review_agent_specs --lib`: 3 passed.
+- `cargo test --manifest-path src-tauri\Cargo.toml --locked`: 120 passed.
+- `cargo clippy --manifest-path src-tauri\Cargo.toml --locked --no-deps --all-targets`: passed, with the pre-existing `sanitize.rs` `items_after_test_module` warning.
+- `npm audit --audit-level=moderate`: found 0 vulnerabilities.
+- `git diff --check`: passed, with CRLF normalization warning on `src/App.tsx`.
+- Real xAI smoke: `GET https://api.x.ai/v1/models` returned 16 models and `POST https://api.x.ai/v1/responses` returned `response_ok: true` with selected model `grok-4.3`.
+- `cross-review-v2` session `5f4c2d44-898c-4267-9821-a72d1e1be14c`: caller Codex, reviewers Claude/Gemini/DeepSeek/Grok, round 1 unanimous READY / `unanimous_ready`.
+
 ## [v0.5.15] - 2026-05-05
 
 Hardening of Maestro's judicial-collegiate editorial model.

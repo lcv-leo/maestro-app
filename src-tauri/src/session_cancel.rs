@@ -45,7 +45,9 @@ fn cancel_map() -> &'static Mutex<HashMap<String, CancellationToken>> {
 /// (e.g. a previous session crashed without cleanup), it is overwritten.
 pub(crate) fn register_session_cancel(run_id: &str) -> CancellationToken {
     let token = CancellationToken::new();
-    let mut guard = cancel_map().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut guard = cancel_map()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     guard.insert(run_id.to_string(), token.clone());
     token
 }
@@ -54,7 +56,9 @@ pub(crate) fn register_session_cancel(run_id: &str) -> CancellationToken {
 /// token was found and signaled, false otherwise (idempotent: repeated calls
 /// or unknown run_ids return false without erroring).
 pub(crate) fn signal_session_cancel(run_id: &str) -> bool {
-    let guard = cancel_map().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let guard = cancel_map()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(token) = guard.get(run_id) {
         token.cancel();
         true
@@ -67,7 +71,9 @@ pub(crate) fn signal_session_cancel(run_id: &str) -> bool {
 /// session loop when the session completes (success, failure, or cancellation)
 /// so the static map does not grow unbounded across many sessions.
 pub(crate) fn unregister_session_cancel(run_id: &str) {
-    let mut guard = cancel_map().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut guard = cancel_map()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     guard.remove(run_id);
 }
 

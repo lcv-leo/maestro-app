@@ -738,7 +738,9 @@ pub(crate) fn ensure_cloudflare_secret_store(
     Ok(store)
 }
 
-pub(crate) fn ai_provider_secret_values(config: &AiProviderConfig) -> BTreeMap<&'static str, String> {
+pub(crate) fn ai_provider_secret_values(
+    config: &AiProviderConfig,
+) -> BTreeMap<&'static str, String> {
     let mut values = BTreeMap::new();
     if let Some(value) = config.openai_api_key.as_ref() {
         values.insert("MAESTRO_OPENAI_API_KEY", value.clone());
@@ -751,6 +753,9 @@ pub(crate) fn ai_provider_secret_values(config: &AiProviderConfig) -> BTreeMap<&
     }
     if let Some(value) = config.deepseek_api_key.as_ref() {
         values.insert("MAESTRO_DEEPSEEK_API_KEY", value.clone());
+    }
+    if let Some(value) = config.grok_api_key.as_ref() {
+        values.insert("MAESTRO_GROK_API_KEY", value.clone());
     }
     values
 }
@@ -889,6 +894,8 @@ pub(crate) fn write_ai_provider_metadata_to_cloudflare(
         "gemini_output_usd_per_million": config.gemini_output_usd_per_million,
         "deepseek_input_usd_per_million": config.deepseek_input_usd_per_million,
         "deepseek_output_usd_per_million": config.deepseek_output_usd_per_million,
+        "grok_input_usd_per_million": config.grok_input_usd_per_million,
+        "grok_output_usd_per_million": config.grok_output_usd_per_million,
         "requested_store_name": requested_store_name,
         "effective_store_name": store.name,
         "effective_store_id": store.id,

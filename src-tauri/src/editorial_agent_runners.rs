@@ -63,11 +63,12 @@ use crate::editorial_helpers::{
 use crate::editorial_inputs::{effective_agent_input, prepare_agent_input};
 use crate::logging::{write_log_record, LogEventInput, LogSession};
 use crate::provider_deepseek::run_deepseek_api_agent;
+use crate::provider_grok::run_grok_api_agent;
 use crate::provider_runners::{
-    run_anthropic_api_agent, run_gemini_api_agent, run_openai_api_agent, write_provider_error_result,
-    EditorialAgentRequest, ProviderInvocation,
+    run_anthropic_api_agent, run_gemini_api_agent, run_openai_api_agent,
+    write_provider_error_result, write_provider_failure_result, EditorialAgentRequest,
+    ProviderInvocation,
 };
-use tokio_util::sync::CancellationToken;
 use crate::session_controls::ProviderCostGuard;
 use crate::session_evidence::AttachmentManifestEntry;
 use crate::{
@@ -75,6 +76,7 @@ use crate::{
     log_editorial_agent_finished, sanitize_short, sanitize_text, truncate_text_head_tail,
     write_text_file, AiProviderConfig, EditorialAgentResult, EditorialAgentSpec,
 };
+use tokio_util::sync::CancellationToken;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_editorial_agent_for_spec(
@@ -104,6 +106,27 @@ pub(crate) fn run_editorial_agent_for_spec(
             config,
             cost_guard,
             cancel_token,
+        );
+    }
+
+    if matches!(spec.key, "deepseek" | "grok") {
+        let invocation = ProviderInvocation {
+            log_session,
+            run_id,
+            name: spec.name,
+            cli: api_cli_for_agent(spec.key),
+            provider: spec.key,
+            role,
+            output_path,
+        };
+        return write_provider_failure_result(
+            &invocation,
+            "unknown",
+            "API_ONLY_AGENT_DISABLED_IN_CLI_MODE",
+            "blocked",
+            "Este agente opera somente via API. Troque o modo para Hibrido ou API para inclui-lo.",
+            0,
+            None,
         );
     }
 
@@ -151,6 +174,7 @@ fn run_provider_api_agent(
         "codex" => tauri::async_runtime::block_on(run_openai_api_agent(request, cancel_token)),
         "gemini" => tauri::async_runtime::block_on(run_gemini_api_agent(request, cancel_token)),
         "deepseek" => tauri::async_runtime::block_on(run_deepseek_api_agent(request, cancel_token)),
+        "grok" => tauri::async_runtime::block_on(run_grok_api_agent(request, cancel_token)),
         _ => {
             let invocation = ProviderInvocation {
                 log_session: request.log_session,
@@ -331,23 +355,16 @@ fn run_editorial_agent(
                 .as_ref()
                 .map(|input_path| format!("- Input file: `{}`\n", input_path.to_string_lossy()))
                 .unwrap_or_else(|| "- Input file: `inline stdin`\n".to_string());
-            let pipe_diagnostic_line = if result.stdout_pipe_error.is_some()
-                || result.stderr_pipe_error.is_some()
-            {
-                format!(
-                    "- Stdout pipe error: `{}`\n- Stderr pipe error: `{}`\n",
-                    result
-                        .stdout_pipe_error
-                        .as_deref()
-                        .unwrap_or("none"),
-                    result
-                        .stderr_pipe_error
-                        .as_deref()
-                        .unwrap_or("none"),
-                )
-            } else {
-                String::new()
-            };
+            let pipe_diagnostic_line =
+                if result.stdout_pipe_error.is_some() || result.stderr_pipe_error.is_some() {
+                    format!(
+                        "- Stdout pipe error: `{}`\n- Stderr pipe error: `{}`\n",
+                        result.stdout_pipe_error.as_deref().unwrap_or("none"),
+                        result.stderr_pipe_error.as_deref().unwrap_or("none"),
+                    )
+                } else {
+                    String::new()
+                };
             let artifact = format!(
                 "# {name} - {role}\n\n- CLI: `{command}`\n- Resolved path: `{}`\n- Args: `{}`\n- Status: `{status}`\n- Exit code: `{}`\n- Duration ms: `{}`\n- Timed out: `{}`\n- Stdin chars: `{}`\n- Original prompt chars: `{}`\n{input_line}- Stdout chars: `{}`\n- Stderr chars: `{}`\n{pipe_diagnostic_line}{note}\n## Stdout\n\n```text\n{}\n```\n\n## Stderr\n\n```text\n{}\n```\n",
                 path.to_string_lossy(),
@@ -545,4 +562,3 @@ mod tests {
         );
     }
 }
-

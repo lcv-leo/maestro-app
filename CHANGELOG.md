@@ -4,6 +4,10 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+
+### Alterado
+- site/index.html deixou de carregar o widget/SDK SumUp e passou a encaminhar apoios para https://www.lcv.dev/sponsor?project=maestro-app, com backend dedicado sponsor-motor via Mercado Pago Checkout Pro.
+
 ## [v0.5.16] - 2026-05-06
 
 Grok joins Maestro as the fifth editorial peer.

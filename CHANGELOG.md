@@ -4,6 +4,10 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.18] - 2026-05-09
+### Alterado
+- **`site/index.html`** — iframe `github.com/sponsors/.../card` (caixa branca cross-origin) substituído por link card dark navy com ❤ pink + meta cyan + seta animada; card movido para DEPOIS dos botões (lcv.dev/sponsor primário, GitHub Sponsors alternativa). Companion ship Phase 3 (12 repos). Versão Tauri bumpada em 4 lugares (package.json + tauri.conf.json + Cargo.toml + Cargo.lock).
+
 ## [v0.5.17] - 2026-05-09
 ### Alterado
 - **`site/index.html`** — `<style>` block reskinneado pra nova identidade visual dark-first navy/cyan da org LCV (paleta `#050b18`/`#38bdf8`/`#34d399`, gradientes radiais, glow shadows, gradient text no h1). Coordinated companion ship Phase 2 com `calculadora-app` v04.01.17, `oraculo-financeiro` v01.10.04, `astrologo-app` v02.17.23, `admin-app` v02.01.01, `mainsite-app` v03.23.01/v02.19.01, `mtasts-motor` v02.00.10. Companion à Phase 1 (cross-review-v1 1.12.9, cross-review-v2 v02.18.07, deepseek-cli 0.3.1, grok-cli 1.6.2, sponsor-motor APP v01.02.02, `.github-org/site`). Versão Tauri bumpada em `package.json` + `src-tauri/tauri.conf.json` + `src-tauri/Cargo.toml` + `src-tauri/Cargo.lock` (4 lugares). Sem mudança no app desktop; apenas a página GitHub Pages.

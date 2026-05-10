@@ -4,9 +4,10 @@
 // `docs/code-split-plan.md` migration step 5.
 //
 // What's here (4 functions):
-//   - `effective_agent_input` — gemini-aware adapter that places the prepared
-//     prompt into argv (`--prompt <text>`) when a sidecar input file is
-//     written; other CLIs continue receiving stdin.
+//   - `effective_agent_input` — CLI-aware adapter. Gemini receives sidecar
+//     pointers through argv (`--prompt <text>`); Codex receives the full prompt
+//     through stdin to avoid a shell/tool loop trying to read the sidecar file;
+//     other CLIs keep the compact stdin pointer.
 //   - `prepare_agent_input` — write large prompts (> 48k chars) to a
 //     `<output>-input.md` sidecar and return a short stdin pointer; smaller
 //     prompts pass through untouched.
@@ -39,6 +40,20 @@ pub(crate) fn effective_agent_input(
     args: Vec<String>,
     prepared: &PreparedAgentInput,
 ) -> EffectiveAgentInput {
+    if command == "codex" && prepared.input_path.is_some() {
+        let stdin_text = prepared
+            .full_text
+            .as_ref()
+            .unwrap_or(&prepared.stdin_text)
+            .clone();
+        return EffectiveAgentInput {
+            args,
+            stdin_chars: stdin_text.chars().count(),
+            stdin_text: Some(stdin_text),
+            delivery: "stdin_full_with_sidecar_artifact",
+        };
+    }
+
     if command == "gemini" && prepared.input_path.is_some() {
         let mut next_args = args;
         if let Some(prompt_index) = next_args.iter().position(|arg| arg == "--prompt") {
@@ -78,6 +93,7 @@ pub(crate) fn prepare_agent_input(
     if original_chars <= INLINE_PROMPT_LIMIT_CHARS {
         return PreparedAgentInput {
             stdin_text: input.to_string(),
+            full_text: None,
             original_chars,
             input_path: None,
         };
@@ -100,12 +116,14 @@ pub(crate) fn prepare_agent_input(
                 stdin_text: format!(
                     "# Maestro Editorial AI - sidecar input\n\nAgent: {name}\nTask: {role}\n\nRead the complete local file `{file_name}` in the current working directory before responding.\nThe file contains the operator request, the full editorial protocol, the draft, and the mandatory instructions for this round.\nFollow that file exactly and write the final answer only to stdout.\n"
                 ),
+                full_text: Some(input.to_string()),
                 original_chars,
                 input_path: Some(input_path),
             }
         }
         Err(_) => PreparedAgentInput {
             stdin_text: input.to_string(),
+            full_text: None,
             original_chars,
             input_path: None,
         },

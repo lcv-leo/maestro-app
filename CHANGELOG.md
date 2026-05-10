@@ -4,6 +4,20 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.22] - 2026-05-10
+### Changed
+- **Recoverable reviewer operational outage.** Review rounds made only of operational reviewer failures no longer flow into text revision or generic "all peers failing" aborts. After repeated independent-reviewer transport/runtime outages, Maestro pauses recoverably as `PAUSED_REVIEWER_OPERATIONAL_OUTAGE`, keeps the current draft, preserves the no-self-review rule, and tells the operator to retry reviewers, switch transport/mode, or enable more independent reviewers.
+- **Codex CLI full-prompt delivery.** Codex sidecar runs now receive the complete prompt via stdin while retaining the sidecar artifact for audit, avoiding shell/file-read loops that previously produced empty final output in CLI mode.
+- **CLI environment hardening.** Child process PATH resolution now preserves inherited PATH while adding trusted Windows locations such as `C:\npm-global` and WinGet ripgrep paths; peer processes run with deterministic noninteractive UTF-8/CI environment variables.
+- **Operational diagnostics.** Maestro now classifies Codex/Gemini empty-output and Gemini ripgrep-missing failures with specific operational statuses, and the UI/minutes explain the paused recoverable reviewer-outage state in user-facing language.
+
+### Validation
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib`: 142 passed.
+- `npm run typecheck`: passed.
+- `npm run build`: passed once, with the existing Vite large-chunk warning only.
+- `cross-review-v2` session `c63ae56a-d89f-4dd9-b56c-a3ea5a60064d`: converged READY with independent non-Codex reviewers.
+- `src-tauri/target` removed after final validation per workspace directive.
+
 ## [v0.5.21] - 2026-05-10
 ### Changed
 - **Resume cycle provenance.** Session contracts now preserve the original initial drafter separately from the agent selected by the operator to resume the current cycle, so choosing a new resume lead no longer rewrites historical authorship.

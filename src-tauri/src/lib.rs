@@ -414,6 +414,7 @@ pub(crate) struct EditorialAgentResult {
 #[derive(Clone)]
 pub(crate) struct PreparedAgentInput {
     pub(crate) stdin_text: String,
+    pub(crate) full_text: Option<String>,
     pub(crate) original_chars: usize,
     pub(crate) input_path: Option<PathBuf>,
 }
@@ -737,7 +738,7 @@ mod tests {
     };
     use crate::command_spawn::{apply_editorial_agent_environment, classify_pipe_error};
     use crate::editorial_inputs::{effective_agent_input, prepare_agent_input};
-    use crate::editorial_prompts::{claude_args, gemini_args};
+    use crate::editorial_prompts::{claude_args, codex_args, gemini_args};
     use crate::link_audit::{extract_public_urls, is_public_http_url};
     use crate::provider_retry::parse_retry_after_header;
     use crate::session_artifacts::{parse_agent_artifact_name, parse_agent_artifact_result};
@@ -1859,6 +1860,7 @@ mod tests {
     fn gemini_sidecar_input_is_delivered_through_prompt_arg() {
         let prepared = PreparedAgentInput {
             stdin_text: "Leia integralmente o arquivo local `large-input.md`.".to_string(),
+            full_text: Some("conteudo completo".repeat(10_000)),
             original_chars: 60_000,
             input_path: Some(PathBuf::from("large-input.md")),
         };
@@ -1883,6 +1885,7 @@ mod tests {
     fn non_gemini_sidecar_input_stays_on_stdin() {
         let prepared = PreparedAgentInput {
             stdin_text: "Leia integralmente o arquivo local `large-input.md`.".to_string(),
+            full_text: Some("conteudo completo".repeat(10_000)),
             original_chars: 60_000,
             input_path: Some(PathBuf::from("large-input.md")),
         };
@@ -1895,6 +1898,23 @@ mod tests {
         );
         assert_eq!(effective.stdin_chars, prepared.stdin_text.chars().count());
         assert_eq!(effective.delivery, "stdin_sidecar");
+    }
+
+    #[test]
+    fn codex_sidecar_input_is_delivered_as_full_stdin() {
+        let full_text = "# Protocolo completo\n".repeat(4_000);
+        let prepared = PreparedAgentInput {
+            stdin_text: "Leia integralmente o arquivo local `large-input.md`.".to_string(),
+            full_text: Some(full_text.clone()),
+            original_chars: full_text.chars().count(),
+            input_path: Some(PathBuf::from("large-input.md")),
+        };
+
+        let effective = effective_agent_input("codex", codex_args(), &prepared);
+
+        assert_eq!(effective.stdin_text.as_deref(), Some(full_text.as_str()));
+        assert_eq!(effective.stdin_chars, full_text.chars().count());
+        assert_eq!(effective.delivery, "stdin_full_with_sidecar_artifact");
     }
 
     #[test]

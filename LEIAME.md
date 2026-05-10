@@ -78,3 +78,5 @@ Para retomar uma sessao interrompida, clique em `Retomar`. O Maestro le `data/se
 Os logs foram ampliados para diagnostico: eles registram contexto de UI, estado do runtime, caminhos resolvidos das CLIs, inicio/fim de cada agente, duracao, exit code, politica de timeout e caminho dos artefatos. O conteudo bruto dos agentes fica nos arquivos de sessao, nao embutido no NDJSON geral.
 
 Regra inviolavel: nenhum texto final deve ser entregue sem unanimidade real dos revisores independentes entre os agentes ativos.
+
+Se todos os revisores independentes falharem por motivo operacional em rodadas repetidas, o Maestro pausa a sessao de forma recuperavel com orientacao para tentar novamente, trocar o modo de transporte ou habilitar mais revisores. Essa pausa nao reescreve o texto atual e nao autoriza auto-revisao do agente que redigiu ou retomou a versao em analise.

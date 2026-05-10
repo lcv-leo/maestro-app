@@ -59,7 +59,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
-use crate::command_path::resolve_command;
+use crate::command_path::{command_search_dirs, resolve_command};
 use crate::logging::LogSession;
 use crate::{
     app_root, command_working_dir_for_output, hidden_command, log_editorial_agent_running,
@@ -420,7 +420,14 @@ pub(crate) fn apply_editorial_agent_environment(command: &mut Command, path: &Pa
         .env("PYTHONIOENCODING", "utf-8")
         .env("PYTHONUTF8", "1")
         .env("LC_ALL", "C.UTF-8")
-        .env("LANG", "C.UTF-8");
+        .env("LANG", "C.UTF-8")
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb")
+        .env("CI", "1");
+
+    if let Ok(path) = std::env::join_paths(command_search_dirs()) {
+        command.env("PATH", path);
+    }
 
     let stem = path
         .file_stem()

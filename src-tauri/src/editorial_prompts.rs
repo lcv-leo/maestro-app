@@ -323,7 +323,10 @@ pub(crate) fn is_operational_agent_result(agent: &EditorialAgentResult) -> bool 
         || agent.status == "COST_LIMIT_REACHED"
         || agent.status == "API_KEY_NOT_AVAILABLE"
         || agent.status == "REMOTE_SECRET_NOT_READABLE"
+        || agent.status == "CODEX_CLI_NO_FINAL_OUTPUT"
         || agent.status == "CODEX_WINDOWS_SANDBOX_UPSTREAM"
+        || agent.status == "GEMINI_CLI_NO_FINAL_OUTPUT"
+        || agent.status == "GEMINI_RIPGREP_UNAVAILABLE"
         || agent.status == "GEMINI_WORKSPACE_VIOLATION"
         || agent.status.starts_with("EXEC_ERROR")
         || agent.status.starts_with("PROVIDER_")

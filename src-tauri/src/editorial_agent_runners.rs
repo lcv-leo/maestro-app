@@ -326,8 +326,11 @@ fn run_editorial_agent(
                 "blocked"
             } else if result.timed_out
                 || status == "AGENT_FAILED_EMPTY"
+                || status == "CODEX_CLI_NO_FINAL_OUTPUT"
                 || status == "AGENT_FAILED_NO_OUTPUT"
                 || status == "CODEX_WINDOWS_SANDBOX_UPSTREAM"
+                || status == "GEMINI_CLI_NO_FINAL_OUTPUT"
+                || status == "GEMINI_RIPGREP_UNAVAILABLE"
                 || status == "GEMINI_WORKSPACE_VIOLATION"
             {
                 "error"
@@ -346,6 +349,12 @@ fn run_editorial_agent(
                 "\n> Codex CLI 0.128.0+ no Windows roda o sandbox em PowerShell ConstrainedLanguage e trava ao desmontar o tree de processos (stderr mostra `ConstrainedLanguage`, `Cannot set property` ou `ERRO: o processo` do taskkill). Bug upstream conhecido (rastreado no cross-review-mcp v1.5.0+). Tente outro peer ou ambiente sem o sandbox.\n"
             } else if status == "GEMINI_WORKSPACE_VIOLATION" {
                 "\n> Gemini CLI bloqueou uma chamada de ferramenta porque o agente tentou acessar caminho fora do workspace (`Path not in workspace` / `resolves outside the allowed workspace directories`). Esperado quando o protocolo pede recursos no diretorio pai. Tente outro peer.\n"
+            } else if status == "GEMINI_RIPGREP_UNAVAILABLE" {
+                "\n> Gemini CLI indicou que `rg`/ripgrep nao esta disponivel no ambiente do processo. A revisao foi tratada como falha operacional recuperavel; ajuste o PATH efetivo ou tente outro peer antes de retomar.\n"
+            } else if status == "GEMINI_CLI_NO_FINAL_OUTPUT" {
+                "\n> Gemini CLI encerrou sem stdout nem diagnostico util. A revisao foi tratada como falha operacional recuperavel, nao como parecer editorial.\n"
+            } else if status == "CODEX_CLI_NO_FINAL_OUTPUT" {
+                "\n> Codex CLI encerrou sem entregar parecer final em stdout. Quando o transcript aparece no stderr, ele e diagnostico operacional e nao substitui o parecer editorial estruturado.\n"
             } else if status == "AGENT_FAILED_NO_OUTPUT" {
                 "\n> O agente encerrou sem entregar avaliacao editorial em stdout. Este arquivo e diagnostico operacional, nao parecer de revisao.\n"
             } else if status == "AGENT_FAILED_EMPTY" {
@@ -485,6 +494,11 @@ fn classify_upstream_cli_failure(name: &str, stderr: &str) -> Option<&'static st
                 || stderr.contains("ERRO: o processo")
             {
                 Some("CODEX_WINDOWS_SANDBOX_UPSTREAM")
+            } else if stderr.trim().is_empty()
+                || stderr.contains("Reading additional input from stdin")
+                || stderr.contains("Get-Content")
+            {
+                Some("CODEX_CLI_NO_FINAL_OUTPUT")
             } else {
                 None
             }
@@ -494,6 +508,10 @@ fn classify_upstream_cli_failure(name: &str, stderr: &str) -> Option<&'static st
                 || stderr.contains("resolves outside the allowed workspace directories")
             {
                 Some("GEMINI_WORKSPACE_VIOLATION")
+            } else if stderr.contains("Ripgrep is not available") {
+                Some("GEMINI_RIPGREP_UNAVAILABLE")
+            } else if stderr.trim().is_empty() {
+                Some("GEMINI_CLI_NO_FINAL_OUTPUT")
             } else {
                 None
             }
@@ -535,15 +553,47 @@ mod tests {
 
     #[test]
     fn classify_upstream_cli_failure_returns_none_when_stderr_is_clean() {
-        assert_eq!(classify_upstream_cli_failure("Codex", ""), None);
+        assert_eq!(
+            classify_upstream_cli_failure("Codex", ""),
+            Some("CODEX_CLI_NO_FINAL_OUTPUT")
+        );
         assert_eq!(
             classify_upstream_cli_failure("Codex", "OpenAI Codex v0.128.0\nworkdir: C:\\\n"),
             None,
         );
-        assert_eq!(classify_upstream_cli_failure("Gemini", ""), None);
+        assert_eq!(
+            classify_upstream_cli_failure("Gemini", ""),
+            Some("GEMINI_CLI_NO_FINAL_OUTPUT")
+        );
         assert_eq!(
             classify_upstream_cli_failure("Gemini", "Warning: 256-color support not detected.\n"),
             None,
+        );
+    }
+
+    #[test]
+    fn classify_upstream_cli_failure_detects_gemini_missing_ripgrep() {
+        assert_eq!(
+            classify_upstream_cli_failure(
+                "Gemini",
+                "Warning: 256-color support not detected.\nRipgrep is not available. Falling back to GrepTool.\n"
+            ),
+            Some("GEMINI_RIPGREP_UNAVAILABLE")
+        );
+    }
+
+    #[test]
+    fn classify_upstream_cli_failure_detects_codex_no_final_output() {
+        assert_eq!(
+            classify_upstream_cli_failure("Codex", "Reading additional input from stdin...\n"),
+            Some("CODEX_CLI_NO_FINAL_OUTPUT")
+        );
+        assert_eq!(
+            classify_upstream_cli_failure(
+                "Codex",
+                "\"pwsh.exe\" -Command \"Get-Content -Raw -LiteralPath 'round-input.md'\"\n"
+            ),
+            Some("CODEX_CLI_NO_FINAL_OUTPUT")
         );
     }
 

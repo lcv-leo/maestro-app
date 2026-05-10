@@ -13,8 +13,9 @@
 //   - `command_search_dirs` — assembles the effective PATH-like search
 //     order: process PATH first, then well-known Windows install
 //     locations (USERPROFILE\.cargo\bin, APPDATA\npm, LOCALAPPDATA\Programs\
-//     nodejs, LOCALAPPDATA\Microsoft\WinGet\Links, C:\Program Files\nodejs,
-//     C:\nvm4w\nodejs, C:\Program Files\GitHub CLI). Deduplicates by
+//     nodejs, LOCALAPPDATA\Microsoft\WinGet\Links, C:\npm-global,
+//     WinGet ripgrep package dirs, C:\Program Files\nodejs, C:\nvm4w\nodejs,
+//     C:\Program Files\GitHub CLI). Deduplicates by
 //     case-insensitive path string.
 //
 // What stays in lib.rs (consumed via `pub(crate)` imports):
@@ -30,6 +31,8 @@
 // is identical to the v0.3.32 lib.rs source (commit e149e9c).
 
 use std::collections::BTreeSet;
+#[cfg(windows)]
+use std::fs;
 use std::path::{Path, PathBuf};
 
 pub(crate) fn resolve_command(command: &str) -> Option<PathBuf> {
@@ -94,7 +97,15 @@ pub(crate) fn command_search_dirs() -> Vec<PathBuf> {
                     .join("WinGet")
                     .join("Links"),
             );
+            append_winget_ripgrep_dirs(
+                &mut dirs,
+                &local_app_data
+                    .join("Microsoft")
+                    .join("WinGet")
+                    .join("Packages"),
+            );
         }
+        dirs.push(PathBuf::from(r"C:\npm-global"));
         dirs.push(PathBuf::from(r"C:\Program Files\nodejs"));
         dirs.push(PathBuf::from(r"C:\nvm4w\nodejs"));
         dirs.push(PathBuf::from(r"C:\Program Files\GitHub CLI"));
@@ -104,4 +115,33 @@ pub(crate) fn command_search_dirs() -> Vec<PathBuf> {
     dirs.into_iter()
         .filter(|dir| seen.insert(dir.to_string_lossy().to_ascii_lowercase()))
         .collect()
+}
+
+#[cfg(windows)]
+fn append_winget_ripgrep_dirs(dirs: &mut Vec<PathBuf>, packages_dir: &Path) {
+    let Ok(packages) = fs::read_dir(packages_dir) else {
+        return;
+    };
+    for package in packages.flatten() {
+        let package_path = package.path();
+        let package_name = package_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if !package_name.contains("ripgrep") {
+            continue;
+        }
+        if package_path.join("rg.exe").is_file() {
+            dirs.push(package_path.clone());
+        }
+        if let Ok(children) = fs::read_dir(&package_path) {
+            for child in children.flatten() {
+                let child_path = child.path();
+                if child_path.join("rg.exe").is_file() {
+                    dirs.push(child_path);
+                }
+            }
+        }
+    }
 }

@@ -1635,6 +1635,8 @@ export function App() {
               ? 'Um peer via API esta selecionado, mas suas tarifas de entrada e saida ainda nao foram configuradas em Configuracoes > Agentes via API.'
               : result.status === 'PAUSED_REVIEWERS_UNAVAILABLE'
               ? 'Nao ha revisor independente disponivel para o rascunho atual. Selecione pelo menos dois agentes ativos e retome a sessao.'
+              : result.status === 'PAUSED_REVIEWER_OPERATIONAL_OUTAGE'
+              ? 'Os revisores independentes disponiveis falharam operacionalmente em rodadas consecutivas. A sessao foi pausada sem alterar o texto; ajuste CLI/API, inclua outro revisor independente ou troque o modo e retome.'
               : result.status === 'ALL_PEERS_FAILING'
               ? 'Todos os peers ativos retornaram erro em 3 rodadas consecutivas. Sessao pausada para nao queimar quota e tempo. Verifique conectividade, chaves de API e quotas; depois retome.'
               : 'A sessao nao entregou texto final nesta chamada. Divergencias exigem novas rodadas ate unanimidade.',
@@ -1670,7 +1672,10 @@ export function App() {
               exit_code: agent.exit_code,
               output_path: agent.output_path,
             })),
-            final_delivery: 'blocked_without_all_agent_unanimity',
+            final_delivery:
+              result.status === 'PAUSED_REVIEWER_OPERATIONAL_OUTAGE'
+                ? 'paused_recoverable_reviewer_operational_outage'
+                : 'blocked_without_all_agent_unanimity',
           },
         });
       }

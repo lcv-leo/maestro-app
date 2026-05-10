@@ -324,7 +324,10 @@ pub(crate) fn parse_agent_artifact_result(
         || status == "RUNNING"
         || status == "STOPPED_BY_USER"
         || status == "COST_LIMIT_REACHED"
+        || status == "CODEX_CLI_NO_FINAL_OUTPUT"
         || status == "CODEX_WINDOWS_SANDBOX_UPSTREAM"
+        || status == "GEMINI_CLI_NO_FINAL_OUTPUT"
+        || status == "GEMINI_RIPGREP_UNAVAILABLE"
         || status == "GEMINI_WORKSPACE_VIOLATION"
     {
         "error"

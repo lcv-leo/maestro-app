@@ -27,6 +27,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::editorial_prompts::is_operational_agent_result;
 use crate::session_controls::all_agent_keys;
 use crate::{sanitize_short, sanitize_text, EditorialAgentResult, EditorialSessionRequest};
 
@@ -124,20 +125,7 @@ pub(crate) fn build_blocked_minutes_decision(agents: &[EditorialAgentResult]) ->
         .count();
     let operational_failures = agents
         .iter()
-        .filter(|agent| {
-            agent.tone == "error"
-                || agent.tone == "blocked"
-                || agent.status == "RUNNING"
-                || agent.status == "AGENT_FAILED_NO_OUTPUT"
-                || agent.status == "AGENT_FAILED_EMPTY"
-                || agent.status == "EMPTY_DRAFT"
-                || agent.status == "STOPPED_BY_USER"
-                || agent.status == "COST_LIMIT_REACHED"
-                || agent.status == "CODEX_WINDOWS_SANDBOX_UPSTREAM"
-                || agent.status == "GEMINI_WORKSPACE_VIOLATION"
-                || agent.status.starts_with("EXEC_ERROR")
-                || agent.status.starts_with("PROVIDER_")
-        })
+        .filter(|agent| is_operational_agent_result(agent))
         .collect::<Vec<_>>();
     let editorial_divergences = review_agents
         .iter()
@@ -145,7 +133,7 @@ pub(crate) fn build_blocked_minutes_decision(agents: &[EditorialAgentResult]) ->
         .collect::<Vec<_>>();
 
     let mut text = format!(
-        "Texto final indisponivel nesta chamada.\n\n- Revisoes READY registradas: {ready_reviews}/{}.\n- Falhas operacionais detectadas: {}.\n- Divergencias editoriais ainda abertas: {}.\n",
+        "Texto final pausado nesta chamada.\n\n- Revisoes READY registradas: {ready_reviews}/{}.\n- Falhas operacionais detectadas: {}.\n- Divergencias editoriais ainda abertas: {}.\n",
         review_agents.len(),
         operational_failures.len(),
         editorial_divergences.len()
@@ -180,7 +168,7 @@ pub(crate) fn build_blocked_minutes_decision(agents: &[EditorialAgentResult]) ->
     }
 
     text.push_str(
-        "\nA regra permanece: divergencia editorial exige novas rodadas ate unanimidade; falha operacional exige retry ou intervencao do operador antes de qualquer entrega final.\n",
+        "\nA regra permanece: divergencia editorial exige novas rodadas ate unanimidade; falha operacional exige retry, troca de modo/transporte ou inclusao de revisores independentes saudaveis antes de qualquer entrega final. O autor/redator do ciclo atual jamais atua como revisor de si mesmo.\n",
     );
     text
 }

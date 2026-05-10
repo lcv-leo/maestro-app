@@ -357,7 +357,7 @@ pub(crate) fn run_editorial_session_core(
     let mut current_draft_author_key: Option<String> = None;
     let mut round = 1usize;
     let mut agent_review_fingerprints: BTreeMap<String, Vec<u64>> = BTreeMap::new();
-    let mut consecutive_all_error_rounds: u32 = 0;
+    let mut consecutive_reviewer_outage_rounds: u32 = 0;
     let mut previous_blocking_review_notes = String::new();
     const ALL_ERROR_ESCALATION_THRESHOLD: u32 = 3;
 
@@ -1030,24 +1030,6 @@ pub(crate) fn run_editorial_session_core(
             );
         }
 
-        let _ = write_log_record(
-            log_session,
-            LogEventInput {
-                level: "info".to_string(),
-                category: "session.review.not_ready".to_string(),
-                message: "review round did not reach unanimity; continuing with a revision round"
-                    .to_string(),
-                context: Some(json!({
-                    "run_id": &run_id,
-                    "round": round,
-                    "policy": "continue_until_unanimous_ready",
-                    "not_ready_agents": round_results.iter()
-                        .filter(|agent| agent.status != "READY")
-                        .map(|agent| agent.name.clone())
-                        .collect::<Vec<_>>()
-                })),
-            },
-        );
         previous_blocking_review_notes = build_review_objections_block(&round_results);
 
         for agent in &round_results {
@@ -1087,71 +1069,15 @@ pub(crate) fn run_editorial_session_core(
             }
         }
 
-        let all_review_peers_in_error = !round_results.is_empty()
-            && round_results
-                .iter()
-                .all(|agent| agent.tone == "error" || agent.tone == "blocked");
-        if all_review_peers_in_error {
-            consecutive_all_error_rounds += 1;
-        } else {
-            consecutive_all_error_rounds = 0;
-        }
-        if consecutive_all_error_rounds >= ALL_ERROR_ESCALATION_THRESHOLD {
-            let _ = write_log_record(
-                log_session,
-                LogEventInput {
-                    level: "error".to_string(),
-                    category: "session.escalation.all_peers_failing".to_string(),
-                    message: "all review peers have been in error tone across N consecutive rounds; pausing session for operator review".to_string(),
-                    context: Some(json!({
-                        "run_id": &run_id,
-                        "round": round,
-                        "consecutive_all_error_rounds": consecutive_all_error_rounds,
-                        "threshold": ALL_ERROR_ESCALATION_THRESHOLD,
-                        "peer_statuses": round_results.iter()
-                            .map(|agent| json!({
-                                "agent": agent.name,
-                                "status": agent.status,
-                                "tone": agent.tone,
-                            }))
-                            .collect::<Vec<_>>(),
-                        "policy": "pause_for_operator_review_to_avoid_burning_quota_and_time"
-                    })),
-                },
-            );
-            let minutes_path = session_dir.join("ata-da-sessao.md");
-            write_text_file(
-                &minutes_path,
-                &build_session_minutes(request, &run_id, &agents, false, None),
-            )?;
-            let context = SessionResultContext {
-                run_id: &run_id,
-                session_dir: &session_dir,
-                prompt_path: &prompt_path,
-                protocol_path: &protocol_path,
-                active_agents: &active_agent_keys,
-                max_session_cost_usd,
-                max_session_minutes,
-                observed_cost_usd: cost_ledger.total_observed_cost_usd,
-                links_path: evidence.links_path.as_ref(),
-                attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
-                human_log_path: &human_log_path,
-            };
-            return Ok(editorial_session_result(
-                &context,
-                None,
-                &minutes_path,
-                current_draft_path,
-                agents,
-                false,
-                "ALL_PEERS_FAILING",
-            ));
-        }
-
         let has_editorial_blockers = round_results.iter().any(|agent| {
             agent.role == "review" && agent.status != "READY" && !is_operational_agent_result(agent)
         });
         if !has_editorial_blockers {
+            if is_operational_only_review_round(&round_results) {
+                consecutive_reviewer_outage_rounds += 1;
+            } else {
+                consecutive_reviewer_outage_rounds = 0;
+            }
             let _ = write_log_record(
                 log_session,
                 LogEventInput {
@@ -1161,14 +1087,94 @@ pub(crate) fn run_editorial_session_core(
                     context: Some(json!({
                         "run_id": &run_id,
                         "round": round,
+                        "consecutive_reviewer_outage_rounds": consecutive_reviewer_outage_rounds,
+                        "threshold": ALL_ERROR_ESCALATION_THRESHOLD,
                         "policy": "operational_failures_trigger_review_retry_not_text_revision"
                     })),
                 },
             );
+            if consecutive_reviewer_outage_rounds >= ALL_ERROR_ESCALATION_THRESHOLD {
+                let _ = write_log_record(
+                    log_session,
+                    LogEventInput {
+                        level: "error".to_string(),
+                        category: "session.escalation.reviewer_operational_outage".to_string(),
+                        message: "all independent review peers failed operationally across N consecutive rounds; pausing recoverably for operator review".to_string(),
+                        context: Some(json!({
+                            "run_id": &run_id,
+                            "round": round,
+                            "draft_author_key": current_draft_author_key.clone(),
+                            "consecutive_reviewer_outage_rounds": consecutive_reviewer_outage_rounds,
+                            "threshold": ALL_ERROR_ESCALATION_THRESHOLD,
+                            "reviewer_count": round_results.len(),
+                            "peer_statuses": round_results.iter()
+                                .map(|agent| json!({
+                                    "agent": agent.name,
+                                    "status": agent.status,
+                                    "tone": agent.tone,
+                                }))
+                                .collect::<Vec<_>>(),
+                            "recommended_actions": [
+                                "retry_failed_reviewers",
+                                "switch_transport_or_mode",
+                                "enable_additional_independent_reviewers"
+                            ],
+                            "policy": "recoverable_pause_no_self_review_no_text_revision"
+                        })),
+                    },
+                );
+                let minutes_path = session_dir.join("ata-da-sessao.md");
+                write_text_file(
+                    &minutes_path,
+                    &build_session_minutes(request, &run_id, &agents, false, None),
+                )?;
+                let context = SessionResultContext {
+                    run_id: &run_id,
+                    session_dir: &session_dir,
+                    prompt_path: &prompt_path,
+                    protocol_path: &protocol_path,
+                    active_agents: &active_agent_keys,
+                    max_session_cost_usd,
+                    max_session_minutes,
+                    observed_cost_usd: cost_ledger.total_observed_cost_usd,
+                    links_path: evidence.links_path.as_ref(),
+                    attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
+                    human_log_path: &human_log_path,
+                };
+                return Ok(editorial_session_result(
+                    &context,
+                    None,
+                    &minutes_path,
+                    current_draft_path,
+                    agents,
+                    false,
+                    "PAUSED_REVIEWER_OPERATIONAL_OUTAGE",
+                ));
+            }
             previous_blocking_review_notes.clear();
             round += 1;
             continue;
         }
+        consecutive_reviewer_outage_rounds = 0;
+
+        let _ = write_log_record(
+            log_session,
+            LogEventInput {
+                level: "info".to_string(),
+                category: "session.review.not_ready".to_string(),
+                message: "review round has concrete editorial blockers; continuing with a bounded revision round"
+                    .to_string(),
+                context: Some(json!({
+                    "run_id": &run_id,
+                    "round": round,
+                    "policy": "continue_until_unanimous_ready_without_self_review",
+                    "not_ready_agents": round_results.iter()
+                        .filter(|agent| agent.status != "READY" && !is_operational_agent_result(agent))
+                        .map(|agent| agent.name.clone())
+                        .collect::<Vec<_>>()
+                })),
+            },
+        );
 
         round += 1;
         let revision_prompt = build_revision_prompt(
@@ -1346,6 +1352,13 @@ fn current_draft_author_from_path(agent_dir: &Path, path: Option<&PathBuf>) -> O
     }
 }
 
+fn is_operational_only_review_round(round_results: &[EditorialAgentResult]) -> bool {
+    !round_results.is_empty()
+        && round_results.iter().all(|agent| {
+            agent.role == "review" && agent.status != "READY" && is_operational_agent_result(agent)
+        })
+}
+
 fn agent_attempt_output_path(agent_dir: &Path, round: usize, agent: &str, role: &str) -> PathBuf {
     let canonical = agent_dir.join(format!("round-{round:03}-{agent}-{role}.md"));
     if !canonical.exists() {
@@ -1371,7 +1384,31 @@ fn agent_attempt_output_path(agent_dir: &Path, round: usize, agent: &str, role: 
 mod tests {
     use std::path::PathBuf;
 
-    use super::{agent_attempt_output_path, current_draft_author_from_path};
+    use super::{
+        agent_attempt_output_path, current_draft_author_from_path, is_operational_only_review_round,
+    };
+    use crate::EditorialAgentResult;
+
+    fn review_result(name: &str, status: &str, tone: &str) -> EditorialAgentResult {
+        EditorialAgentResult {
+            name: name.to_string(),
+            role: "review".to_string(),
+            cli: name.to_ascii_lowercase(),
+            tone: tone.to_string(),
+            status: status.to_string(),
+            duration_ms: 1,
+            exit_code: Some(1),
+            output_path: format!(
+                "agent-runs/round-001-{}-review.md",
+                name.to_ascii_lowercase()
+            ),
+            usage_input_tokens: None,
+            usage_output_tokens: None,
+            cost_usd: None,
+            cost_estimated: None,
+            cache: None,
+        }
+    }
 
     #[test]
     fn resume_author_recovery_reads_latest_draft_or_revision_artifact() {
@@ -1439,5 +1476,25 @@ mod tests {
             Some("round-003-codex-review-attempt-002.md")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn operational_only_review_round_excludes_editorial_blockers() {
+        let round = vec![
+            review_result("Codex", "CODEX_CLI_NO_FINAL_OUTPUT", "error"),
+            review_result("Gemini", "GEMINI_RIPGREP_UNAVAILABLE", "error"),
+        ];
+
+        assert!(is_operational_only_review_round(&round));
+    }
+
+    #[test]
+    fn operational_only_review_round_rejects_mixed_not_ready() {
+        let round = vec![
+            review_result("Codex", "NOT_READY", "warn"),
+            review_result("Gemini", "GEMINI_CLI_NO_FINAL_OUTPUT", "error"),
+        ];
+
+        assert!(!is_operational_only_review_round(&round));
     }
 }

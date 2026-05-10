@@ -3,7 +3,7 @@
 // (draft/review/revision) extracted from lib.rs in v0.3.25 per
 // `docs/code-split-plan.md` migration step 5.
 //
-// What's here (10 functions):
+// What's here (12 functions):
 //   - `claude_args`, `codex_args`, `gemini_args`, `deepseek_args` — argv
 //     templates for each peer CLI; called as `(spec.args)()` to materialize
 //     a fresh `Vec<String>` per spawn.
@@ -62,14 +62,15 @@ pub(crate) fn codex_args() -> Vec<String> {
         "read-only".to_string(),
         "--color".to_string(),
         "never".to_string(),
-        "Leia integralmente o bloco <stdin> fornecido pelo Maestro e responda conforme as instrucoes.".to_string(),
+        "Read the complete <stdin> block provided by Maestro and follow its instructions exactly."
+            .to_string(),
     ]
 }
 
 pub(crate) fn gemini_args() -> Vec<String> {
     vec![
         "--prompt".to_string(),
-        "Leia o stdin integralmente e responda conforme as instrucoes do Maestro.".to_string(),
+        "Read the complete stdin payload and follow Maestro's instructions exactly.".to_string(),
         "--output-format".to_string(),
         "text".to_string(),
         "--approval-mode".to_string(),
@@ -154,22 +155,31 @@ pub(crate) fn build_draft_prompt(
     evidence_block: &str,
 ) -> String {
     format!(
-        r#"# Maestro Editorial AI - Geracao Real
+        r#"# Maestro Editorial AI - Internal Draft Request
 
 Run: `{run_id}`
-Sessao: {}
+Session: {}
 
-Voce e o agente redator escolhido para abrir a sessao editorial. Leia integralmente o protocolo abaixo antes de escrever.
-Neste ciclo, voce atua como impetrante/redator: provoca o colegiado com um texto completo, mas nao vota como revisor do proprio texto.
-Gere um rascunho em Markdown puro para a solicitacao do operador.
-Nao crie arquivos locais. Escreva a resposta inteira somente na saida padrao da CLI.
-Nao invente links. Se faltar evidencia, marque explicitamente `[EVIDENCIA_PENDENTE]`.
+## Language Contract
 
-## Solicitacao do operador
+- Internal coordination between agents/peers MUST be written in en_US.
+- The operator-facing deliverable MUST be written in Brazilian Portuguese (pt_BR).
+- Keep protocol markers exactly as specified, including `MAESTRO_STATUS` when applicable.
+
+## Role Contract
+
+You are the drafter selected to open the editorial session.
+In this cycle you act as petitioner/drafter: you submit a complete text to the editorial panel, but you never vote as reviewer of your own text.
+Read the full editorial protocol before writing.
+Produce a complete Markdown draft for the operator request.
+Do not create local files. Write the entire answer only to stdout.
+Do not invent links. If evidence is missing, mark it explicitly as `[EVIDENCIA_PENDENTE]`.
+
+## Operator Request
 
 {}
 
-## Protocolo editorial integral
+## Full Editorial Protocol
 
 ```markdown
 {}
@@ -186,44 +196,82 @@ Nao invente links. Se faltar evidencia, marque explicitamente `[EVIDENCIA_PENDEN
 pub(crate) fn build_review_prompt(
     request: &EditorialSessionRequest,
     run_id: &str,
+    round: usize,
     draft: &str,
     draft_author_key: &str,
+    previous_blocking_notes: &str,
     evidence_block: &str,
 ) -> String {
+    let previous_blocking_notes = if previous_blocking_notes.trim().is_empty() {
+        "No prior blocking objections are recorded for this review cycle.".to_string()
+    } else {
+        previous_blocking_notes.trim().to_string()
+    };
     format!(
-        r#"# Maestro Editorial AI - Revisao Real
+        r#"# Maestro Editorial AI - Internal Peer Review
 
 Run: `{run_id}`
-Sessao: {}
+Session: {}
+Review round: `{round}`
 
-Leia integralmente o protocolo editorial e revise o rascunho abaixo.
-Responda em Markdown.
+## Language Contract
 
-## Rito colegiado obrigatorio
+- Internal peer-review notes MUST be written in en_US.
+- The reviewed deliverable itself is intended for the operator in Brazilian Portuguese (pt_BR).
+- Keep the first line status marker exactly as required.
 
-- Autor/impetrante do texto em julgamento: `{}`.
-- Voce atua somente como revisor independente do colegiado editorial.
-- O autor do rascunho/revisao jamais pode votar como revisor do proprio texto.
-- Se esta chamada indicar que voce e o autor do texto, marque `MAESTRO_STATUS: NOT_READY` e registre `SELF_REVIEW_BLOCKED`; o backend deve bloquear esse caso antes da chamada.
-- `READY` e voto favoravel sem objecao impeditiva; `NOT_READY` e voto com ressalva impeditiva.
+## Collegiate Review Contract
 
-Obrigatorio:
-- A primeira linha deve ser exatamente `MAESTRO_STATUS: READY` ou `MAESTRO_STATUS: NOT_READY`.
-- Use READY somente se o rascunho pode ser entregue como texto final conforme o protocolo.
-- Use NOT_READY se houver falhas, links a verificar, violacao ABNT, falta de evidencia, confabulacao, ou problema editorial.
-- Liste correcoes concretas.
+- Text author/petitioner under review: `{}`.
+- You act only as an independent reviewer of the editorial panel.
+- The author of the current draft/revision must never vote as reviewer of that same text.
+- If this call indicates that you are the text author, return `MAESTRO_STATUS: NOT_READY` and record `SELF_REVIEW_BLOCKED`; the backend should have blocked that case before the call.
+- `READY` means an affirmative vote with no blocking objection.
+- `NOT_READY` means a vote with at least one concrete blocking objection.
 
-## Solicitacao do operador
+## Change Boundary Contract
 
-{}
+- Round 1: perform a full protocol review.
+- Round 2 and later: focus on unresolved blocking objections from prior rounds and materially new regressions introduced by the latest revision.
+- Do NOT reopen or rewrite content that has already been accepted, unless the latest revision changed it or you identify a direct protocol-breaking blocker.
+- Do NOT ask the reviser to "read everything again" or broadly rewrite approved sections. State only concrete blocking corrections.
+- If a possible concern is stylistic, optional, or outside the blocking scope, mark it as `OUT_OF_SCOPE` and do not use it to justify `NOT_READY`.
 
-## Protocolo editorial integral
+## Approved Content Lock
+
+Approved content is locked. A locked passage can be reopened only when one of these hard gates is true:
+
+1. The latest revision changed that passage.
+2. The passage is directly cited by an unresolved prior `NOT_READY` blocker.
+3. The passage contains a protocol-breaking defect that would make final delivery unsafe.
+
+If none of those gates applies, do not review, rewrite, restyle, reorder, summarize, expand, or replace that passage. Mark the concern as `OUT_OF_SCOPE`.
+Every `NOT_READY` item must identify the exact passage or requirement that is unlocked and explain why the lock can be broken.
+
+## Required Response Format
+
+- The first line must be exactly `MAESTRO_STATUS: READY` or `MAESTRO_STATUS: NOT_READY`.
+- Use READY only if the draft can be delivered as final text under the protocol.
+- Use NOT_READY only for concrete blockers: factual/evidence failure, broken or unverifiable links, ABNT/protocol violation, hallucination/confabulation, material omission, or editorial defect that blocks delivery.
+- After the status line, list only concrete blocking corrections, each tied to a specific passage or requirement.
+
+## Previous Blocking Objections To Re-check
 
 ```markdown
 {}
 ```
 
-## Rascunho a revisar
+## Operator Request
+
+{}
+
+## Full Editorial Protocol
+
+```markdown
+{}
+```
+
+## Draft Under Review
 
 ```markdown
 {}
@@ -232,6 +280,7 @@ Obrigatorio:
 "#,
         sanitize_text(&request.session_name, 200),
         sanitize_text(draft_author_key, 80),
+        previous_blocking_notes,
         request.prompt,
         request.protocol_text,
         draft,
@@ -239,21 +288,17 @@ Obrigatorio:
     )
 }
 
-pub(crate) fn build_revision_prompt(
-    request: &EditorialSessionRequest,
-    run_id: &str,
-    round: usize,
-    draft: &str,
-    review_agents: &[EditorialAgentResult],
-    evidence_block: &str,
-) -> String {
+pub(crate) fn build_review_objections_block(review_agents: &[EditorialAgentResult]) -> String {
     let mut review_notes = String::new();
     for agent in review_agents {
+        if agent.role != "review" || agent.status == "READY" {
+            continue;
+        }
         let artifact = read_text_file(Path::new(&agent.output_path)).unwrap_or_default();
         let stdout = extract_stdout_block(&artifact).unwrap_or_default().trim();
         let useful_excerpt = if stdout.is_empty() {
             format!(
-                "Sem parecer editorial utilizavel nesta tentativa. Status operacional: {} / {}.",
+                "No usable editorial review was produced in this attempt. Operational status: {} / {}.",
                 agent.status, agent.tone
             )
         } else {
@@ -264,38 +309,66 @@ pub(crate) fn build_revision_prompt(
             agent.name, agent.role, agent.status, agent.tone, agent.output_path, useful_excerpt
         ));
     }
+    review_notes
+}
+
+pub(crate) fn build_revision_prompt(
+    request: &EditorialSessionRequest,
+    run_id: &str,
+    round: usize,
+    draft: &str,
+    review_agents: &[EditorialAgentResult],
+    evidence_block: &str,
+) -> String {
+    let review_notes = build_review_objections_block(review_agents);
 
     format!(
-        r#"# Maestro Editorial AI - Revisao de Rascunho
+        r#"# Maestro Editorial AI - Internal Revision Request
 
 Run: `{run_id}`
-Rodada de revisao: `{round}`
-Sessao: {}
+Review round: `{round}`
+Session: {}
 
-Leia integralmente o protocolo editorial, o rascunho atual e as manifestacoes dos peers.
-Isto e um novo ciclo deliberativo dentro dos mesmos autos: preserve o historico, responda aos votos do colegiado e produza uma versao revisada completa.
-Sua tarefa e produzir uma nova versao completa do texto em Markdown puro, incorporando todas as correcoes concretas.
-Nao entregue comentarios sobre o processo. Entregue apenas o texto revisado.
-Nao crie arquivos locais. Escreva a resposta inteira somente na saida padrao da CLI.
-Nao invente links. Se faltar evidencia, preserve marcador `[EVIDENCIA_PENDENTE]`.
+## Language Contract
 
-## Solicitacao do operador
+- Internal deliberation is in en_US.
+- The operator-facing revised text MUST be written in Brazilian Portuguese (pt_BR).
+- Do not include internal comments, vote analysis, or process notes in the final stdout.
+
+## Revision Boundary Contract
+
+This is a new deliberative cycle inside the same case file. Preserve the append-only history.
+Your task is to return a complete revised Markdown text, but edits are strictly limited:
+
+- Treat every passage not cited by the concrete blockers below as locked approved content.
+- Change only passages required to resolve concrete `NOT_READY` blocking objections listed below.
+- Preserve approved paragraphs, structure, references, wording, and claims unless a listed blocker directly requires changing them.
+- Do not "improve", restyle, reorganize, summarize, expand, or replace content that was not challenged by a concrete blocker.
+- If a blocker requires a small adjacent edit for grammar or continuity, make only that adjacent edit and keep the surrounding approved content intact.
+- If a reviewer gave a broad instruction such as "read everything again" or "rewrite the text", reduce it to the specific concrete blockers actually stated.
+- If an objection is vague, optional, stylistic, or outside the blocking scope, do not rewrite the text for it.
+- If no concrete blocking objection below authorizes a change, return the current draft unchanged.
+- Do not invent links. If evidence is missing, preserve `[EVIDENCIA_PENDENTE]`.
+
+Write the entire revised text only to stdout. Do not create local files.
+
+## Operator Request
 
 {}
 
-## Protocolo editorial integral
+## Full Editorial Protocol
 
 ```markdown
 {}
 ```
 
-## Rascunho atual
+## Current Draft
 
 ```markdown
 {}
 ```
 
-## Manifestacoes dos peers
+## Concrete Blocking Objections From Reviewers
 
 {}
 {}
@@ -311,8 +384,12 @@ Nao invente links. Se faltar evidencia, preserve marcador `[EVIDENCIA_PENDENTE]`
 
 #[cfg(test)]
 mod tests {
-    use super::{build_draft_prompt, build_review_prompt, build_revision_prompt};
-    use crate::EditorialSessionRequest;
+    use super::{
+        build_draft_prompt, build_review_objections_block, build_review_prompt,
+        build_revision_prompt,
+    };
+    use crate::{app_paths::sessions_dir, EditorialAgentResult, EditorialSessionRequest};
+    use std::path::PathBuf;
 
     fn test_request() -> EditorialSessionRequest {
         EditorialSessionRequest {
@@ -335,23 +412,88 @@ mod tests {
     fn draft_prompt_marks_redactor_as_petitioner_not_reviewer() {
         let prompt = build_draft_prompt(&test_request(), "run-test", "");
 
-        assert!(prompt.contains("impetrante/redator"));
-        assert!(prompt.contains("nao vota como revisor do proprio texto"));
+        assert!(prompt.contains("petitioner/drafter"));
+        assert!(prompt.contains("never vote as reviewer of your own text"));
+        assert!(prompt.contains("Brazilian Portuguese (pt_BR)"));
+        assert!(prompt.contains("en_US"));
     }
 
     #[test]
     fn review_prompt_carries_tribunal_self_review_guard() {
-        let prompt = build_review_prompt(&test_request(), "run-test", "rascunho", "claude", "");
+        let prompt = build_review_prompt(
+            &test_request(),
+            "run-test",
+            2,
+            "rascunho",
+            "claude",
+            "Prior blocker.",
+            "",
+        );
 
-        assert!(prompt.contains("Rito colegiado obrigatorio"));
-        assert!(prompt.contains("Autor/impetrante do texto em julgamento: `claude`"));
+        assert!(prompt.contains("Collegiate Review Contract"));
+        assert!(prompt.contains("Text author/petitioner under review: `claude`"));
         assert!(prompt.contains("SELF_REVIEW_BLOCKED"));
+        assert!(prompt.contains("Round 2 and later"));
+        assert!(prompt.contains("Do NOT reopen or rewrite content that has already been accepted"));
+        assert!(prompt.contains("Approved Content Lock"));
+        assert!(prompt.contains("Every `NOT_READY` item must identify the exact passage"));
+        assert!(prompt.contains("Prior blocker."));
     }
 
     #[test]
     fn revision_prompt_names_append_only_deliberative_cycle() {
         let prompt = build_revision_prompt(&test_request(), "run-test", 2, "rascunho", &[], "");
 
-        assert!(prompt.contains("novo ciclo deliberativo dentro dos mesmos autos"));
+        assert!(prompt.contains("new deliberative cycle inside the same case file"));
+        assert!(prompt.contains("Change only passages required"));
+        assert!(prompt.contains("Preserve approved paragraphs"));
+        assert!(prompt.contains("Treat every passage not cited by the concrete blockers below as locked approved content"));
+        assert!(prompt.contains("return the current draft unchanged"));
+    }
+
+    #[test]
+    fn review_objections_block_excludes_ready_votes() {
+        let dir = sessions_dir().join(format!("maestro-review-objections-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let ready_path = dir.join("ready.md");
+        let not_ready_path = dir.join("not-ready.md");
+        std::fs::write(
+            &ready_path,
+            "# Ready\n\n## Stdout\n\n```text\nMAESTRO_STATUS: READY\nApproved.\n```\n\n## Stderr\n\n```text\n\n```\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &not_ready_path,
+            "# Not Ready\n\n## Stdout\n\n```text\nMAESTRO_STATUS: NOT_READY\nFix citation 3 only.\n```\n\n## Stderr\n\n```text\n\n```\n",
+        )
+        .unwrap();
+        let agents = vec![
+            test_agent("Claude", "READY", &ready_path),
+            test_agent("Gemini", "NOT_READY", &not_ready_path),
+        ];
+
+        let block = build_review_objections_block(&agents);
+
+        assert!(!block.contains("Approved."));
+        assert!(block.contains("Fix citation 3 only."));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn test_agent(name: &str, status: &str, path: &PathBuf) -> EditorialAgentResult {
+        EditorialAgentResult {
+            name: name.to_string(),
+            role: "review".to_string(),
+            cli: name.to_ascii_lowercase(),
+            tone: if status == "READY" { "ok" } else { "warn" }.to_string(),
+            status: status.to_string(),
+            duration_ms: 1,
+            exit_code: Some(0),
+            output_path: path.to_string_lossy().to_string(),
+            usage_input_tokens: None,
+            usage_output_tokens: None,
+            cost_usd: None,
+            cost_estimated: None,
+            cache: None,
+        }
     }
 }

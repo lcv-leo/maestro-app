@@ -46,7 +46,9 @@ use crate::editorial_io::{
     editorial_session_result, extract_stdout_block, read_text_file, strip_leading_maestro_status,
     write_text_file, SessionResultContext,
 };
-use crate::editorial_prompts::{build_draft_prompt, build_review_prompt, build_revision_prompt};
+use crate::editorial_prompts::{
+    build_draft_prompt, build_review_objections_block, build_review_prompt, build_revision_prompt,
+};
 use crate::logging::{write_log_record, LogEventInput, LogSession};
 use crate::provider_config::{
     api_provider_for_agent, provider_cost_rates_from_config, should_run_agent_via_api,
@@ -337,6 +339,7 @@ pub(crate) fn run_editorial_session_core(
     let mut round = 1usize;
     let mut agent_review_fingerprints: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     let mut consecutive_all_error_rounds: u32 = 0;
+    let mut previous_blocking_review_notes = String::new();
     const ALL_ERROR_ESCALATION_THRESHOLD: u32 = 3;
 
     if let Some(invalid_initial_agent) = invalid_initial_agent {
@@ -383,6 +386,7 @@ pub(crate) fn run_editorial_session_core(
         current_draft_author_key =
             current_draft_author_from_path(&agent_dir, current_draft_path.as_ref());
         round = state.next_review_round.max(1);
+        previous_blocking_review_notes = build_review_objections_block(&agents);
         let _ = write_log_record(
             log_session,
             LogEventInput {
@@ -692,8 +696,10 @@ pub(crate) fn run_editorial_session_core(
         let review_prompt = build_review_prompt(
             request,
             &run_id,
+            round,
             &current_draft,
             draft_author_key,
+            &previous_blocking_review_notes,
             &evidence.block,
         );
         if let Some(author_key) = current_draft_author_key.as_deref() {
@@ -1022,6 +1028,7 @@ pub(crate) fn run_editorial_session_core(
                 })),
             },
         );
+        previous_blocking_review_notes = build_review_objections_block(&round_results);
 
         for agent in &round_results {
             if agent.status == "READY" {

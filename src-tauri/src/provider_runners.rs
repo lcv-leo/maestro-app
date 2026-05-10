@@ -131,7 +131,7 @@ pub(crate) struct EditorialAgentRequest<'a> {
 
 pub(crate) fn editorial_api_system_prompt(agent_name: &str) -> String {
     format!(
-        "Voce e o peer {agent_name} dentro do Maestro Editorial AI. Leia integralmente o pedido do usuario, o protocolo editorial e os artefatos fornecidos. Responda somente ao que foi solicitado. Em revisoes, a primeira linha precisa seguir exatamente o contrato MAESTRO_STATUS."
+        "You are the {agent_name} peer inside Maestro Editorial AI. Internal coordination between agents must be in en_US. Operator-facing draft/revision deliverables must be in Brazilian Portuguese (pt_BR). Read the complete operator request, editorial protocol, and provided artifacts. Answer only what the current role asks for. In review roles, the first line must follow the MAESTRO_STATUS contract exactly."
     )
 }
 

@@ -4,6 +4,23 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.20] - 2026-05-10
+### Changed
+- **Internal peer language contract.** Draft, review, revision, CLI sidecar, and API system prompts now instruct agents to use en_US for internal coordination while keeping operator-facing draft/revision deliverables in Brazilian Portuguese (pt_BR).
+- **Incremental review contract.** Review rounds now distinguish round 1 full audit from later rounds, where peers must focus on unresolved blocking objections and materially new regressions instead of reopening already-approved content.
+- **Approved content lock.** Review and revision prompts now treat approved passages as locked content. Later rounds may reopen a passage only when the latest revision changed it, an unresolved `NOT_READY` blocker cites it, or a direct protocol-breaking defect would make final delivery unsafe.
+- **Protected approved content rule.** Revision prompts now require minimal, traceable edits: change only passages tied to concrete `NOT_READY` blockers, preserve approved paragraphs/structure/references/claims, reduce broad "read everything again" feedback to specific blockers, and return the current draft unchanged when no concrete blocker authorizes a change.
+- **Review objection carry-forward.** The orchestrator now carries prior non-READY review objections into the next review prompt, including resumed sessions, and excludes READY votes from that blocking-objection block.
+
+### Validation
+- `cargo test --manifest-path src-tauri\Cargo.toml --locked --lib editorial_prompts -- --nocapture`: 4 passed.
+- `cargo test --manifest-path src-tauri\Cargo.toml --locked --lib -- --nocapture`: 131 passed. The two synthetic panic messages are expected tests for Drop semantics.
+- `npm run typecheck`: passed.
+- `npm run build`: passed once, with the pre-existing Vite large-chunk warning only.
+- `git diff --check`: passed, with CRLF normalization warnings only.
+- `cross-review-v2` session `1fc08967-7e5b-497e-b2fb-20f71951d9c8`: Claude, Gemini, DeepSeek, and Grok READY in round 1; outcome `converged` / `unanimous_ready`.
+- `src-tauri/target` removed after final validation per workspace directive.
+
 ## [v0.5.19] - 2026-05-10
 ### Added
 - **Provider prompt-cache policy** for direct API peers without changing model selection, thinking mode, editorial protocol, or unanimity semantics.

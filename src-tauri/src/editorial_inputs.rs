@@ -98,7 +98,7 @@ pub(crate) fn prepare_agent_input(
                 .unwrap_or("arquivo-de-entrada.md");
             PreparedAgentInput {
                 stdin_text: format!(
-                    "# Maestro Editorial AI - entrada por arquivo\n\nAgente: {name}\nTarefa: {role}\n\nLeia integralmente o arquivo local `{file_name}` no diretorio de trabalho atual antes de responder.\nO arquivo contem a solicitacao, o protocolo editorial integral, o rascunho e as instrucoes obrigatorias para esta rodada.\nExecute exatamente as instrucoes do arquivo e escreva a resposta final somente na saida padrao.\n"
+                    "# Maestro Editorial AI - sidecar input\n\nAgent: {name}\nTask: {role}\n\nRead the complete local file `{file_name}` in the current working directory before responding.\nThe file contains the operator request, the full editorial protocol, the draft, and the mandatory instructions for this round.\nFollow that file exactly and write the final answer only to stdout.\n"
                 ),
                 original_chars,
                 input_path: Some(input_path),

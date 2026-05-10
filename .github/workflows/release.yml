@@ -1,5 +1,4 @@
 name: Release
-
 on:
   push:
     branches:
@@ -12,35 +11,28 @@ on:
         description: "Existing vXX.YY.ZZ or vXX.YY.ZZ-betaN tag to publish"
         required: true
         type: string
-
 permissions:
   contents: write
   packages: write
   attestations: write
   id-token: write
-
 env:
   NODE_VERSION: 24
-
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
   cancel-in-progress: false
-
 jobs:
   prepare-release:
     name: Prepare release tag
     runs-on: ubuntu-latest
-
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       should_release: ${{ steps.release.outputs.should_release }}
-
     steps:
       - name: Checkout release source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
-
       - name: Resolve release tag
         id: release
         shell: bash
@@ -100,40 +92,33 @@ jobs:
 
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "should_release=${should_release}" >> "$GITHUB_OUTPUT"
-
+    timeout-minutes: 60
   build-windows-portable:
     name: Build Windows portable bundle
     runs-on: windows-latest
     needs: prepare-release
     if: needs.prepare-release.outputs.should_release == 'true'
-
     env:
       RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
-
     steps:
       - name: Checkout release ref
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
-
       - name: Setup Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-
       - name: Setup Rust stable
         shell: pwsh
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-
       - name: Install dependencies
         run: npm ci
-
       - name: Build Tauri portable executable
         run: npm run tauri -- build --ci --no-bundle -- --locked
-
       - name: Create portable release archive
         shell: pwsh
         run: |
@@ -174,7 +159,6 @@ jobs:
           $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
           $zipName = Split-Path $zip -Leaf
           "$hash  $zipName" | Set-Content -Path (Join-Path $releaseRoot "SHA256SUMS.txt") -Encoding ascii
-
       - name: Upload portable archive artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -183,12 +167,11 @@ jobs:
             release/*.zip
             release/SHA256SUMS.txt
           if-no-files-found: error
-
       - name: Attest portable archive
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
           subject-path: release/*.zip
-
+    timeout-minutes: 60
   publish-github-release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
@@ -196,17 +179,14 @@ jobs:
       - prepare-release
       - build-windows-portable
     if: needs.prepare-release.outputs.should_release == 'true'
-
     env:
       RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
-
     steps:
       - name: Download portable archive
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: maestro-windows-portable-${{ env.RELEASE_TAG }}
           path: release
-
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -289,7 +269,7 @@ jobs:
             args+=(--latest)
             gh "${args[@]}"
           fi
-
+    timeout-minutes: 60
   publish-github-package:
     name: Publish GitHub Package
     runs-on: ubuntu-latest
@@ -297,17 +277,14 @@ jobs:
       - prepare-release
       - publish-github-release
     if: needs.prepare-release.outputs.should_release == 'true'
-
     env:
       RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
-
     steps:
       - name: Download portable archive
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: maestro-windows-portable-${{ env.RELEASE_TAG }}
           path: release
-
       - name: Publish GHCR OCI mirror
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -359,3 +336,4 @@ jobs:
           docker build "${image_args[@]}" oci-package
           docker push "${image}:${tag}"
           docker push "${image}:latest"
+    timeout-minutes: 60

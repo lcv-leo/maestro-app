@@ -1,0 +1,27 @@
+# Targeted code owners for sensitive and source changes.
+# Avoid a repository-wide wildcard so routine Dependabot manifest updates do
+# not request review automatically.
+
+# Agent and repository governance
+/AGENTS.md @lcv-leo
+/CLAUDE.md @lcv-leo
+/GEMINI.md @lcv-leo
+/.ai/ @lcv-leo
+/.agents/ @lcv-leo
+/.gemini/ @lcv-leo
+/.github/CODEOWNERS @lcv-leo
+/.github/copilot-instructions.md @lcv-leo
+/.github/dependabot.yml @lcv-leo
+/.github/workflows/ @lcv-leo
+
+# Application, build, packaging, and release surfaces
+/src/ @lcv-leo
+/src-tauri/ @lcv-leo
+/package.json @lcv-leo
+/package-lock.json @lcv-leo
+/Cargo.toml @lcv-leo
+/Cargo.lock @lcv-leo
+/scripts/ @lcv-leo
+/cloudflare/ @lcv-leo
+/wrangler.json @lcv-leo
+/wrangler.toml @lcv-leo

@@ -294,22 +294,39 @@ pub(crate) fn build_review_objections_block(review_agents: &[EditorialAgentResul
         if agent.role != "review" || agent.status == "READY" {
             continue;
         }
+        if is_operational_agent_result(agent) {
+            continue;
+        }
         let artifact = read_text_file(Path::new(&agent.output_path)).unwrap_or_default();
         let stdout = extract_stdout_block(&artifact).unwrap_or_default().trim();
-        let useful_excerpt = if stdout.is_empty() {
-            format!(
-                "No usable editorial review was produced in this attempt. Operational status: {} / {}.",
-                agent.status, agent.tone
-            )
-        } else {
-            stdout.chars().take(18_000).collect::<String>()
-        };
+        if stdout.is_empty() {
+            continue;
+        }
+        let useful_excerpt = stdout.chars().take(18_000).collect::<String>();
         review_notes.push_str(&format!(
             "\n### {} / {}\n\nStatus: `{}` (`{}`)\nArtifact: `{}`\n\n```markdown\n{}\n```\n",
             agent.name, agent.role, agent.status, agent.tone, agent.output_path, useful_excerpt
         ));
     }
     review_notes
+}
+
+pub(crate) fn is_operational_agent_result(agent: &EditorialAgentResult) -> bool {
+    agent.tone == "error"
+        || agent.tone == "blocked"
+        || agent.status == "RUNNING"
+        || agent.status == "AGENT_FAILED_NO_OUTPUT"
+        || agent.status == "AGENT_FAILED_EMPTY"
+        || agent.status == "EMPTY_DRAFT"
+        || agent.status == "STOPPED_BY_USER"
+        || agent.status == "CLI_NOT_FOUND"
+        || agent.status == "COST_LIMIT_REACHED"
+        || agent.status == "API_KEY_NOT_AVAILABLE"
+        || agent.status == "REMOTE_SECRET_NOT_READABLE"
+        || agent.status == "CODEX_WINDOWS_SANDBOX_UPSTREAM"
+        || agent.status == "GEMINI_WORKSPACE_VIOLATION"
+        || agent.status.starts_with("EXEC_ERROR")
+        || agent.status.starts_with("PROVIDER_")
 }
 
 pub(crate) fn build_revision_prompt(
@@ -476,6 +493,35 @@ mod tests {
 
         assert!(!block.contains("Approved."));
         assert!(block.contains("Fix citation 3 only."));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn review_objections_block_excludes_operational_failures() {
+        let dir = sessions_dir().join(format!("maestro-review-operational-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let failed_path = dir.join("failed.md");
+        let not_ready_path = dir.join("not-ready.md");
+        std::fs::write(
+            &failed_path,
+            "# Failed\n\n## Stdout\n\n```text\n\n```\n\n## Stderr\n\n```text\n\n```\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &not_ready_path,
+            "# Not Ready\n\n## Stdout\n\n```text\nMAESTRO_STATUS: NOT_READY\nFix the cited paragraph.\n```\n\n## Stderr\n\n```text\n\n```\n",
+        )
+        .unwrap();
+        let agents = vec![
+            test_agent("Claude", "AGENT_FAILED_NO_OUTPUT", &failed_path),
+            test_agent("Gemini", "NOT_READY", &not_ready_path),
+        ];
+
+        let block = build_review_objections_block(&agents);
+
+        assert!(!block.contains("AGENT_FAILED_NO_OUTPUT"));
+        assert!(!block.contains("No usable editorial review"));
+        assert!(block.contains("Fix the cited paragraph."));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

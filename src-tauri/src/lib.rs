@@ -480,6 +480,14 @@ pub(crate) struct SessionContract {
     #[serde(default)]
     initial_agent: String,
     #[serde(default)]
+    original_initial_agent: Option<String>,
+    #[serde(default)]
+    resume_lead: Option<String>,
+    #[serde(default)]
+    cycle_lead: Option<String>,
+    #[serde(default)]
+    cycle_started_at: Option<String>,
+    #[serde(default)]
     max_session_cost_usd: Option<f64>,
     #[serde(default)]
     max_session_minutes: Option<u64>,
@@ -617,12 +625,13 @@ pub(crate) use crate::app_init::{hidden_command, initialize_app_root, install_pr
 pub(crate) use crate::editorial_io::{
     api_error_message, command_working_dir_for_output, extract_maestro_status,
     extract_stdout_block, log_editorial_agent_finished, log_editorial_agent_running,
-    log_editorial_agent_spawned, read_text_file, write_text_file,
+    log_editorial_agent_spawned, read_text_file, strip_process_management_noise, write_text_file,
 };
 
 #[derive(Clone)]
 pub(crate) struct SessionArtifact {
     pub(crate) round: usize,
+    pub(crate) attempt: usize,
     pub(crate) agent: String,
     pub(crate) role: String,
     pub(crate) path: PathBuf,
@@ -1436,6 +1445,10 @@ mod tests {
             created_at: "2026-04-26T19:28:26.000000+00:00".to_string(),
             active_agents: vec!["deepseek".to_string()],
             initial_agent: "deepseek".to_string(),
+            original_initial_agent: Some("deepseek".to_string()),
+            resume_lead: None,
+            cycle_lead: Some("deepseek".to_string()),
+            cycle_started_at: Some("2026-04-26T19:28:26.000000+00:00".to_string()),
             max_session_cost_usd: Some(7.5),
             max_session_minutes: Some(45),
             links: Vec::new(),
@@ -1481,6 +1494,10 @@ mod tests {
             created_at: "2026-04-01T00:00:00.000Z".to_string(),
             active_agents: vec!["codex".to_string(), "gemini".to_string()],
             initial_agent: "codex".to_string(),
+            original_initial_agent: Some("codex".to_string()),
+            resume_lead: None,
+            cycle_lead: Some("codex".to_string()),
+            cycle_started_at: Some("2026-04-01T00:00:00.000Z".to_string()),
             max_session_cost_usd: Some(7.5),
             max_session_minutes: None,
             links: Vec::new(),

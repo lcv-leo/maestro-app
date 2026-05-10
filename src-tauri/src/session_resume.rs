@@ -114,7 +114,9 @@ pub(crate) fn extract_saved_session_name(prompt_file: &str) -> Option<String> {
 
 pub(crate) fn extract_saved_initial_agent(prompt_file: &str) -> Option<String> {
     prompt_file.lines().find_map(|line| {
-        let value = line.strip_prefix("Agente redator inicial: ")?;
+        let value = line
+            .strip_prefix("Agente redator inicial original: ")
+            .or_else(|| line.strip_prefix("Agente redator inicial: "))?;
         let value = value.trim().trim_matches('`');
         let (agent, invalid) = resolve_initial_agent_key(Some(value));
         if invalid.is_some() {

@@ -4,6 +4,14 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.21] - 2026-05-10
+### Changed
+- **Resume cycle provenance.** Session contracts now preserve the original initial drafter separately from the agent selected by the operator to resume the current cycle, so choosing a new resume lead no longer rewrites historical authorship.
+- **Append-only agent attempts.** Repeated agent calls for the same round/peer/role now write `-attempt-NNN` artifacts instead of overwriting previous attempts, preserving the audit trail used by the session minutes and resume scanner.
+- **Operational vs editorial separation.** Operational failures such as no-output peers, upstream CLI failures, provider errors, cost blocks, and operator stops are no longer carried into the next revision prompt as editorial objections.
+- **Operational-only review retry.** When a review round produces no concrete editorial blockers, Maestro skips text revision and retries review instead of asking an agent to rewrite already-approved content.
+- **CLI stdout cleanup.** Leading Windows process-management noise from peer CLIs is stripped before status parsing and artifact persistence, preventing taskkill output from corrupting Markdown/frontmatter.
+
 ## [v0.5.20] - 2026-05-10
 ### Changed
 - **Internal peer language contract.** Draft, review, revision, CLI sidecar, and API system prompts now instruct agents to use en_US for internal coordination while keeping operator-facing draft/revision deliverables in Brazilian Portuguese (pt_BR).

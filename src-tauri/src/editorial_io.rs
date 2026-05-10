@@ -242,6 +242,34 @@ pub(crate) fn strip_leading_maestro_status(output: &str) -> String {
     }
 }
 
+pub(crate) fn strip_process_management_noise(output: &str) -> String {
+    let mut kept = Vec::new();
+    let mut dropping_leading_noise = true;
+    for line in output.lines() {
+        if dropping_leading_noise && is_process_management_noise_line(line) {
+            continue;
+        }
+        dropping_leading_noise = false;
+        kept.push(line);
+    }
+    kept.join("\n").trim_start().to_string()
+}
+
+fn is_process_management_noise_line(line: &str) -> bool {
+    let normalized = line.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+    (normalized.contains("processo") || normalized.contains("process"))
+        && (normalized.contains("taskkill")
+            || normalized.contains("exito")
+            || normalized.contains("xito")
+            || normalized.contains("sucesso")
+            || normalized.contains("success")
+            || normalized.contains("erro:")
+            || normalized.contains("error:"))
+}
+
 pub(crate) fn extract_stdout_block(artifact: &str) -> Option<&str> {
     let marker = "## Stdout\n\n```text\n";
     let start = artifact.find(marker)? + marker.len();
@@ -279,7 +307,7 @@ pub(crate) fn api_error_message(body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_leading_maestro_status;
+    use super::{strip_leading_maestro_status, strip_process_management_noise};
 
     #[test]
     fn strip_leading_maestro_status_removes_ready_marker_from_final_text() {
@@ -300,5 +328,20 @@ mod tests {
     fn strip_leading_maestro_status_preserves_normal_markdown() {
         let output = "# Titulo\n\nMAESTRO_STATUS: READY aparece no corpo.";
         assert_eq!(strip_leading_maestro_status(output), output);
+    }
+
+    #[test]
+    fn strip_process_management_noise_removes_leading_taskkill_lines() {
+        let output = "�XITO: o processo \"123\" foi encerrado.\r\nSUCCESS: The process with PID 456 was terminated.\n---\ntitle: Draft\n---";
+        assert_eq!(
+            strip_process_management_noise(output),
+            "---\ntitle: Draft\n---"
+        );
+    }
+
+    #[test]
+    fn strip_process_management_noise_preserves_body_mentions() {
+        let output = "# Titulo\n\nSUCCESS: The process is described in the article.";
+        assert_eq!(strip_process_management_noise(output), output);
     }
 }

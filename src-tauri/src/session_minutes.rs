@@ -131,7 +131,12 @@ pub(crate) fn build_blocked_minutes_decision(agents: &[EditorialAgentResult]) ->
                 || agent.status == "AGENT_FAILED_NO_OUTPUT"
                 || agent.status == "AGENT_FAILED_EMPTY"
                 || agent.status == "EMPTY_DRAFT"
+                || agent.status == "STOPPED_BY_USER"
+                || agent.status == "COST_LIMIT_REACHED"
+                || agent.status == "CODEX_WINDOWS_SANDBOX_UPSTREAM"
+                || agent.status == "GEMINI_WORKSPACE_VIOLATION"
                 || agent.status.starts_with("EXEC_ERROR")
+                || agent.status.starts_with("PROVIDER_")
         })
         .collect::<Vec<_>>();
     let editorial_divergences = review_agents

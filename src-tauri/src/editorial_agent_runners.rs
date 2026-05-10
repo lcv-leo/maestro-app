@@ -73,8 +73,9 @@ use crate::session_controls::ProviderCostGuard;
 use crate::session_evidence::AttachmentManifestEntry;
 use crate::{
     api_cli_for_agent, command_working_dir_for_output, extract_maestro_status,
-    log_editorial_agent_finished, sanitize_short, sanitize_text, truncate_text_head_tail,
-    write_text_file, AiProviderConfig, EditorialAgentResult, EditorialAgentSpec,
+    log_editorial_agent_finished, sanitize_short, sanitize_text, strip_process_management_noise,
+    truncate_text_head_tail, write_text_file, AiProviderConfig, EditorialAgentResult,
+    EditorialAgentSpec,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -290,7 +291,8 @@ fn run_editorial_agent(
 
     match command_result {
         Ok(result) => {
-            let stdout = String::from_utf8_lossy(&result.output.stdout).to_string();
+            let raw_stdout = String::from_utf8_lossy(&result.output.stdout).to_string();
+            let stdout = strip_process_management_noise(&raw_stdout);
             let stderr = String::from_utf8_lossy(&result.output.stderr).to_string();
             let exit_code = result.output.status.code();
             // CLI cancel artifact status refinement (v0.5.3, deepseek follow-up

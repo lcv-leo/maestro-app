@@ -48,6 +48,7 @@ use crate::editorial_io::{
 };
 use crate::editorial_prompts::{
     build_draft_prompt, build_review_objections_block, build_review_prompt, build_revision_prompt,
+    is_operational_agent_result,
 };
 use crate::logging::{write_log_record, LogEventInput, LogSession};
 use crate::provider_config::{
@@ -162,6 +163,17 @@ pub(crate) fn run_editorial_session_core(
         .unwrap_or_else(Utc::now);
     let time_budget_anchor =
         resolve_time_budget_anchor(created_at, resume_state.is_some(), Utc::now());
+    let is_resume = resume_state.is_some();
+    let original_initial_agent = saved_contract
+        .as_ref()
+        .and_then(|contract| contract.original_initial_agent.clone())
+        .or_else(|| {
+            saved_contract
+                .as_ref()
+                .map(|contract| contract.initial_agent.clone())
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| draft_lead_key.to_string());
     let ai_provider_config =
         read_ai_provider_config().unwrap_or_else(|_| AiProviderConfig::default());
     let mut cost_ledger = load_cost_ledger(&session_dir, &run_id, &cost_scope_id);
@@ -191,9 +203,10 @@ pub(crate) fn run_editorial_session_core(
         let _ = write_text_file(
             &prompt_path,
             &format!(
-                "# Prompt da Sessao\n\nSessao: {}\nRun: `{}`\nAgente redator inicial: `{}`\n\n{}",
+                "# Prompt da Sessao\n\nSessao: {}\nRun: `{}`\nAgente redator inicial original: `{}`\nAgente que assumiu esta chamada: `{}`\n\n{}",
                 sanitize_text(&request.session_name, 200),
                 run_id,
+                original_initial_agent,
                 draft_lead_key,
                 prompt
             ),
@@ -253,15 +266,16 @@ pub(crate) fn run_editorial_session_core(
                 let prompt_path = session_dir.join("prompt.md");
                 let protocol_path = session_dir.join("protocolo.md");
                 let _ = write_text_file(
-                        &prompt_path,
-                        &format!(
-                            "# Prompt da Sessao\n\nSessao: {}\nRun: `{}`\nAgente redator inicial: `{}`\n\n{}",
+                    &prompt_path,
+                    &format!(
+                            "# Prompt da Sessao\n\nSessao: {}\nRun: `{}`\nAgente redator inicial original: `{}`\nAgente que assumiu esta chamada: `{}`\n\n{}",
                             sanitize_text(&request.session_name, 200),
                             run_id,
+                            original_initial_agent,
                             draft_lead_key,
                             prompt
                         ),
-                    );
+                );
                 let _ = write_text_file(&protocol_path, &request.protocol_text);
                 let minutes_path = session_dir.join("ata-da-sessao.md");
                 write_text_file(
@@ -309,7 +323,11 @@ pub(crate) fn run_editorial_session_core(
         session_name: sanitize_text(&request.session_name, 200),
         created_at: created_at.to_rfc3339(),
         active_agents: active_agent_keys.clone(),
-        initial_agent: draft_lead_key.to_string(),
+        initial_agent: original_initial_agent.clone(),
+        original_initial_agent: Some(original_initial_agent.clone()),
+        resume_lead: is_resume.then(|| draft_lead_key.to_string()),
+        cycle_lead: Some(draft_lead_key.to_string()),
+        cycle_started_at: Some(Utc::now().to_rfc3339()),
         max_session_cost_usd,
         max_session_minutes,
         links: evidence.links.clone(),
@@ -322,9 +340,10 @@ pub(crate) fn run_editorial_session_core(
     write_text_file(
         &prompt_path,
         &format!(
-            "# Prompt da Sessao\n\nSessao: {}\nRun: `{}`\nAgente redator inicial: `{}`\n\n{}",
+            "# Prompt da Sessao\n\nSessao: {}\nRun: `{}`\nAgente redator inicial original: `{}`\nAgente que assumiu esta chamada: `{}`\n\n{}",
             sanitize_text(&request.session_name, 200),
             run_id,
+            original_initial_agent,
             draft_lead_key,
             prompt
         ),
@@ -368,8 +387,10 @@ pub(crate) fn run_editorial_session_core(
                 .to_string(),
             context: Some(json!({
                 "run_id": &run_id,
-                "initial_agent": draft_lead_key,
-                "initial_agent_name": draft_lead_name,
+                "original_initial_agent": original_initial_agent,
+                "cycle_lead": draft_lead_key,
+                "cycle_lead_name": draft_lead_name,
+                "resume_mode": is_resume,
                 "active_agents": active_agent_keys.clone(),
                 "agent_order": selected_editorial_agent_specs(draft_lead_key, &active_agent_keys)
                     .iter()
@@ -438,7 +459,7 @@ pub(crate) fn run_editorial_session_core(
                     "TIME_LIMIT_REACHED",
                 ));
             }
-            let output_path = agent_dir.join(format!("round-001-{}-draft.md", spec.key));
+            let output_path = agent_attempt_output_path(&agent_dir, 1, spec.key, "draft");
             let timeout = remaining_session_duration(time_budget_anchor, max_session_minutes);
             let use_api_agent = api_agent_keys.contains(spec.key);
             let cost_guard = if use_api_agent {
@@ -836,8 +857,7 @@ pub(crate) fn run_editorial_session_core(
         let mut round_results = Vec::new();
         if enforce_sequential_budget {
             for spec in review_specs {
-                let output_path =
-                    agent_dir.join(format!("round-{round:03}-{}-review.md", spec.key));
+                let output_path = agent_attempt_output_path(&agent_dir, round, spec.key, "review");
                 let timeout = remaining_session_duration(time_budget_anchor, max_session_minutes);
                 let use_api_agent = api_agent_keys.contains(spec.key);
                 let cost_guard = if use_api_agent {
@@ -883,7 +903,7 @@ pub(crate) fn run_editorial_session_core(
                     let prompt = review_prompt.clone();
                     let attachments = evidence.attachments.clone();
                     let output_path =
-                        agent_dir.join(format!("round-{round:03}-{}-review.md", spec.key));
+                        agent_attempt_output_path(&agent_dir, round, spec.key, "review");
                     let run_id = run_id.clone();
                     let log_session = log_session.clone();
                     let ai_provider_config = ai_provider_config.clone();
@@ -1034,6 +1054,9 @@ pub(crate) fn run_editorial_session_core(
             if agent.status == "READY" {
                 continue;
             }
+            if is_operational_agent_result(agent) {
+                continue;
+            }
             let fingerprint = review_complaint_fingerprint(
                 &read_text_file(Path::new(&agent.output_path)).unwrap_or_default(),
             );
@@ -1125,6 +1148,28 @@ pub(crate) fn run_editorial_session_core(
             ));
         }
 
+        let has_editorial_blockers = round_results.iter().any(|agent| {
+            agent.role == "review" && agent.status != "READY" && !is_operational_agent_result(agent)
+        });
+        if !has_editorial_blockers {
+            let _ = write_log_record(
+                log_session,
+                LogEventInput {
+                    level: "warn".to_string(),
+                    category: "session.revision.skipped_operational_only".to_string(),
+                    message: "revision skipped because this round produced only operational failures, not editorial blockers".to_string(),
+                    context: Some(json!({
+                        "run_id": &run_id,
+                        "round": round,
+                        "policy": "operational_failures_trigger_review_retry_not_text_revision"
+                    })),
+                },
+            );
+            previous_blocking_review_notes.clear();
+            round += 1;
+            continue;
+        }
+
         round += 1;
         let revision_prompt = build_revision_prompt(
             request,
@@ -1166,7 +1211,7 @@ pub(crate) fn run_editorial_session_core(
                     "TIME_LIMIT_REACHED",
                 ));
             }
-            let output_path = agent_dir.join(format!("round-{round:03}-{}-revision.md", spec.key));
+            let output_path = agent_attempt_output_path(&agent_dir, round, spec.key, "revision");
             let timeout = remaining_session_duration(time_budget_anchor, max_session_minutes);
             let use_api_agent = api_agent_keys.contains(spec.key);
             let cost_guard = if use_api_agent {
@@ -1301,11 +1346,32 @@ fn current_draft_author_from_path(agent_dir: &Path, path: Option<&PathBuf>) -> O
     }
 }
 
+fn agent_attempt_output_path(agent_dir: &Path, round: usize, agent: &str, role: &str) -> PathBuf {
+    let canonical = agent_dir.join(format!("round-{round:03}-{agent}-{role}.md"));
+    if !canonical.exists() {
+        return canonical;
+    }
+
+    for attempt in 2..=9999 {
+        let candidate = agent_dir.join(format!(
+            "round-{round:03}-{agent}-{role}-attempt-{attempt:03}.md"
+        ));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    let fallback_attempt = 10_000 + Utc::now().timestamp_millis().rem_euclid(1_000_000) as usize;
+    agent_dir.join(format!(
+        "round-{round:03}-{agent}-{role}-attempt-{fallback_attempt}.md"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
-    use super::current_draft_author_from_path;
+    use super::{agent_attempt_output_path, current_draft_author_from_path};
 
     #[test]
     fn resume_author_recovery_reads_latest_draft_or_revision_artifact() {
@@ -1322,6 +1388,15 @@ mod tests {
             current_draft_author_from_path(
                 &agent_dir,
                 Some(&PathBuf::from("agent-runs/round-073-claude-revision.md")),
+            ),
+            Some("claude".to_string())
+        );
+        assert_eq!(
+            current_draft_author_from_path(
+                &agent_dir,
+                Some(&PathBuf::from(
+                    "agent-runs/round-073-claude-revision-attempt-002.md"
+                )),
             ),
             Some("claude".to_string())
         );
@@ -1345,5 +1420,24 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn agent_attempt_output_path_preserves_existing_artifacts_append_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "maestro-agent-attempt-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("round-003-codex-review.md"), "old").unwrap();
+
+        let next = agent_attempt_output_path(&dir, 3, "codex", "review");
+
+        assert_eq!(
+            next.file_name().and_then(|name| name.to_str()),
+            Some("round-003-codex-review-attempt-002.md")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

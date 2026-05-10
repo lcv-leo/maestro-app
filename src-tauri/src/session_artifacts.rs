@@ -94,7 +94,12 @@ pub(crate) fn inspect_resumable_session_dir(
         .unwrap_or_default();
     let saved_initial_agent = saved_contract
         .as_ref()
-        .map(|contract| contract.initial_agent.clone())
+        .and_then(|contract| {
+            contract
+                .original_initial_agent
+                .clone()
+                .or_else(|| Some(contract.initial_agent.clone()))
+        })
         .filter(|value| !value.trim().is_empty());
     let saved_max_session_cost_usd = saved_contract
         .as_ref()
@@ -187,9 +192,9 @@ fn find_latest_draft_artifact_from_artifacts(
     Ok(None)
 }
 
-fn artifact_resume_rank(artifact: &SessionArtifact) -> (usize, usize) {
+fn artifact_resume_rank(artifact: &SessionArtifact) -> (usize, usize, usize) {
     let role_rank = if artifact.role == "revision" { 1 } else { 0 };
-    (artifact.round, role_rank)
+    (artifact.round, role_rank, artifact.attempt)
 }
 
 pub(crate) fn load_agent_results_from_dir(
@@ -200,6 +205,7 @@ pub(crate) fn load_agent_results_from_dir(
         left.round
             .cmp(&right.round)
             .then_with(|| left.role.cmp(&right.role))
+            .then_with(|| left.attempt.cmp(&right.attempt))
             .then_with(|| left.agent.cmp(&right.agent))
     });
 
@@ -245,7 +251,15 @@ pub(crate) fn parse_agent_artifact_name(agent_dir: &Path, name: &str) -> Option<
     let rest = name.strip_prefix("round-")?;
     let (round_text, rest) = rest.split_once('-')?;
     let round = round_text.parse::<usize>().ok()?;
-    let stem = rest.strip_suffix(".md")?;
+    let mut stem = rest.strip_suffix(".md")?;
+    let mut attempt = 1usize;
+    if let Some((base, attempt_text)) = stem.rsplit_once("-attempt-") {
+        attempt = attempt_text.parse::<usize>().ok()?;
+        if attempt < 2 {
+            return None;
+        }
+        stem = base;
+    }
     let (agent, role) = stem.rsplit_once('-')?;
     let agent = match agent {
         "claude" | "codex" | "gemini" | "deepseek" | "grok" => agent,
@@ -254,12 +268,17 @@ pub(crate) fn parse_agent_artifact_name(agent_dir: &Path, name: &str) -> Option<
     if !matches!(role, "draft" | "review" | "revision") {
         return None;
     }
-    let canonical_name = format!("round-{round:03}-{agent}-{role}.md");
+    let canonical_name = if attempt == 1 {
+        format!("round-{round:03}-{agent}-{role}.md")
+    } else {
+        format!("round-{round:03}-{agent}-{role}-attempt-{attempt:03}.md")
+    };
     if canonical_name != name {
         return None;
     }
     Some(SessionArtifact {
         round,
+        attempt,
         agent: agent.to_string(),
         role: role.to_string(),
         path: agent_dir.join(canonical_name),
@@ -298,10 +317,15 @@ pub(crate) fn parse_agent_artifact_result(
     {
         "blocked"
     } else if status.starts_with("EXEC_ERROR")
+        || status.starts_with("PROVIDER_")
         || status == "AGENT_FAILED_NO_OUTPUT"
         || status == "AGENT_FAILED_EMPTY"
         || status == "EMPTY_DRAFT"
         || status == "RUNNING"
+        || status == "STOPPED_BY_USER"
+        || status == "COST_LIMIT_REACHED"
+        || status == "CODEX_WINDOWS_SANDBOX_UPSTREAM"
+        || status == "GEMINI_WORKSPACE_VIOLATION"
     {
         "error"
     } else {
@@ -350,4 +374,41 @@ fn parse_cache_telemetry_from_artifact(text: &str) -> Option<ProviderCacheTeleme
         cache_read_input_tokens: optional_cache_u64(text, "Cache read input tokens"),
         cache_creation_input_tokens: optional_cache_u64(text, "Cache creation input tokens"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_agent_artifact_name;
+    use std::path::PathBuf;
+
+    #[test]
+    fn parse_agent_artifact_name_accepts_append_only_attempt_suffix() {
+        let agent_dir = PathBuf::from("agent-runs");
+        let artifact =
+            parse_agent_artifact_name(&agent_dir, "round-018-codex-revision-attempt-002.md")
+                .expect("attempt artifact should parse");
+
+        assert_eq!(artifact.round, 18);
+        assert_eq!(artifact.attempt, 2);
+        assert_eq!(artifact.agent, "codex");
+        assert_eq!(artifact.role, "revision");
+        assert_eq!(
+            artifact.path,
+            agent_dir.join("round-018-codex-revision-attempt-002.md")
+        );
+    }
+
+    #[test]
+    fn parse_agent_artifact_name_rejects_invalid_attempt_suffixes() {
+        let agent_dir = PathBuf::from("agent-runs");
+
+        assert!(
+            parse_agent_artifact_name(&agent_dir, "round-018-codex-revision-attempt-001.md")
+                .is_none()
+        );
+        assert!(
+            parse_agent_artifact_name(&agent_dir, "round-018-codex-revision-attempt-two.md")
+                .is_none()
+        );
+    }
 }

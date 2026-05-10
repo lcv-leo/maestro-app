@@ -29,6 +29,14 @@ pub(crate) fn human_log_summary(_category: &str, message: &str, context: &Value)
         "tone",
         "duration_ms",
         "elapsed_seconds",
+        "provider",
+        "model",
+        "provider_mode",
+        "cache_control_status",
+        "cache_hit_tokens",
+        "cache_miss_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
         "cost_usd",
     ] {
         if let Some(value) = context.get(key) {

@@ -54,10 +54,12 @@ O botao `Verificar e preparar` valida o token e tenta preparar os recursos essen
 
 Em `Ajustes > Agentes via API`, informe as chaves e clique em `Salvar APIs` para gravar o estado local. O app mostra uma mensagem de status informando quando salvou. `Verificar APIs` salva antes de testar e consulta endpoints reais de listagem de modelos da OpenAI, Anthropic, Gemini e DeepSeek. As chaves nao sao gravadas nos logs.
 
-DeepSeek usa API, nao CLI local. Para que ele opere sem digitar a chave a cada execucao, configure `MAESTRO_DEEPSEEK_API_KEY` ou `DEEPSEEK_API_KEY` no Windows, ou salve a chave pelo fluxo de APIs do app.
+DeepSeek e Grok usam API, nao CLI local. Para que operem sem digitar a chave a cada execucao, configure `MAESTRO_DEEPSEEK_API_KEY` / `DEEPSEEK_API_KEY` e `MAESTRO_GROK_API_KEY` / `GROK_API_KEY` / `XAI_API_KEY` no Windows, ou salve as chaves pelo fluxo de APIs do app.
 
 Quando qualquer peer rodar via API, defina tambem as tarifas de entrada/saida e o limite maximo de custo da sessao em USD antes de iniciar ou retomar. O Maestro nao executa chamada paga sem teto de custo informado pelo usuario.
 Em retomadas, esse teto vale para a tentativa atual: custos de execucoes anteriores ficam preservados no historico, inclusive historicos legados sem identificador de execucao, mas nao consomem o novo limite informado.
+
+Quando o provedor oferece cache de prompt sem degradar qualidade, o Maestro usa isso apenas para reduzir custo: OpenAI/Codex e Grok/xAI enviam `prompt_cache_key`, Anthropic/Claude marca o bloco `system` estavel com cache efemero, e Gemini/DeepSeek usam cache implicito/automatico do provedor. Logs e artefatos gravam somente hash/metadados nao secretos e contadores de tokens de cache quando o provedor retorna esses dados.
 
 ## Modos de persistencia
 
@@ -67,7 +69,7 @@ Em retomadas, esse teto vale para a tentativa atual: custos de execucoes anterio
 
 ## Estado deste build
 
-Este build executa sessao editorial real em background: Claude, Codex, Gemini e DeepSeek podem gerar/revisar o texto contra o protocolo integral importado. O agente que escreveu o rascunho ou a revisao atual nao revisa o proprio texto; por isso, selecione pelo menos dois agentes ativos para que exista revisao independente. Se nao houver revisor independente, a sessao pausa claramente e pode ser retomada depois de ajustar os agentes ativos. Se um agente nao retornar aprovacao, a sessao nao deve ser tratada como finalizada; ela permanece sem entrega final e novas rodadas de revisao devem continuar ate unanimidade. A ata fica disponivel em `data/sessions/<run>/ata-da-sessao.md` e agrupa os eventos por rodada real. O texto publico final, quando houver unanimidade, fica em `data/sessions/<run>/texto-final.md` sem o marcador tecnico interno `MAESTRO_STATUS`.
+Este build executa sessao editorial real em background: Claude, Codex, Gemini, DeepSeek e Grok podem gerar/revisar o texto contra o protocolo integral importado quando o modo selecionado permitir esses peers. DeepSeek e Grok participam em API/Hibrido e ficam desativados em CLI. O agente que escreveu o rascunho ou a revisao atual nao revisa o proprio texto; por isso, selecione pelo menos dois agentes ativos para que exista revisao independente. Se nao houver revisor independente, a sessao pausa claramente e pode ser retomada depois de ajustar os agentes ativos. Se um agente nao retornar aprovacao, a sessao nao deve ser tratada como finalizada; ela permanece sem entrega final e novas rodadas de revisao devem continuar ate unanimidade. A ata fica disponivel em `data/sessions/<run>/ata-da-sessao.md` e agrupa os eventos por rodada real. O texto publico final, quando houver unanimidade, fica em `data/sessions/<run>/texto-final.md` sem o marcador tecnico interno `MAESTRO_STATUS`.
 
 As chamadas editoriais reais nao possuem timeout artificial, porque os modelos podem demorar bastante para cumprir o protocolo. A UI mostra andamento e tempo decorrido enquanto os agentes trabalham, e as CLIs devem rodar sem qualquer janela de terminal visivel.
 

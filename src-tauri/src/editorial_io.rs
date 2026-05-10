@@ -110,6 +110,7 @@ pub(crate) fn log_editorial_agent_finished(
     resolved_path: Option<String>,
     timed_out: bool,
 ) {
+    let cache = result.cache.as_ref();
     let _ = write_log_record(
         log_session,
         LogEventInput {
@@ -137,6 +138,13 @@ pub(crate) fn log_editorial_agent_finished(
                 "stderr_chars": stderr_chars,
                 "usage_input_tokens": result.usage_input_tokens,
                 "usage_output_tokens": result.usage_output_tokens,
+                "cache": result.cache,
+                "provider_mode": cache.map(|value| value.provider_mode.as_str()),
+                "cache_control_status": cache.and_then(|value| value.cache_control_status.as_deref()),
+                "cache_hit_tokens": cache.and_then(|value| value.cache_hit_tokens),
+                "cache_miss_tokens": cache.and_then(|value| value.cache_miss_tokens),
+                "cache_read_input_tokens": cache.and_then(|value| value.cache_read_input_tokens),
+                "cache_creation_input_tokens": cache.and_then(|value| value.cache_creation_input_tokens),
                 "cost_usd": result.cost_usd,
                 "cost_estimated": result.cost_estimated,
                 "output_path": result.output_path

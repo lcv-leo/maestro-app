@@ -34,27 +34,32 @@
 // v0.3.22 is a pure move: every signature, log line, format string and status
 // string is identical to the v0.3.21 lib.rs source (commit 8ef11ba).
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use chrono::Utc;
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
+use crate::app_paths::checked_data_child_path;
 use crate::logging::{write_log_record, LogEventInput, LogSession};
 use crate::provider_retry::{
     build_api_client, build_api_client_async, send_with_retry_async, ProviderRequestOutcome,
 };
 use crate::session_controls::{
-    api_role_max_tokens, estimate_provider_cost_from_input_chars, provider_cost, usage_tokens,
-    ProviderCostGuard,
+    api_role_max_tokens, estimate_provider_cost_from_input_chars, provider_cache_plan,
+    provider_cache_telemetry, provider_cache_telemetry_with_plan, provider_cost, usage_tokens,
+    ProviderCachePlan, ProviderCostGuard,
 };
 use crate::session_evidence::AttachmentManifestEntry;
 use crate::{
     anthropic_api_user_content, api_error_message, api_input_estimate_chars,
     extract_maestro_status, gemini_api_user_parts, log_editorial_agent_finished, openai_api_input,
     provider_key_for_agent, provider_label_for_agent, provider_remote_present, sanitize_short,
-    sanitize_text, write_text_file, AiProviderConfig, EditorialAgentResult,
+    sanitize_text, write_text_file, AiProviderConfig, EditorialAgentResult, ProviderCacheTelemetry,
 };
 
 /// Provider invocation identity bundle. Groups the 7 parameters that flow
@@ -72,6 +77,38 @@ pub(crate) struct ProviderInvocation<'a> {
     pub provider: &'a str,
     pub role: &'a str,
     pub output_path: &'a Path,
+}
+
+fn optional_u64_label(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn optional_string_label(value: Option<&str>) -> String {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+pub(crate) fn provider_cache_artifact_lines(cache: Option<&ProviderCacheTelemetry>) -> String {
+    let Some(cache) = cache else {
+        return "- Cache provider mode: `none`\n- Cache key hash: `unknown`\n- Cache control status: `unknown`\n- Cache retention: `unknown`\n- Cache cached input tokens: `unknown`\n- Cache hit tokens: `unknown`\n- Cache miss tokens: `unknown`\n- Cache read input tokens: `unknown`\n- Cache creation input tokens: `unknown`\n"
+            .to_string();
+    };
+    format!(
+        "- Cache provider mode: `{}`\n- Cache key hash: `{}`\n- Cache control status: `{}`\n- Cache retention: `{}`\n- Cache cached input tokens: `{}`\n- Cache hit tokens: `{}`\n- Cache miss tokens: `{}`\n- Cache read input tokens: `{}`\n- Cache creation input tokens: `{}`\n",
+        sanitize_text(&cache.provider_mode, 80),
+        optional_string_label(cache.cache_key_hash.as_deref()),
+        optional_string_label(cache.cache_control_status.as_deref()),
+        optional_string_label(cache.cache_retention.as_deref()),
+        optional_u64_label(cache.cached_input_tokens),
+        optional_u64_label(cache.cache_hit_tokens),
+        optional_u64_label(cache.cache_miss_tokens),
+        optional_u64_label(cache.cache_read_input_tokens),
+        optional_u64_label(cache.cache_creation_input_tokens),
+    )
 }
 
 /// Per-call editorial-agent request bundle. Groups the 9 parameters that
@@ -96,6 +133,104 @@ pub(crate) fn editorial_api_system_prompt(agent_name: &str) -> String {
     format!(
         "Voce e o peer {agent_name} dentro do Maestro Editorial AI. Leia integralmente o pedido do usuario, o protocolo editorial e os artefatos fornecidos. Responda somente ao que foi solicitado. Em revisoes, a primeira linha precisa seguir exatamente o contrato MAESTRO_STATUS."
     )
+}
+
+fn anthropic_system_prompt_with_cache_control(system_prompt: &str) -> Value {
+    json!([
+        {
+            "type": "text",
+            "text": system_prompt,
+            "cache_control": {
+                "type": "ephemeral"
+            }
+        }
+    ])
+}
+
+pub(crate) fn log_provider_cache_configured(
+    log_session: &LogSession,
+    run_id: &str,
+    provider: &str,
+    model: &str,
+    role: &str,
+    output_path: &Path,
+    prompt_chars: usize,
+    cache_plan: &ProviderCachePlan,
+) {
+    let _ = write_log_record(
+        log_session,
+        LogEventInput {
+            level: "info".to_string(),
+            category: "session.provider.cache.configured".to_string(),
+            message: "provider prompt cache policy configured".to_string(),
+            context: Some(json!({
+                "run_id": sanitize_short(run_id, 120),
+                "provider": provider,
+                "model": sanitize_text(model, 120),
+                "role": role,
+                "provider_mode": cache_plan.provider_mode,
+                "cache_key_hash": cache_plan.cache_key_hash,
+                "cache_control_status": cache_plan.cache_control_status,
+                "cache_retention": cache_plan.cache_retention,
+                "stable_prefix_chars": cache_plan.stable_prefix_chars,
+                "prompt_chars": prompt_chars,
+                "output_path": output_path.to_string_lossy().to_string()
+            })),
+        },
+    );
+    write_provider_cache_manifest(
+        run_id,
+        provider,
+        model,
+        role,
+        output_path,
+        prompt_chars,
+        cache_plan,
+    );
+}
+
+fn write_provider_cache_manifest(
+    run_id: &str,
+    provider: &str,
+    model: &str,
+    role: &str,
+    output_path: &Path,
+    prompt_chars: usize,
+    cache_plan: &ProviderCachePlan,
+) {
+    let Some(agent_dir) = output_path.parent() else {
+        return;
+    };
+    let Some(session_dir) = agent_dir.parent() else {
+        return;
+    };
+    let manifest_path = match checked_data_child_path(&session_dir.join("cache-manifest.ndjson")) {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+    if let Some(parent) = manifest_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let record = json!({
+        "timestamp": Utc::now().to_rfc3339(),
+        "run_id": sanitize_short(run_id, 120),
+        "provider": provider,
+        "model": sanitize_text(model, 120),
+        "role": role,
+        "provider_mode": cache_plan.provider_mode,
+        "cache_key_hash": cache_plan.cache_key_hash,
+        "cache_control_status": cache_plan.cache_control_status,
+        "cache_retention": cache_plan.cache_retention,
+        "stable_prefix_chars": cache_plan.stable_prefix_chars,
+        "prompt_chars": prompt_chars
+    });
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&manifest_path)
+    {
+        let _ = writeln!(file, "{record}");
+    }
 }
 
 pub(crate) fn api_cost_preflight_result(
@@ -224,6 +359,7 @@ pub(crate) fn write_provider_failure_result(
         usage_output_tokens: None,
         cost_usd: None,
         cost_estimated: None,
+        cache: None,
     };
     log_editorial_agent_finished(
         invocation.log_session,
@@ -253,6 +389,7 @@ pub(crate) fn write_provider_success_result(
     usage_input_tokens: Option<u64>,
     usage_output_tokens: Option<u64>,
     cost_usd: Option<f64>,
+    cache: Option<ProviderCacheTelemetry>,
     duration_ms: u128,
     prompt_chars: usize,
     endpoint: &str,
@@ -272,7 +409,7 @@ pub(crate) fn write_provider_success_result(
         "warn"
     };
     let artifact = format!(
-        "# {name} - {role}\n\n- CLI: `{cli}`\n- Provider: `{provider}`\n- Model: `{}`\n- Model reported: `{}`\n- Key source: `{}`\n- Status: `{status}`\n- Exit code: `0`\n- Duration ms: `{duration_ms}`\n- Prompt chars: `{prompt_chars}`\n- Stdout chars: `{}`\n- Usage input tokens: `{}`\n- Usage output tokens: `{}`\n- Cost USD: `{}`\n- Stderr chars: `0`\n\n## Stdout\n\n```text\n{}\n```\n\n## Stderr\n\n```text\n\n```\n",
+        "# {name} - {role}\n\n- CLI: `{cli}`\n- Provider: `{provider}`\n- Model: `{}`\n- Model reported: `{}`\n- Key source: `{}`\n- Status: `{status}`\n- Exit code: `0`\n- Duration ms: `{duration_ms}`\n- Prompt chars: `{prompt_chars}`\n- Stdout chars: `{}`\n- Usage input tokens: `{}`\n- Usage output tokens: `{}`\n{}- Cost USD: `{}`\n- Stderr chars: `0`\n\n## Stdout\n\n```text\n{}\n```\n\n## Stderr\n\n```text\n\n```\n",
         sanitize_text(model, 120),
         sanitize_text(model_reported, 120),
         sanitize_text(key_source, 120),
@@ -283,6 +420,7 @@ pub(crate) fn write_provider_success_result(
         usage_output_tokens
             .map(|value| value.to_string())
             .unwrap_or_else(|| "unknown".to_string()),
+        provider_cache_artifact_lines(cache.as_ref()),
         cost_usd
             .map(|value| format!("{value:.8}"))
             .unwrap_or_else(|| "unknown".to_string()),
@@ -302,6 +440,7 @@ pub(crate) fn write_provider_success_result(
         usage_output_tokens,
         cost_usd,
         cost_estimated: cost_usd.map(|_| true),
+        cache,
     };
     log_editorial_agent_finished(
         log_session,
@@ -430,6 +569,8 @@ pub(crate) async fn run_openai_api_agent(
         }
     };
     let model = resolve_openai_model(&blocking_client, &api_key);
+    let system_prompt = editorial_api_system_prompt(name);
+    let cache_plan = provider_cache_plan(provider, &model, role, name, &system_prompt);
     let input = match openai_api_input(&prompt, attachments) {
         Ok(input) => input,
         Err(error) => {
@@ -455,14 +596,28 @@ pub(crate) async fn run_openai_api_agent(
         timeout,
         cost_guard.as_ref(),
     );
+    log_provider_cache_configured(
+        log_session,
+        run_id,
+        provider,
+        &model,
+        role,
+        output_path,
+        prompt.chars().count(),
+        &cache_plan,
+    );
 
-    let body = json!({
+    let mut body = json!({
         "model": model,
-        "instructions": editorial_api_system_prompt(name),
+        "instructions": system_prompt,
         "input": input,
         "max_output_tokens": max_tokens,
-        "store": false
+        "store": false,
+        "prompt_cache_key": cache_plan.cache_key
     });
+    if let Some(retention) = cache_plan.cache_retention.as_deref() {
+        body["prompt_cache_retention"] = json!(retention);
+    }
     let endpoint = "https://api.openai.com/v1/responses";
     let request_builder = async_client
         .post(endpoint)
@@ -534,6 +689,10 @@ pub(crate) async fn run_openai_api_agent(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| body_text.trim().to_string());
     let (usage_input_tokens, usage_output_tokens) = usage_tokens(&parsed);
+    let cache = Some(provider_cache_telemetry_with_plan(
+        &cache_plan,
+        provider_cache_telemetry(provider, &parsed, usage_input_tokens),
+    ));
     let cost_usd = cost_guard.as_ref().and_then(|guard| {
         usage_input_tokens
             .zip(usage_output_tokens)
@@ -558,6 +717,7 @@ pub(crate) async fn run_openai_api_agent(
         usage_input_tokens,
         usage_output_tokens,
         cost_usd,
+        cache,
         started.elapsed().as_millis(),
         prompt.chars().count(),
         endpoint,
@@ -638,6 +798,8 @@ pub(crate) async fn run_anthropic_api_agent(
         }
     };
     let model = resolve_anthropic_model(&blocking_client, &api_key);
+    let system_prompt = editorial_api_system_prompt(name);
+    let cache_plan = provider_cache_plan(provider, &model, role, name, &system_prompt);
     let content = match anthropic_api_user_content(&prompt, attachments) {
         Ok(content) => content,
         Err(error) => {
@@ -650,6 +812,7 @@ pub(crate) async fn run_anthropic_api_agent(
             );
         }
     };
+    let system_content = anthropic_system_prompt_with_cache_control(&system_prompt);
     log_provider_api_started(
         log_session,
         run_id,
@@ -663,11 +826,21 @@ pub(crate) async fn run_anthropic_api_agent(
         timeout,
         cost_guard.as_ref(),
     );
+    log_provider_cache_configured(
+        log_session,
+        run_id,
+        provider,
+        &model,
+        role,
+        output_path,
+        prompt.chars().count(),
+        &cache_plan,
+    );
 
     let body = json!({
         "model": model,
         "max_tokens": max_tokens,
-        "system": editorial_api_system_prompt(name),
+        "system": system_content,
         "messages": [
             { "role": "user", "content": content }
         ]
@@ -749,6 +922,10 @@ pub(crate) async fn run_anthropic_api_agent(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| body_text.trim().to_string());
     let (usage_input_tokens, usage_output_tokens) = usage_tokens(&parsed);
+    let cache = Some(provider_cache_telemetry_with_plan(
+        &cache_plan,
+        provider_cache_telemetry(provider, &parsed, usage_input_tokens),
+    ));
     let cost_usd = cost_guard.as_ref().and_then(|guard| {
         usage_input_tokens
             .zip(usage_output_tokens)
@@ -773,6 +950,7 @@ pub(crate) async fn run_anthropic_api_agent(
         usage_input_tokens,
         usage_output_tokens,
         cost_usd,
+        cache,
         started.elapsed().as_millis(),
         prompt.chars().count(),
         endpoint,
@@ -853,6 +1031,8 @@ pub(crate) async fn run_gemini_api_agent(
         }
     };
     let model = resolve_gemini_model(&blocking_client, &api_key);
+    let system_prompt = editorial_api_system_prompt(name);
+    let cache_plan = provider_cache_plan(provider, &model, role, name, &system_prompt);
     let parts = match gemini_api_user_parts(&prompt, attachments) {
         Ok(parts) => parts,
         Err(error) => {
@@ -878,12 +1058,22 @@ pub(crate) async fn run_gemini_api_agent(
         timeout,
         cost_guard.as_ref(),
     );
+    log_provider_cache_configured(
+        log_session,
+        run_id,
+        provider,
+        &model,
+        role,
+        output_path,
+        prompt.chars().count(),
+        &cache_plan,
+    );
 
     let endpoint =
         format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent");
     let body = json!({
         "systemInstruction": {
-            "parts": [{ "text": editorial_api_system_prompt(name) }]
+            "parts": [{ "text": system_prompt }]
         },
         "contents": [
             {
@@ -965,6 +1155,10 @@ pub(crate) async fn run_gemini_api_agent(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| body_text.trim().to_string());
     let (usage_input_tokens, usage_output_tokens) = gemini_usage_tokens(&parsed);
+    let cache = Some(provider_cache_telemetry_with_plan(
+        &cache_plan,
+        provider_cache_telemetry(provider, &parsed, usage_input_tokens),
+    ));
     let cost_usd = cost_guard.as_ref().and_then(|guard| {
         usage_input_tokens
             .zip(usage_output_tokens)
@@ -989,6 +1183,7 @@ pub(crate) async fn run_gemini_api_agent(
         usage_input_tokens,
         usage_output_tokens,
         cost_usd,
+        cache,
         started.elapsed().as_millis(),
         prompt.chars().count(),
         &endpoint,
@@ -1214,4 +1409,47 @@ fn gemini_usage_tokens(value: &Value) -> (Option<u64>, Option<u64>) {
         .or_else(|| value.pointer("/usageMetadata/outputTokenCount"))
         .and_then(Value::as_u64);
     (input, output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anthropic_system_prompt_with_cache_control_marks_stable_system_block() {
+        let content = anthropic_system_prompt_with_cache_control("stable system");
+
+        assert_eq!(
+            content
+                .pointer("/0/cache_control/type")
+                .and_then(Value::as_str),
+            Some("ephemeral")
+        );
+        assert_eq!(
+            content.pointer("/0/text").and_then(Value::as_str),
+            Some("stable system")
+        );
+    }
+
+    #[test]
+    fn provider_cache_artifact_lines_include_policy_metadata() {
+        let cache = ProviderCacheTelemetry {
+            provider_mode: "prompt_cache_key".to_string(),
+            cache_key_hash: Some("abc123".to_string()),
+            cache_control_status: Some("prompt_cache_key_24h".to_string()),
+            cache_retention: Some("24h".to_string()),
+            cached_input_tokens: Some(1024),
+            cache_hit_tokens: Some(1024),
+            cache_miss_tokens: Some(0),
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+        };
+
+        let lines = provider_cache_artifact_lines(Some(&cache));
+
+        assert!(lines.contains("Cache provider mode: `prompt_cache_key`"));
+        assert!(lines.contains("Cache key hash: `abc123`"));
+        assert!(lines.contains("Cache control status: `prompt_cache_key_24h`"));
+        assert!(lines.contains("Cache retention: `24h`"));
+    }
 }

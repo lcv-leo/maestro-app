@@ -1,7 +1,7 @@
 # AI Provider Credentials
 
-Status: implementation contract with v0.3.13 direct API peer execution and per-session cost controls.
-Date: 2026-05-01.
+Status: implementation contract with direct API peer execution, per-session cost controls, Grok/xAI peer support, and provider prompt-cache policy telemetry through v0.5.19.
+Date: 2026-05-10.
 
 Maestro must keep CLI orchestration and official API/SDK orchestration as first-class options. The operator should be able to use a subscription-backed CLI when that is convenient, or provide API credentials and pay through provider credits when that is the better path.
 
@@ -11,9 +11,9 @@ Maestro must keep CLI orchestration and official API/SDK orchestration as first-
 - `api`: use official provider APIs/SDKs only.
 - `hybrid`: prefer API/SDK for agents with validated credentials and fall back to CLI only when explicitly allowed by policy.
 
-No mode changes the convergence rule. Claude, Codex/OpenAI, Gemini, DeepSeek, and MaestroPeer still need unanimous `READY` in the same accepted round before final delivery when those peers are active in the session.
+No mode changes the convergence rule. Claude, Codex/OpenAI, Gemini, DeepSeek, Grok, and MaestroPeer still need unanimous `READY` in the same accepted round before final delivery when those peers are active in the session.
 
-From `v0.3.13`, the operator can select 1 to 4 active AI peers per session. Unselected peers are not called and do not count toward that session's unanimity gate.
+From `v0.5.16`, the operator can select 1 to 5 active AI peers per session. Unselected peers are not called and do not count toward that session's unanimity gate.
 
 ## Settings Fields
 
@@ -23,6 +23,7 @@ The settings screen provides secure credential fields and UI-owned tariff rows f
 - Anthropic / Claude: API key and input/output USD per 1M tokens.
 - Google / Gemini: Gemini Developer API key and input/output USD per 1M tokens.
 - DeepSeek: API key and input/output USD per 1M tokens.
+- Grok / xAI: API key and input/output USD per 1M tokens.
 
 Per-provider model pins and organization/project routing are future configuration fields; current execution resolves models dynamically from authenticated provider model-list endpoints.
 
@@ -56,6 +57,7 @@ Implemented through v0.3.13:
 - Verification calls official model-list endpoints for OpenAI, Anthropic, Gemini, and DeepSeek and reports provider-level status without logging raw keys.
 - Network-error rendering strips request URLs before messages reach the UI/logs, so query-string API keys are not echoed when a provider request fails before a response is received.
 - DeepSeek, OpenAI/Codex, Anthropic/Claude, and Google/Gemini can generate drafts, review drafts, and produce revisions through direct provider APIs. At runtime, Maestro asks each authenticated model-list endpoint which models are available and selects the strongest supported entry for that provider. DeepSeek still honors `MAESTRO_DEEPSEEK_MODEL` or `CROSS_REVIEW_DEEPSEEK_MODEL` when set.
+- Grok/xAI runs API-only in API and hybrid modes. CLI mode disables Grok instead of pretending a local CLI transport exists.
 - Optional per-session USD budgets are enforced against observed direct API usage. The limit remains one session-level value; Maestro never creates per-model budgets or silently drops a selected peer to stay under budget.
 - Provider tariffs are UI-owned configuration. The operator maintains input/output USD per 1M tokens in `Configuracoes > Agentes via API > Tabela de tarifas`; there is no env-var fallback for cost rates. Any peer that will run through a direct provider API is blocked with a friendly message until both tariff fields for that provider are configured.
 - CLI-backed peers expose no reliable per-call token usage to Maestro yet. Their cost is displayed as unknown/subscription and does not decrement the optional USD budget.
@@ -68,6 +70,22 @@ Still pending:
 - Cloudflare-side broker or AI Gateway integration for consuming Secrets Store values without exposing them back to the desktop app.
 - Optional UI model pinning per provider. Current direct API execution resolves models dynamically from each provider's model-list endpoint, with conservative fallbacks.
 - Cloudflare-side broker or AI Gateway cost telemetry for hosted/remote execution paths.
+
+## Prompt Cache Policy
+
+Prompt caching is used only when it can reduce paid input cost without weakening the editorial protocol, disabling thinking, or changing the selected model. Cache configuration never stores raw prompts, API keys, or protocol text in public files.
+
+Implemented through `v0.5.19`:
+
+- OpenAI/Codex direct Responses calls send a deterministic `prompt_cache_key`. For extended-cache-capable OpenAI models selected by Maestro, the request also sends `prompt_cache_retention: "24h"`. Other OpenAI models keep the key and omit the retention override so the provider default applies.
+- Anthropic/Claude direct Messages calls send the stable `system` prompt as a text block marked with `cache_control: { "type": "ephemeral" }`, which enables prompt caching with the provider's default short retention when the stable prefix is long enough. Maestro reads `cache_creation_input_tokens` and `cache_read_input_tokens` from the response usage object.
+- DeepSeek uses the provider's automatic disk cache. Maestro does not add non-standard request fields; it records `prompt_cache_hit_tokens` and `prompt_cache_miss_tokens` when DeepSeek returns them.
+- Grok/xAI direct Responses calls send a deterministic `prompt_cache_key` and parse cached-token usage fields when present.
+- Gemini keeps the GenerateContent payload thinking-preserving. Explicit Gemini cached-content resources are not forced from the desktop runner because the current quality requirement is to preserve thinking mode; Maestro records provider cache usage if `usageMetadata.cachedContentTokenCount` is returned.
+- Each API peer writes non-secret cache policy metadata to NDJSON and to `data/sessions/<run>/cache-manifest.ndjson`: provider, model, role, cache mode, cache key hash, retention label, stable-prefix character count, and prompt character count.
+- Each successful API artifact includes cache mode, key hash, control status, retention, cached input tokens, hit tokens, miss tokens, read tokens, and creation tokens where known.
+
+The cache key hash is derived from provider, model, role, agent name, and the stable system prompt. It is meant for diagnostics and provider routing only; it is not a secret and it is not enough to reconstruct the prompt.
 
 If a provider credential is invalid or underfunded, Maestro must explain which provider path is blocked and whether the CLI path can still satisfy that peer.
 
@@ -100,6 +118,7 @@ Suggested user-scope Windows environment variable names:
 - `MAESTRO_ANTHROPIC_API_KEY`
 - `MAESTRO_GEMINI_API_KEY`
 - `MAESTRO_DEEPSEEK_API_KEY`
+- `MAESTRO_GROK_API_KEY`
 - `MAESTRO_GOOGLE_VERTEX_PROJECT`
 - `MAESTRO_GOOGLE_VERTEX_LOCATION`
 
@@ -115,6 +134,7 @@ Current planning references:
 - OpenAI direct calls use the Responses API at `/v1/responses`, bearer auth, `input`, `instructions`, `max_output_tokens`, and response `usage.input_tokens`/`usage.output_tokens` for cost accounting.
 - Anthropic direct calls use Messages API at `/v1/messages` with `x-api-key`, `anthropic-version`, `model`, `max_tokens`, `system`, and `messages`; response `usage.input_tokens`/`usage.output_tokens` feeds the cost ledger.
 - Gemini direct calls use `models/{model}:generateContent` with API-key auth, `contents`, `systemInstruction`, and `generationConfig.maxOutputTokens`; response `usageMetadata.promptTokenCount`/`candidatesTokenCount` feeds the cost ledger.
+- Grok/xAI direct calls use the OpenAI-compatible Responses API at `https://api.x.ai/v1/responses`, bearer auth, `input`, `max_output_tokens`, `store: false`, and `prompt_cache_key`.
 - Direct API attachments are provider-shaped instead of text-only: OpenAI receives supported images as `input_image` and supported documents as `input_file` with base64 data URLs; Anthropic receives supported images and PDFs as base64 content blocks; Gemini receives supported media/documents as `inline_data` parts.
 - Attachment types that are not natively supported by the selected provider, or that exceed the native API inline size cap, remain available through the session manifest and bounded text previews. Native attachment payload size is included in the conservative pre-call cost projection.
 - The session UI mirrors this as a pre-run per-provider prediction, so mixed support is visible before invocation instead of collapsed into a single native/manifest label.
@@ -131,6 +151,7 @@ Official documentation:
 - Google Gen AI SDK / Gemini Developer API and Vertex AI: https://ai.google.dev/gemini-api/docs/migrate-to-cloud
 - DeepSeek API quick start: https://api-docs.deepseek.com/
 - DeepSeek model list endpoint: https://api-docs.deepseek.com/api/list-models
+- xAI Responses API / prompt caching: https://docs.x.ai/docs/guides/prompt-caching
 
 ## Cross-Review Use
 

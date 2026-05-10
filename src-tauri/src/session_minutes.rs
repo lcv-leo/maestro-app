@@ -216,6 +216,7 @@ mod tests {
             usage_output_tokens: None,
             cost_usd: None,
             cost_estimated: None,
+            cache: None,
         }
     }
 

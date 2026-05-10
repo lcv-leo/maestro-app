@@ -40,8 +40,8 @@ use crate::session_resume::{
     humanize_agent_name, known_session_activity_unix,
 };
 use crate::{
-    extract_stdout_block, read_text_file, EditorialAgentResult, ResumableSessionInfo,
-    ResumeSessionState, SessionArtifact,
+    extract_stdout_block, read_text_file, EditorialAgentResult, ProviderCacheTelemetry,
+    ResumableSessionInfo, ResumeSessionState, SessionArtifact,
 };
 
 pub(crate) fn inspect_resumable_session_dir(
@@ -289,6 +289,7 @@ pub(crate) fn parse_agent_artifact_result(
         .and_then(|value| value.parse::<u64>().ok());
     let cost_usd =
         extract_bullet_code_value(&text, "Cost USD").and_then(|value| value.parse::<f64>().ok());
+    let cache = parse_cache_telemetry_from_artifact(&text);
     let tone = if status == "READY" || status == "DRAFT_CREATED" {
         "ok"
     } else if status == "CLI_NOT_FOUND"
@@ -320,5 +321,33 @@ pub(crate) fn parse_agent_artifact_result(
         usage_output_tokens,
         cost_usd,
         cost_estimated: cost_usd.map(|_| true),
+        cache,
+    })
+}
+
+fn optional_cache_u64(text: &str, label: &str) -> Option<u64> {
+    extract_bullet_code_value(text, label)
+        .filter(|value| value != "unknown")
+        .and_then(|value| value.parse::<u64>().ok())
+}
+
+fn parse_cache_telemetry_from_artifact(text: &str) -> Option<ProviderCacheTelemetry> {
+    let provider_mode = extract_bullet_code_value(text, "Cache provider mode")?;
+    if provider_mode == "none" || provider_mode == "unknown" {
+        return None;
+    }
+    Some(ProviderCacheTelemetry {
+        provider_mode,
+        cache_key_hash: extract_bullet_code_value(text, "Cache key hash")
+            .filter(|value| value != "unknown"),
+        cache_control_status: extract_bullet_code_value(text, "Cache control status")
+            .filter(|value| value != "unknown"),
+        cache_retention: extract_bullet_code_value(text, "Cache retention")
+            .filter(|value| value != "unknown"),
+        cached_input_tokens: optional_cache_u64(text, "Cache cached input tokens"),
+        cache_hit_tokens: optional_cache_u64(text, "Cache hit tokens"),
+        cache_miss_tokens: optional_cache_u64(text, "Cache miss tokens"),
+        cache_read_input_tokens: optional_cache_u64(text, "Cache read input tokens"),
+        cache_creation_input_tokens: optional_cache_u64(text, "Cache creation input tokens"),
     })
 }

@@ -382,6 +382,19 @@ pub(crate) struct EditorialSessionResult {
 }
 
 #[derive(Clone, Serialize)]
+pub(crate) struct ProviderCacheTelemetry {
+    pub(crate) provider_mode: String,
+    pub(crate) cache_key_hash: Option<String>,
+    pub(crate) cache_control_status: Option<String>,
+    pub(crate) cache_retention: Option<String>,
+    pub(crate) cached_input_tokens: Option<u64>,
+    pub(crate) cache_hit_tokens: Option<u64>,
+    pub(crate) cache_miss_tokens: Option<u64>,
+    pub(crate) cache_read_input_tokens: Option<u64>,
+    pub(crate) cache_creation_input_tokens: Option<u64>,
+}
+
+#[derive(Clone, Serialize)]
 pub(crate) struct EditorialAgentResult {
     pub(crate) name: String,
     pub(crate) role: String,
@@ -395,6 +408,7 @@ pub(crate) struct EditorialAgentResult {
     pub(crate) usage_output_tokens: Option<u64>,
     pub(crate) cost_usd: Option<f64>,
     pub(crate) cost_estimated: Option<bool>,
+    pub(crate) cache: Option<ProviderCacheTelemetry>,
 }
 
 #[derive(Clone)]
@@ -1259,6 +1273,7 @@ mod tests {
                 usage_output_tokens: None,
                 cost_usd: None,
                 cost_estimated: None,
+                cache: None,
             },
             EditorialAgentResult {
                 name: "Codex".to_string(),
@@ -1273,6 +1288,7 @@ mod tests {
                 usage_output_tokens: None,
                 cost_usd: None,
                 cost_estimated: None,
+                cache: None,
             },
             EditorialAgentResult {
                 name: "DeepSeek".to_string(),
@@ -1287,6 +1303,7 @@ mod tests {
                 usage_output_tokens: None,
                 cost_usd: None,
                 cost_estimated: None,
+                cache: None,
             },
         ];
         let active = vec!["deepseek".to_string()];
@@ -1311,6 +1328,7 @@ mod tests {
                 usage_output_tokens: None,
                 cost_usd: None,
                 cost_estimated: None,
+                cache: None,
             },
             EditorialAgentResult {
                 name: "OpenAI".to_string(),
@@ -1325,6 +1343,7 @@ mod tests {
                 usage_output_tokens: None,
                 cost_usd: None,
                 cost_estimated: None,
+                cache: None,
             },
         ];
         let active = vec!["claude".to_string(), "codex".to_string()];
@@ -1352,6 +1371,7 @@ mod tests {
                 usage_output_tokens: None,
                 cost_usd: None,
                 cost_estimated: None,
+                cache: None,
             },
             EditorialAgentResult {
                 name: "\tdeepseek-api\t".to_string(),
@@ -1366,6 +1386,7 @@ mod tests {
                 usage_output_tokens: None,
                 cost_usd: None,
                 cost_estimated: None,
+                cache: None,
             },
         ];
         let active = vec!["claude".to_string(), "deepseek".to_string()];
@@ -1392,6 +1413,7 @@ mod tests {
             usage_output_tokens: None,
             cost_usd: None,
             cost_estimated: None,
+            cache: None,
         }];
         let active: Vec<String> = Vec::new();
         let filtered = filter_existing_agents_to_active_set(existing, &active);
@@ -1742,6 +1764,7 @@ mod tests {
             usage_output_tokens: None,
             cost_usd: None,
             cost_estimated: None,
+            cache: None,
         }];
         let decision = build_blocked_minutes_decision(&agents);
         assert!(decision.contains("Falhas operacionais"));
@@ -1764,6 +1787,7 @@ mod tests {
                 usage_output_tokens: None,
                 cost_usd: None,
                 cost_estimated: None,
+                cache: None,
             },
             EditorialAgentResult {
                 name: "Gemini".to_string(),
@@ -1778,6 +1802,7 @@ mod tests {
                 usage_output_tokens: None,
                 cost_usd: None,
                 cost_estimated: None,
+                cache: None,
             },
         ];
 

@@ -221,6 +221,7 @@ mod tests {
                 usage_output_tokens: Some(20),
                 cost_usd: Some(1.25),
                 cost_estimated: Some(true),
+                cache: None,
             },
         )
         .unwrap();
@@ -287,6 +288,7 @@ mod tests {
                 usage_output_tokens: Some(20),
                 cost_usd: Some(1.25),
                 cost_estimated: Some(true),
+                cache: None,
             },
         )
         .unwrap();
@@ -352,6 +354,7 @@ mod tests {
                 usage_output_tokens: Some(20),
                 cost_usd: Some(1.25),
                 cost_estimated: Some(true),
+                cache: None,
             },
         )
         .unwrap();

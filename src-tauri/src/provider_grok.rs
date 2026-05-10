@@ -16,11 +16,14 @@ use crate::provider_retry::{
 };
 use crate::provider_runners::{
     api_cost_preflight_result, editorial_api_system_prompt, log_provider_api_started,
-    openai_response_text, write_provider_error_result, write_provider_failure_result,
-    write_provider_missing_key_result, write_provider_success_result, EditorialAgentRequest,
-    ProviderInvocation,
+    log_provider_cache_configured, openai_response_text, write_provider_error_result,
+    write_provider_failure_result, write_provider_missing_key_result,
+    write_provider_success_result, EditorialAgentRequest, ProviderInvocation,
 };
-use crate::session_controls::{api_role_max_tokens, provider_cost, usage_tokens};
+use crate::session_controls::{
+    api_role_max_tokens, provider_cache_plan, provider_cache_telemetry,
+    provider_cache_telemetry_with_plan, provider_cost, usage_tokens,
+};
 use crate::{
     api_error_message, api_input_estimate_chars, first_env_value, provider_key_for_agent,
     provider_remote_present, sanitize_short, sanitize_text,
@@ -104,6 +107,8 @@ pub(crate) async fn run_grok_api_agent(
         }
     };
     let model = resolve_grok_model(&blocking_client, &api_key);
+    let system_prompt = editorial_api_system_prompt(name);
+    let cache_plan = provider_cache_plan(provider, &model, role, name, &system_prompt);
     log_provider_api_started(
         log_session,
         run_id,
@@ -117,15 +122,26 @@ pub(crate) async fn run_grok_api_agent(
         timeout,
         cost_guard.as_ref(),
     );
+    log_provider_cache_configured(
+        log_session,
+        run_id,
+        provider,
+        &model,
+        role,
+        output_path,
+        prompt.chars().count(),
+        &cache_plan,
+    );
 
     let body = json!({
         "model": model,
         "input": [
-            { "role": "system", "content": editorial_api_system_prompt(name) },
+            { "role": "system", "content": system_prompt },
             { "role": "user", "content": prompt }
         ],
         "store": false,
-        "max_output_tokens": max_tokens
+        "max_output_tokens": max_tokens,
+        "prompt_cache_key": cache_plan.cache_key
     });
     let request_builder = async_client
         .post(GROK_ENDPOINT)
@@ -205,6 +221,10 @@ pub(crate) async fn run_grok_api_agent(
         );
     }
     let (usage_input_tokens, usage_output_tokens) = usage_tokens(&parsed);
+    let cache = Some(provider_cache_telemetry_with_plan(
+        &cache_plan,
+        provider_cache_telemetry(provider, &parsed, usage_input_tokens),
+    ));
     let cost_usd = cost_guard.as_ref().and_then(|guard| {
         usage_input_tokens
             .zip(usage_output_tokens)
@@ -229,6 +249,7 @@ pub(crate) async fn run_grok_api_agent(
         usage_input_tokens,
         usage_output_tokens,
         cost_usd,
+        cache,
         started.elapsed().as_millis(),
         prompt.chars().count(),
         GROK_ENDPOINT,

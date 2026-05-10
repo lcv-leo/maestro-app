@@ -27,9 +27,13 @@ use crate::logging::{write_log_record, LogEventInput, LogSession};
 use crate::provider_retry::{
     build_api_client_async, send_with_retry_async, ProviderRequestOutcome,
 };
-use crate::provider_runners::EditorialAgentRequest;
+use crate::provider_runners::{
+    editorial_api_system_prompt, log_provider_cache_configured, provider_cache_artifact_lines,
+    EditorialAgentRequest,
+};
 use crate::session_controls::{
-    api_role_max_tokens, estimate_provider_cost, provider_cost, usage_tokens,
+    api_role_max_tokens, estimate_provider_cost, provider_cache_plan, provider_cache_telemetry,
+    provider_cache_telemetry_with_plan, provider_cost, usage_tokens,
 };
 use crate::{
     api_error_message, effective_provider_key, extract_maestro_status, first_env_value,
@@ -92,6 +96,7 @@ pub(crate) async fn run_deepseek_api_agent(
             usage_output_tokens: None,
             cost_usd: None,
             cost_estimated: None,
+            cache: None,
         };
         log_editorial_agent_finished(
             log_session,
@@ -137,6 +142,7 @@ pub(crate) async fn run_deepseek_api_agent(
                     usage_output_tokens: None,
                     cost_usd: None,
                     cost_estimated: None,
+                    cache: None,
                 };
                 log_editorial_agent_finished(
                     log_session,
@@ -193,6 +199,8 @@ pub(crate) async fn run_deepseek_api_agent(
     };
 
     let model = resolve_deepseek_model(&blocking_client, &api_key);
+    let system_prompt = editorial_api_system_prompt(name);
+    let cache_plan = provider_cache_plan("deepseek", &model, role, name, &system_prompt);
     let _ = write_log_record(
         log_session,
         LogEventInput {
@@ -215,13 +223,23 @@ pub(crate) async fn run_deepseek_api_agent(
             })),
         },
     );
+    log_provider_cache_configured(
+        log_session,
+        run_id,
+        "deepseek",
+        &model,
+        role,
+        output_path,
+        prompt.chars().count(),
+        &cache_plan,
+    );
 
     let body = json!({
         "model": model,
         "messages": [
             {
                 "role": "system",
-                "content": "Voce e o peer DeepSeek dentro do Maestro Editorial AI. Leia integralmente o pedido do usuario, o protocolo editorial e os artefatos fornecidos. Responda somente ao que foi solicitado. Em revisoes, a primeira linha precisa seguir exatamente o contrato MAESTRO_STATUS."
+                "content": system_prompt
             },
             { "role": "user", "content": prompt }
         ],
@@ -307,6 +325,10 @@ pub(crate) async fn run_deepseek_api_agent(
 
         let parsed: Value = serde_json::from_str(&body_text).unwrap_or_else(|_| json!({}));
         let (usage_input_tokens, usage_output_tokens) = usage_tokens(&parsed);
+        let cache = Some(provider_cache_telemetry_with_plan(
+            &cache_plan,
+            provider_cache_telemetry("deepseek", &parsed, usage_input_tokens),
+        ));
         let cost_usd = cost_guard.as_ref().and_then(|guard| {
             usage_input_tokens
                 .zip(usage_output_tokens)
@@ -349,7 +371,7 @@ pub(crate) async fn run_deepseek_api_agent(
             "warn"
         };
         let artifact = format!(
-            "# {name} - {role}\n\n- CLI: `{cli}`\n- Provider: `deepseek`\n- Model: `{}`\n- Model reported: `{}`\n- Key source: `{}`\n- Status: `{status}`\n- Exit code: `0`\n- Duration ms: `{}`\n- Prompt chars: `{}`\n- Stdout chars: `{}`\n- Usage input tokens: `{}`\n- Usage output tokens: `{}`\n- Cost USD: `{}`\n- Stderr chars: `0`\n\n## Stdout\n\n```text\n{}\n```\n\n## Stderr\n\n```text\n\n```\n",
+            "# {name} - {role}\n\n- CLI: `{cli}`\n- Provider: `deepseek`\n- Model: `{}`\n- Model reported: `{}`\n- Key source: `{}`\n- Status: `{status}`\n- Exit code: `0`\n- Duration ms: `{}`\n- Prompt chars: `{}`\n- Stdout chars: `{}`\n- Usage input tokens: `{}`\n- Usage output tokens: `{}`\n{}- Cost USD: `{}`\n- Stderr chars: `0`\n\n## Stdout\n\n```text\n{}\n```\n\n## Stderr\n\n```text\n\n```\n",
             model,
             sanitize_text(model_reported, 120),
             sanitize_text(&key_source, 120),
@@ -362,6 +384,7 @@ pub(crate) async fn run_deepseek_api_agent(
             usage_output_tokens
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "unknown".to_string()),
+            provider_cache_artifact_lines(cache.as_ref()),
             cost_usd
                 .map(|value| format!("{value:.8}"))
                 .unwrap_or_else(|| "unknown".to_string()),
@@ -381,6 +404,7 @@ pub(crate) async fn run_deepseek_api_agent(
             usage_output_tokens,
             cost_usd,
             cost_estimated: cost_usd.map(|_| true),
+            cache,
         };
         log_editorial_agent_finished(
             log_session,
@@ -429,6 +453,7 @@ pub(crate) fn write_deepseek_error_result(
         usage_output_tokens: None,
         cost_usd: None,
         cost_estimated: None,
+        cache: None,
     };
     log_editorial_agent_finished(
         log_session,

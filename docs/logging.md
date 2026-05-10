@@ -38,7 +38,9 @@ Each log line is standalone JSON with:
 
 Frontend events include a `context.runtime` snapshot with viewport, current URL/hash, visibility, online state, active element, user agent, screen metrics, device pixel ratio, language, platform, hardware concurrency, and browser connection hints when available.
 
-Native startup events include resolved command paths for known CLIs when available. Editorial agent events include `session.agent.started` and `session.agent.finished` records with run id, agent, role, CLI, duration, exit code, timeout policy, output path, and stdout/stderr character counts. Native command execution drains stdout and stderr while the process is running, so large agent outputs do not block only because an OS pipe buffer filled.
+Native startup events include resolved command paths for known CLIs when available. Editorial agent events include `session.agent.started` and `session.agent.finished` records with run id, agent, role, CLI, duration, exit code, timeout policy, output path, stdout/stderr character counts, API token usage, cost, and provider cache telemetry when an API peer reports it. Native command execution drains stdout and stderr while the process is running, so large agent outputs do not block only because an OS pipe buffer filled.
+
+Prompt-cache policy events use `session.provider.cache.configured`. They record only provider, model, role, cache mode, cache-key hash, retention label, stable-prefix character count, and prompt character count. The companion `data/sessions/<run>/cache-manifest.ndjson` file repeats this non-secret metadata per API call so long sessions can be audited without scanning the full raw log. Cache hit/miss/read/create token counters appear in `session.agent.finished` when returned by the provider.
 
 Real editorial agent calls do not have an artificial timeout. Timeout is allowed only for short diagnostics and dependency probes. While a real editorial call is still running, the frontend emits `session.editorial.heartbeat` events so a log reader can distinguish normal long model latency from an app freeze.
 
@@ -70,6 +72,7 @@ Recommended editorial categories:
 - `session.editorial.started`
 - `session.editorial.heartbeat`
 - `session.agent.started`
+- `session.provider.cache.configured`
 - `session.agent.finished`
 - `session.editorial.completed`
 - `session.editorial.blocked`

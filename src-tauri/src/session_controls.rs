@@ -1,7 +1,9 @@
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{
-    editorial_agent_specs, resolve_initial_agent_key, sanitize_text, CostLedger, EditorialAgentSpec,
+    editorial_agent_specs, resolve_initial_agent_key, sanitize_text, CostLedger,
+    EditorialAgentSpec, ProviderCacheTelemetry,
 };
 
 const REVIEW_MAX_TOKENS: u64 = 4096;
@@ -18,6 +20,16 @@ pub(crate) struct ProviderCostGuard {
     pub(crate) max_session_cost_usd: Option<f64>,
     pub(crate) observed_cost_usd: f64,
     pub(crate) rates: ProviderCostRates,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProviderCachePlan {
+    pub(crate) provider_mode: String,
+    pub(crate) cache_key: String,
+    pub(crate) cache_key_hash: String,
+    pub(crate) cache_control_status: String,
+    pub(crate) cache_retention: Option<String>,
+    pub(crate) stable_prefix_chars: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,6 +218,105 @@ pub(crate) fn provider_cost_guard_for(
     })
 }
 
+fn sha256_hex(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+}
+
+fn openai_supports_extended_prompt_cache(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    model.starts_with("gpt-5.2")
+        || model.starts_with("gpt-5.1")
+        || model == "gpt-5"
+        || model.starts_with("gpt-5-codex")
+        || model.starts_with("gpt-4.1")
+}
+
+pub(crate) fn provider_cache_plan(
+    provider: &str,
+    model: &str,
+    role: &str,
+    agent_name: &str,
+    system_prompt: &str,
+) -> ProviderCachePlan {
+    let stable_prefix = format!("{provider}\n{model}\n{role}\n{agent_name}\n{system_prompt}");
+    let cache_key_hash = sha256_hex(&stable_prefix);
+    let cache_key = format!(
+        "maestro-{provider}-{role}-{}",
+        cache_key_hash.chars().take(32).collect::<String>()
+    );
+    let (provider_mode, cache_control_status, cache_retention) = match provider {
+        "openai" if openai_supports_extended_prompt_cache(model) => (
+            "prompt_cache_key".to_string(),
+            "prompt_cache_key_24h".to_string(),
+            Some("24h".to_string()),
+        ),
+        "openai" => (
+            "prompt_cache_key".to_string(),
+            "prompt_cache_key_default_retention".to_string(),
+            None,
+        ),
+        "anthropic" => (
+            "cache_control".to_string(),
+            "system_block_cache_control_5m".to_string(),
+            Some("5m".to_string()),
+        ),
+        "gemini" => (
+            "implicit_prefix".to_string(),
+            "implicit_cache_thinking_preserved".to_string(),
+            None,
+        ),
+        "deepseek" => (
+            "automatic_disk_prefix".to_string(),
+            "automatic_context_cache".to_string(),
+            None,
+        ),
+        "grok" => (
+            "prompt_cache_key".to_string(),
+            "prompt_cache_key".to_string(),
+            None,
+        ),
+        _ => (
+            "automatic_prefix".to_string(),
+            "automatic_or_unconfigured".to_string(),
+            None,
+        ),
+    };
+
+    ProviderCachePlan {
+        provider_mode,
+        cache_key,
+        cache_key_hash,
+        cache_control_status,
+        cache_retention,
+        stable_prefix_chars: stable_prefix.chars().count(),
+    }
+}
+
+pub(crate) fn provider_cache_telemetry_with_plan(
+    plan: &ProviderCachePlan,
+    observed: Option<ProviderCacheTelemetry>,
+) -> ProviderCacheTelemetry {
+    let mut cache = observed.unwrap_or_else(|| ProviderCacheTelemetry {
+        provider_mode: plan.provider_mode.clone(),
+        cache_key_hash: None,
+        cache_control_status: None,
+        cache_retention: None,
+        cached_input_tokens: None,
+        cache_hit_tokens: None,
+        cache_miss_tokens: None,
+        cache_read_input_tokens: None,
+        cache_creation_input_tokens: None,
+    });
+    cache.cache_key_hash = Some(plan.cache_key_hash.clone());
+    cache.cache_control_status = Some(plan.cache_control_status.clone());
+    cache.cache_retention = plan.cache_retention.clone();
+    cache
+}
+
 pub(crate) fn usage_tokens(parsed: &Value) -> (Option<u64>, Option<u64>) {
     let input = parsed
         .pointer("/usage/prompt_tokens")
@@ -218,12 +329,159 @@ pub(crate) fn usage_tokens(parsed: &Value) -> (Option<u64>, Option<u64>) {
     (input, output)
 }
 
+fn first_u64_at(value: &Value, pointers: &[&str]) -> Option<u64> {
+    pointers
+        .iter()
+        .find_map(|pointer| value.pointer(pointer).and_then(Value::as_u64))
+}
+
+fn cache_telemetry_if_present(cache: ProviderCacheTelemetry) -> Option<ProviderCacheTelemetry> {
+    if cache.cached_input_tokens.is_some()
+        || cache.cache_hit_tokens.is_some()
+        || cache.cache_miss_tokens.is_some()
+        || cache.cache_read_input_tokens.is_some()
+        || cache.cache_creation_input_tokens.is_some()
+    {
+        Some(cache)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn provider_cache_telemetry(
+    provider: &str,
+    parsed: &Value,
+    usage_input_tokens: Option<u64>,
+) -> Option<ProviderCacheTelemetry> {
+    match provider {
+        "openai" => {
+            let cached = first_u64_at(
+                parsed,
+                &[
+                    "/usage/input_tokens_details/cached_tokens",
+                    "/usage/prompt_tokens_details/cached_tokens",
+                ],
+            );
+            cache_telemetry_if_present(ProviderCacheTelemetry {
+                provider_mode: "automatic_prefix".to_string(),
+                cache_key_hash: None,
+                cache_control_status: None,
+                cache_retention: None,
+                cached_input_tokens: cached,
+                cache_hit_tokens: cached,
+                cache_miss_tokens: usage_input_tokens
+                    .zip(cached)
+                    .map(|(input, cached)| input.saturating_sub(cached)),
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+            })
+        }
+        "anthropic" => {
+            let read = parsed
+                .pointer("/usage/cache_read_input_tokens")
+                .and_then(Value::as_u64);
+            let creation = parsed
+                .pointer("/usage/cache_creation_input_tokens")
+                .and_then(Value::as_u64);
+            cache_telemetry_if_present(ProviderCacheTelemetry {
+                provider_mode: "cache_control".to_string(),
+                cache_key_hash: None,
+                cache_control_status: None,
+                cache_retention: None,
+                cached_input_tokens: read,
+                cache_hit_tokens: read,
+                cache_miss_tokens: None,
+                cache_read_input_tokens: read,
+                cache_creation_input_tokens: creation,
+            })
+        }
+        "gemini" => {
+            let cached = first_u64_at(
+                parsed,
+                &[
+                    "/usageMetadata/cachedContentTokenCount",
+                    "/usageMetadata/cacheTokenCount",
+                ],
+            );
+            cache_telemetry_if_present(ProviderCacheTelemetry {
+                provider_mode: "explicit_resource_or_implicit".to_string(),
+                cache_key_hash: None,
+                cache_control_status: None,
+                cache_retention: None,
+                cached_input_tokens: cached,
+                cache_hit_tokens: cached,
+                cache_miss_tokens: usage_input_tokens
+                    .zip(cached)
+                    .map(|(input, cached)| input.saturating_sub(cached)),
+                cache_read_input_tokens: cached,
+                cache_creation_input_tokens: None,
+            })
+        }
+        "deepseek" => {
+            let hit = parsed
+                .pointer("/usage/prompt_cache_hit_tokens")
+                .and_then(Value::as_u64);
+            let miss = parsed
+                .pointer("/usage/prompt_cache_miss_tokens")
+                .and_then(Value::as_u64);
+            cache_telemetry_if_present(ProviderCacheTelemetry {
+                provider_mode: "automatic_prefix".to_string(),
+                cache_key_hash: None,
+                cache_control_status: None,
+                cache_retention: None,
+                cached_input_tokens: hit,
+                cache_hit_tokens: hit,
+                cache_miss_tokens: miss,
+                cache_read_input_tokens: hit,
+                cache_creation_input_tokens: None,
+            })
+        }
+        "grok" => {
+            let cached = first_u64_at(
+                parsed,
+                &[
+                    "/usage/cached_prompt_text_tokens",
+                    "/usage/input_tokens_details/cached_tokens",
+                    "/usage/prompt_tokens_details/cached_tokens",
+                    "/usage/cached_tokens",
+                ],
+            );
+            let miss = first_u64_at(
+                parsed,
+                &[
+                    "/usage/prompt_cache_miss_tokens",
+                    "/usage/cache_miss_tokens",
+                ],
+            )
+            .or_else(|| {
+                usage_input_tokens
+                    .zip(cached)
+                    .map(|(input, cached)| input.saturating_sub(cached))
+            });
+            cache_telemetry_if_present(ProviderCacheTelemetry {
+                provider_mode: "automatic_prefix".to_string(),
+                cache_key_hash: None,
+                cache_control_status: None,
+                cache_retention: None,
+                cached_input_tokens: cached,
+                cache_hit_tokens: cached,
+                cache_miss_tokens: miss,
+                cache_read_input_tokens: cached,
+                cache_creation_input_tokens: None,
+            })
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        can_agent_review_current_draft, independent_review_agent_specs,
-        selected_review_agent_specs, ReviewPanelSelectionError,
+        can_agent_review_current_draft, independent_review_agent_specs, provider_cache_plan,
+        provider_cache_telemetry, provider_cache_telemetry_with_plan, selected_review_agent_specs,
+        ReviewPanelSelectionError,
     };
+    use serde_json::json;
 
     #[test]
     fn selected_review_agent_specs_excludes_current_draft_author() {
@@ -316,5 +574,130 @@ mod tests {
         let selected = independent_review_agent_specs("claude", &active, Some("claude")).unwrap();
 
         assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn provider_cache_telemetry_reads_openai_cached_tokens() {
+        let parsed = json!({
+            "usage": {
+                "input_tokens": 1200,
+                "output_tokens": 100,
+                "input_tokens_details": { "cached_tokens": 1024 }
+            }
+        });
+
+        let cache = provider_cache_telemetry("openai", &parsed, Some(1200)).unwrap();
+
+        assert_eq!(cache.provider_mode, "automatic_prefix");
+        assert_eq!(cache.cached_input_tokens, Some(1024));
+        assert_eq!(cache.cache_hit_tokens, Some(1024));
+        assert_eq!(cache.cache_miss_tokens, Some(176));
+    }
+
+    #[test]
+    fn provider_cache_telemetry_reads_anthropic_cache_usage() {
+        let parsed = json!({
+            "usage": {
+                "input_tokens": 20,
+                "output_tokens": 80,
+                "cache_creation_input_tokens": 4096,
+                "cache_read_input_tokens": 2048
+            }
+        });
+
+        let cache = provider_cache_telemetry("anthropic", &parsed, Some(20)).unwrap();
+
+        assert_eq!(cache.provider_mode, "cache_control");
+        assert_eq!(cache.cache_creation_input_tokens, Some(4096));
+        assert_eq!(cache.cache_read_input_tokens, Some(2048));
+        assert_eq!(cache.cached_input_tokens, Some(2048));
+    }
+
+    #[test]
+    fn provider_cache_telemetry_reads_deepseek_hit_and_miss_tokens() {
+        let parsed = json!({
+            "usage": {
+                "prompt_tokens": 2000,
+                "completion_tokens": 100,
+                "prompt_cache_hit_tokens": 1500,
+                "prompt_cache_miss_tokens": 500
+            }
+        });
+
+        let cache = provider_cache_telemetry("deepseek", &parsed, Some(2000)).unwrap();
+
+        assert_eq!(cache.provider_mode, "automatic_prefix");
+        assert_eq!(cache.cache_hit_tokens, Some(1500));
+        assert_eq!(cache.cache_miss_tokens, Some(500));
+    }
+
+    #[test]
+    fn provider_cache_plan_uses_extended_openai_retention_when_supported() {
+        let plan = provider_cache_plan("openai", "gpt-5.2", "draft", "Codex", "system");
+
+        assert_eq!(plan.provider_mode, "prompt_cache_key");
+        assert_eq!(plan.cache_control_status, "prompt_cache_key_24h");
+        assert_eq!(plan.cache_retention.as_deref(), Some("24h"));
+        assert!(plan.cache_key.starts_with("maestro-openai-draft-"));
+    }
+
+    #[test]
+    fn provider_cache_plan_omits_extended_openai_retention_for_unknown_future_models() {
+        let plan = provider_cache_plan("openai", "gpt-5.5", "draft", "Codex", "system");
+
+        assert_eq!(plan.provider_mode, "prompt_cache_key");
+        assert_eq!(
+            plan.cache_control_status,
+            "prompt_cache_key_default_retention"
+        );
+        assert_eq!(plan.cache_retention, None);
+    }
+
+    #[test]
+    fn provider_cache_telemetry_with_plan_attaches_nonsecret_cache_identity() {
+        let plan = provider_cache_plan("grok", "grok-4.3", "review", "Grok", "system");
+        let cache = provider_cache_telemetry_with_plan(&plan, None);
+
+        assert_eq!(cache.provider_mode, "prompt_cache_key");
+        assert_eq!(cache.cache_key_hash, Some(plan.cache_key_hash));
+        assert_eq!(
+            cache.cache_control_status.as_deref(),
+            Some("prompt_cache_key")
+        );
+        assert_eq!(cache.cached_input_tokens, None);
+    }
+
+    #[test]
+    fn provider_cache_telemetry_reads_gemini_cached_tokens() {
+        let parsed = json!({
+            "usageMetadata": {
+                "promptTokenCount": 4096,
+                "candidatesTokenCount": 200,
+                "cachedContentTokenCount": 2048
+            }
+        });
+
+        let cache = provider_cache_telemetry("gemini", &parsed, Some(4096)).unwrap();
+
+        assert_eq!(cache.provider_mode, "explicit_resource_or_implicit");
+        assert_eq!(cache.cache_hit_tokens, Some(2048));
+        assert_eq!(cache.cache_miss_tokens, Some(2048));
+    }
+
+    #[test]
+    fn provider_cache_telemetry_reads_grok_cached_tokens() {
+        let parsed = json!({
+            "usage": {
+                "input_tokens": 1200,
+                "output_tokens": 100,
+                "input_tokens_details": { "cached_tokens": 512 }
+            }
+        });
+
+        let cache = provider_cache_telemetry("grok", &parsed, Some(1200)).unwrap();
+
+        assert_eq!(cache.provider_mode, "automatic_prefix");
+        assert_eq!(cache.cache_hit_tokens, Some(512));
+        assert_eq!(cache.cache_miss_tokens, Some(688));
     }
 }

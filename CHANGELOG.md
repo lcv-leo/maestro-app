@@ -4,6 +4,24 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.19] - 2026-05-10
+### Added
+- **Provider prompt-cache policy** for direct API peers without changing model selection, thinking mode, editorial protocol, or unanimity semantics.
+- OpenAI/Codex and Grok/xAI direct Responses calls now send deterministic non-secret `prompt_cache_key` values.
+- OpenAI sends `prompt_cache_retention: "24h"` only for documented extended-retention model families; unknown future OpenAI model ids keep provider default retention.
+- Anthropic/Claude direct Messages calls now send the stable `system` text block with `cache_control: { "type": "ephemeral" }`, leaving variable user prompts unmarked.
+- DeepSeek and Gemini keep provider-side automatic/implicit cache behavior without invented request fields.
+- Successful API artifacts, `session.agent.finished`, `session.provider.cache.configured`, and per-session `cache-manifest.ndjson` now expose non-secret cache mode, cache-key hash, retention label, stable-prefix size, prompt size, and provider cache token counters when returned.
+
+### Validation
+- `cargo test --locked --lib -j 1 cache -- --nocapture`: 10 passed.
+- `cargo test --locked --lib -j 1 -- --nocapture`: 130 passed.
+- `npm run typecheck`: passed.
+- `npm run build`: passed once, with the pre-existing Vite large-chunk warning only.
+- `git diff --check`: passed, with CRLF normalization warnings only.
+- `cross-review-v2` session `dc5fe326-998a-4bfe-b84e-77f4f5ae725d`: Claude, Gemini, and Grok READY in round 1; outcome `converged` / `unanimous_ready`.
+- `src-tauri/target` removed after final validation per workspace directive.
+
 ## [v0.5.18] - 2026-05-09
 ### Alterado
 - **`site/index.html`** — iframe `github.com/sponsors/.../card` (caixa branca cross-origin) substituído por link card dark navy com ❤ pink + meta cyan + seta animada; card movido para DEPOIS dos botões (lcv.dev/sponsor primário, GitHub Sponsors alternativa). Companion ship Phase 3 (12 repos). Versão Tauri bumpada em 4 lugares (package.json + tauri.conf.json + Cargo.toml + Cargo.lock).

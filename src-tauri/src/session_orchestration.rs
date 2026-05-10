@@ -927,6 +927,7 @@ pub(crate) fn run_editorial_session_core(
                     usage_output_tokens: None,
                     cost_usd: None,
                     cost_estimated: None,
+                    cache: None,
                 });
                 round_results.push(result.clone());
                 append_agent_cost_to_ledger(

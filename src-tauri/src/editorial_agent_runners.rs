@@ -253,6 +253,7 @@ fn run_editorial_agent(
             usage_output_tokens: None,
             cost_usd: None,
             cost_estimated: None,
+            cache: None,
         };
         log_editorial_agent_finished(log_session, run_id, &result, None, None, None, false);
         return result;
@@ -396,6 +397,7 @@ fn run_editorial_agent(
                 usage_output_tokens: None,
                 cost_usd: None,
                 cost_estimated: None,
+                cache: None,
             };
             log_editorial_agent_finished(
                 log_session,
@@ -436,6 +438,7 @@ fn run_editorial_agent(
                 usage_output_tokens: None,
                 cost_usd: None,
                 cost_estimated: None,
+                cache: None,
             };
             log_editorial_agent_finished(
                 log_session,

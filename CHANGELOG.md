@@ -4,6 +4,18 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+### Hardened
+- Scoped GitHub Actions token permissions for Scorecard, release publishing, and Dependabot automerge so workflows default to read-only permissions and request write scopes only in the jobs that need them.
+- Expanded `SECURITY.md` with a concrete private vulnerability reporting path, expected report contents, and a 7-day acknowledgement target.
+- Added `src-tauri/osv-scanner.toml` to document and time-bound OSV exceptions for Scorecard advisories that come from Tauri/Wry cross-platform GTK/unic lockfile dependencies, including evidence that the GTK/glib chain is not present in the shipped Windows target dependency tree.
+
+### Validation
+- Confirmed the 11 open Code Scanning alerts are all OpenSSF Scorecard SARIF alerts, not CodeQL findings.
+- `cargo audit` reported `vulnerabilities.found=false`; the Scorecard `VulnerabilitiesID` alert maps to 14 unmaintained warnings plus 1 `glib` unsound warning in transitive Rust dependencies.
+- `cargo tree --locked --target x86_64-pc-windows-msvc -i gtk` and `-i glib`: no dependency path printed for the shipped Windows target.
+- `npx prettier --check .github/workflows/scorecard.yml .github/workflows/release.yml .github/workflows/dependabot-automerge.yml SECURITY.md`: passed.
+- `src-tauri/osv-scanner.toml` parsed successfully with 15 ignored advisory entries.
+
 ## [v0.5.26] - 2026-05-11
 ### Hardened
 - Added atomic temp-file write/flush/rename behavior to editorial artifacts, local JSON configuration writes, and binary evidence attachments, reducing the risk of truncated session files after crashes or interrupted writes.

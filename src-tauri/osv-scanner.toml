@@ -1,0 +1,82 @@
+# OSV Scanner exceptions for advisories reported from Cargo.lock.
+#
+# Maestro currently ships a Windows portable bundle. The GTK3/glib advisories
+# below are Tauri/Wry cross-platform Linux GTK dependencies recorded in the
+# lockfile; `cargo tree --target x86_64-pc-windows-msvc -i gtk` and `-i glib`
+# do not resolve them for the shipped target. Revisit before adding Linux
+# bundles or when upstream Tauri/Wry moves this stack.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0411"
+ignoreUntil = 2026-08-09
+reason = "Tauri/Wry Linux GTK dependency not present in the shipped Windows target dependency tree."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0412"
+ignoreUntil = 2026-08-09
+reason = "Tauri/Wry Linux GTK dependency not present in the shipped Windows target dependency tree."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0413"
+ignoreUntil = 2026-08-09
+reason = "Tauri/Wry Linux GTK dependency not present in the shipped Windows target dependency tree."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0415"
+ignoreUntil = 2026-08-09
+reason = "Tauri/Wry Linux GTK dependency not present in the shipped Windows target dependency tree."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0416"
+ignoreUntil = 2026-08-09
+reason = "Tauri/Wry Linux GTK dependency not present in the shipped Windows target dependency tree."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0418"
+ignoreUntil = 2026-08-09
+reason = "Tauri/Wry Linux GTK dependency not present in the shipped Windows target dependency tree."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0419"
+ignoreUntil = 2026-08-09
+reason = "Tauri/Wry Linux GTK dependency not present in the shipped Windows target dependency tree."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0420"
+ignoreUntil = 2026-08-09
+reason = "Tauri/Wry Linux GTK dependency not present in the shipped Windows target dependency tree."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0429"
+ignoreUntil = 2026-08-09
+reason = "glib is a Linux GTK transitive dependency in Tauri/Wry and is not present in the shipped Windows target dependency tree."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0370"
+ignoreUntil = 2026-08-09
+reason = "proc-macro-error is pulled through the Linux GTK macro stack; no patched upstream path is available in the current Tauri/Wry graph."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0075"
+ignoreUntil = 2026-08-09
+reason = "Unmaintained rust-unic crate reported through Tauri urlpattern; no active vulnerability or patched upstream replacement is available."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0080"
+ignoreUntil = 2026-08-09
+reason = "Unmaintained rust-unic crate reported through Tauri urlpattern; no active vulnerability or patched upstream replacement is available."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0081"
+ignoreUntil = 2026-08-09
+reason = "Unmaintained rust-unic crate reported through Tauri urlpattern; no active vulnerability or patched upstream replacement is available."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0098"
+ignoreUntil = 2026-08-09
+reason = "Unmaintained rust-unic crate reported through Tauri urlpattern; no active vulnerability or patched upstream replacement is available."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0100"
+ignoreUntil = 2026-08-09
+reason = "Unmaintained rust-unic crate reported through Tauri urlpattern; no active vulnerability or patched upstream replacement is available."

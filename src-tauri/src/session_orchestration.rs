@@ -67,7 +67,6 @@ use crate::session_persistence::{
 };
 use crate::session_resume::{parse_created_at, remaining_session_duration, session_time_exhausted};
 use crate::tauri_commands::read_ai_provider_config;
-#[cfg(test)]
 use crate::EditorialAgentResult;
 use crate::{
     api_input_estimate_chars, sanitize_text, AiProviderConfig, EditorialSessionRequest,
@@ -851,7 +850,7 @@ pub(crate) fn run_editorial_session_core(
             ));
         }
 
-        if spec.key == draft_author_key && !(closing_turn && !round_had_substantive_change) {
+        if (round_had_substantive_change || !closing_turn) && spec.key == draft_author_key {
             let _ = write_log_record(
                 log_session,
                 LogEventInput {

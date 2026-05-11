@@ -12,10 +12,7 @@ on:
         required: true
         type: string
 permissions:
-  contents: write
-  packages: write
-  attestations: write
-  id-token: write
+  contents: read
 env:
   NODE_VERSION: 24
 concurrency:
@@ -144,6 +141,10 @@ jobs:
   build-windows-portable:
     name: Build Windows portable bundle
     runs-on: windows-latest
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
     needs:
       - prepare-release
       - release-gates
@@ -230,6 +231,8 @@ jobs:
   publish-github-release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     needs:
       - prepare-release
       - build-windows-portable
@@ -333,6 +336,9 @@ jobs:
   publish-github-package:
     name: Publish GitHub Package
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     needs:
       - prepare-release
       - publish-github-release

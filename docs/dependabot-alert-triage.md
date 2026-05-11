@@ -43,6 +43,25 @@ Scope: `src-tauri/Cargo.lock`.
   - `wry`
 - This removes unnecessary X11 crates from the lockfile and keeps the supported build surface aligned with Windows 11+.
 
+## Scorecard / OSV Scanner Triage
+
+OpenSSF Scorecard SARIF can report RustSec/OSV advisories from every package recorded in `src-tauri/Cargo.lock`, including cross-platform dependencies that do not resolve for the shipped Windows target.
+
+The current Scorecard `VulnerabilitiesID` alert maps to `cargo audit` warnings, not active cargo-audit vulnerabilities:
+
+- `cargo audit --json`: `vulnerabilities.found=false`.
+- Warning shape: 14 `unmaintained` advisories plus 1 `unsound` advisory.
+- GTK/glib evidence: `cargo tree --locked --target x86_64-pc-windows-msvc -i gtk` and `cargo tree --locked --target x86_64-pc-windows-msvc -i glib` print no dependency path.
+- Cross-platform evidence: `cargo tree --locked --target all -i gtk` and `cargo tree --locked --target all -i glib` show the Linux GTK/WebKit path through Tauri/Wry.
+
+`src-tauri/osv-scanner.toml` records the current OSV exceptions with explicit reasons and `ignoreUntil = 2026-08-09`, forcing a 90-day review window:
+
+- GTK3 / glib stack: `RUSTSEC-2024-0411`, `RUSTSEC-2024-0412`, `RUSTSEC-2024-0413`, `RUSTSEC-2024-0415`, `RUSTSEC-2024-0416`, `RUSTSEC-2024-0418`, `RUSTSEC-2024-0419`, `RUSTSEC-2024-0420`, `RUSTSEC-2024-0429`.
+- GTK macro transitives: `RUSTSEC-2024-0370`.
+- Tauri/urlpattern rust-unic transitives: `RUSTSEC-2025-0075`, `RUSTSEC-2025-0080`, `RUSTSEC-2025-0081`, `RUSTSEC-2025-0098`, `RUSTSEC-2025-0100`.
+
+Do not remove these exceptions without either upgrading the upstream Tauri/Wry graph or adding a supported Linux build target and re-triaging the GTK/WebKit runtime surface.
+
 ## Follow-up Policy
 
 - Keep Dependabot Cargo updates enabled for `/src-tauri`.

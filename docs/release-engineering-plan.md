@@ -8,7 +8,8 @@ Target platform: Windows 11+.
 Maestro is developed as if these GitHub features are already active:
 
 - Secret Scanning.
-- Code Scanning with GitHub CodeQL Default Setup only.
+- Code Scanning with GitHub CodeQL Default Setup.
+- OpenSSF Scorecard SARIF upload for repository posture signals.
 - Dependabot alerts.
 - Dependabot version updates.
 - Private vulnerability reporting.
@@ -69,6 +70,12 @@ GitHub Pages uses the modern GitHub Actions source, not the legacy `gh-pages` br
 ## CodeQL Mode
 
 CodeQL must stay on GitHub Default Setup. Advanced Setup is prohibited unless the operator first approves a written technical justification.
+
+OpenSSF Scorecard is a separate repository-posture scanner. Its alerts must be triaged by rule:
+
+- workflow permission findings should be fixed in YAML;
+- dependency findings that come from target-inactive transitive lockfile entries should be documented in `docs/dependabot-alert-triage.md` and, when OSV supports it, in an adjacent scanner config;
+- organizational signals such as branch-protection tier, human code-review ratio, fuzzing integration, and OpenSSF Best Practices badge require an explicit policy decision before changing repository rules or dismissing alerts.
 
 ## Pre-Public Audit
 

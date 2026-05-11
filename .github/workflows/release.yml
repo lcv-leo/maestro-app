@@ -93,10 +93,50 @@ jobs:
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "should_release=${should_release}" >> "$GITHUB_OUTPUT"
     timeout-minutes: 60
+  release-gates:
+    name: Release gates
+    runs-on: windows-latest
+    needs: prepare-release
+    if: needs.prepare-release.outputs.should_release == 'true'
+    steps:
+      - name: Checkout release ref
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Setup Rust stable
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+      - name: Install dependencies
+        run: npm ci
+      - name: npm audit
+        run: npm audit --audit-level=moderate
+      - name: Frontend tests
+        run: npm test
+      - name: Build frontend
+        run: npm run build
+      - name: cargo check --locked
+        working-directory: src-tauri
+        run: cargo check --locked --all-targets
+      - name: cargo test --locked
+        working-directory: src-tauri
+        run: cargo test --locked
+      - name: cargo clippy --locked
+        working-directory: src-tauri
+        run: cargo clippy --locked --no-deps --all-targets
+    timeout-minutes: 30
   build-windows-portable:
     name: Build Windows portable bundle
     runs-on: windows-latest
-    needs: prepare-release
+    needs:
+      - prepare-release
+      - release-gates
     if: needs.prepare-release.outputs.should_release == 'true'
     env:
       RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}

@@ -3,8 +3,29 @@
 All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
+### Hardened
+- Added atomic temp-file write/flush/rename behavior to editorial artifacts, local JSON configuration writes, and binary evidence attachments, reducing the risk of truncated session files after crashes or interrupted writes.
+- Classified provider HTTP failures by operational class (`AUTH`, `PERMISSION`, `RATE_LIMIT`, `SERVER`, etc.) and stripped request URLs from provider, Cloudflare, AI probe, and link-audit network errors before surfacing them.
+- Added observable partial-failure reporting and a final consistency check to Cloudflare Secrets Store provider-key upserts.
+- Strengthened CI/release gates: CI now runs `npm audit --audit-level=moderate`, frontend tests, and full Rust tests, while release builds must pass their own frontend/Rust gates before producing the Windows portable bundle.
+### Added
+- Added a Vitest/jsdom frontend smoke-test foundation for Markdown import sanitization and React render-error containment.
+### Removed
+- Removed the unused `sanitize-html` dependency; runtime sanitization remains on `dompurify`.
+### Validation
+- `npm audit --audit-level=moderate`: 0 vulnerabilities.
+- `npm test`: 2 files / 2 tests passed.
+- `cargo check --locked --all-targets`: passed with existing dead-code warnings in legacy review-panel helpers.
+- `cargo test --locked`: 159 tests passed.
+- `cargo clippy --locked --no-deps --all-targets`: passed with existing warning debt.
+- `npm run build`: passed; Vite retained the known large PostEditor chunk warning.
+- `cross-review-v2` session `36d25202-c41f-4766-98e7-143908e1552e`: max-rounds after peers correctly requested diff-level evidence for the atomic-write, Cloudflare upsert, and release-gate hunks.
+- `cross-review-v2` session `4f6c2ecb-4730-4f73-9a01-8030c4a2d0e9`: converged in one direct evidence-backed peer round; Claude, Gemini, DeepSeek, and Grok all returned `READY`.
 
 ## [v0.5.25] - 2026-05-11
+### Operational milestone
+- **First observed operationally stable editorial release.** Post-release runtime evidence from session `run-2026-05-11T01-09-30-556Z` confirms Maestro `0.5.25` resumed a real API-mode session with Claude, Codex, Gemini, DeepSeek, and Grok, completed as `READY_UNANIMOUS`, and wrote a clean `texto-final.md` without internal protocol markers. This makes `v0.5.25` the first documented Maestro release validated by an end-to-end unanimous editorial delivery.
+
 ### Fixed
 - **Autonomous serial reviewer redraw.** The circular scheduler no longer pauses with `PAUSED_SELF_REVIEW_BLOCKED` when the nominal next reviewer is also the current text author. It now autonomously redraws an eligible independent pending reviewer, preserving the hard no-self-review rule while keeping the session moving.
 - **Closing-turn guard.** The original redactor cannot receive the closing turn until the independent reviewers for the current version have approved it, so a round cannot shortcut the full editorial circuit.

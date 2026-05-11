@@ -10,7 +10,8 @@ use std::{
 
 use crate::link_audit::is_public_http_url;
 use crate::{
-    checked_data_child_path, sanitize_path_segment, sanitize_text, write_text_file, SessionContract,
+    checked_data_child_path, sanitize_path_segment, sanitize_text, write_binary_file,
+    write_text_file, SessionContract,
 };
 
 const ATTACHMENT_MAX_FILES: usize = 8;
@@ -175,7 +176,8 @@ pub(crate) fn persist_session_attachments(
 
         let file_name = attachment_file_name(index, &original_name);
         let path = attachment_dir.join(&file_name);
-        fs::write(&path, &data).map_err(|error| format!("failed to write attachment: {error}"))?;
+        write_binary_file(&path, &data)
+            .map_err(|error| format!("failed to write attachment: {error}"))?;
         let sha256 = sha256_hex(&data);
         let media_type = item
             .media_type

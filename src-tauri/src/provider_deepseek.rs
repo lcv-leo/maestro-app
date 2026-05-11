@@ -25,7 +25,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::logging::{write_log_record, LogEventInput, LogSession};
 use crate::provider_retry::{
-    build_api_client_async, send_with_retry_async, ProviderRequestOutcome,
+    build_api_client_async, provider_http_error_status, provider_reqwest_error_status,
+    send_with_retry_async, ProviderRequestOutcome,
 };
 use crate::provider_runners::{
     editorial_api_system_prompt, log_provider_cache_configured, provider_cache_artifact_lines,
@@ -170,7 +171,7 @@ pub(crate) async fn run_deepseek_api_agent(
     let blocking_client = match blocking_builder.build() {
         Ok(client) => client,
         Err(error) => {
-            let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
+            let status = provider_reqwest_error_status("CLIENT_ERROR", error);
             return write_deepseek_error_result(
                 log_session,
                 run_id,
@@ -185,7 +186,7 @@ pub(crate) async fn run_deepseek_api_agent(
     let async_client = match build_api_client_async(timeout) {
         Ok(client) => client,
         Err(error) => {
-            let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
+            let status = provider_reqwest_error_status("CLIENT_ERROR", error);
             return write_deepseek_error_result(
                 log_session,
                 run_id,
@@ -272,7 +273,7 @@ pub(crate) async fn run_deepseek_api_agent(
             );
         }
         Err(ProviderRequestOutcome::Network(error)) => {
-            let status = sanitize_text(&format!("PROVIDER_NETWORK_ERROR: {error}"), 240);
+            let status = provider_reqwest_error_status("PROVIDER_NETWORK_ERROR", error);
             return write_deepseek_error_result(
                 log_session,
                 run_id,
@@ -304,14 +305,8 @@ pub(crate) async fn run_deepseek_api_agent(
 
     {
         if !http_status.is_success() {
-            let status = sanitize_text(
-                &format!(
-                    "PROVIDER_ERROR_HTTP_{}: {}",
-                    http_status.as_u16(),
-                    api_error_message(&body_text)
-                ),
-                240,
-            );
+            let status =
+                provider_http_error_status(http_status.as_u16(), &api_error_message(&body_text));
             return write_deepseek_error_result(
                 log_session,
                 run_id,

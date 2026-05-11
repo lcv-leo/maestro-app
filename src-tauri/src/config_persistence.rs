@@ -45,12 +45,10 @@
 // SQL string, and Cloudflare endpoint is identical to the v0.3.40 lib.rs
 // source (commit 254e5a3).
 
-use std::fs;
 use std::path::Path;
 
 use serde_json::{json, Value};
 
-use crate::app_paths::checked_data_child_path;
 use crate::cloudflare::{
     ai_provider_secret_values, cloudflare_client, cloudflare_get, cloudflare_post_json,
     cloudflare_result_id_for_name, cloudflare_token_from_provider_request,
@@ -58,36 +56,28 @@ use crate::cloudflare::{
     write_ai_provider_metadata_to_cloudflare,
 };
 use crate::{
-    sanitize_ai_provider_config, sanitize_short, AiProviderConfig, BootstrapConfig,
-    CloudflareProviderStorageRequest,
+    sanitize_ai_provider_config, sanitize_short, write_text_file, AiProviderConfig,
+    BootstrapConfig, CloudflareProviderStorageRequest,
 };
 
 pub(crate) fn persist_bootstrap_config(
     path: &Path,
     config: &BootstrapConfig,
 ) -> Result<(), String> {
-    let path = checked_data_child_path(path)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create config dir: {error}"))?;
-    }
-    let bytes = serde_json::to_vec_pretty(config)
+    let text = serde_json::to_string_pretty(config)
         .map_err(|error| format!("failed to serialize bootstrap config: {error}"))?;
-    fs::write(&path, bytes).map_err(|error| format!("failed to write bootstrap config: {error}"))
+    write_text_file(path, &text)
+        .map_err(|error| format!("failed to write bootstrap config: {error}"))
 }
 
 pub(crate) fn persist_ai_provider_config(
     path: &Path,
     config: &AiProviderConfig,
 ) -> Result<(), String> {
-    let path = checked_data_child_path(path)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create config dir: {error}"))?;
-    }
-    let bytes = serde_json::to_vec_pretty(config)
+    let text = serde_json::to_string_pretty(config)
         .map_err(|error| format!("failed to serialize AI provider config: {error}"))?;
-    fs::write(&path, bytes).map_err(|error| format!("failed to write AI provider config: {error}"))
+    write_text_file(path, &text)
+        .map_err(|error| format!("failed to write AI provider config: {error}"))
 }
 
 pub(crate) fn persist_ai_provider_cloudflare_marker(

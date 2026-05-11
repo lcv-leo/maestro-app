@@ -49,7 +49,7 @@ pub(crate) fn run_ai_provider_probe(config: &AiProviderConfig) -> AiProviderProb
             return AiProviderProbeResult {
                 rows: vec![ai_probe_row(
                     "APIs",
-                    format!("cliente HTTP falhou: {error}"),
+                    format!("cliente HTTP falhou: {}", error.without_url()),
                     "error",
                 )],
                 checked_at: Utc::now().to_rfc3339(),

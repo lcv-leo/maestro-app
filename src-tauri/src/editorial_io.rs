@@ -27,9 +27,11 @@
 //     with sanitize_text 180-char cap fallback).
 
 use serde_json::{json, Value};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::app_paths::{app_root, checked_data_child_path};
 use crate::command_spawn::CommandProgressContext;
@@ -44,7 +46,70 @@ pub(crate) fn write_text_file(path: &Path, text: &str) -> Result<(), String> {
         fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create artifact dir: {error}"))?;
     }
-    fs::write(&path, text).map_err(|error| format!("failed to write artifact: {error}"))
+    atomic_write_file(&path, text.as_bytes())
+}
+
+pub(crate) fn write_binary_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let path = checked_data_child_path(path)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create artifact dir: {error}"))?;
+    }
+    atomic_write_file(&path, bytes)
+}
+
+fn atomic_write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "artifact path has no parent directory".to_string())?;
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "artifact path has no UTF-8 file name".to_string())?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or_default();
+    let tmp_path = parent.join(format!(".{file_name}.{}.{}.tmp", std::process::id(), nonce));
+
+    let write_result = (|| -> Result<(), String> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+            .map_err(|error| format!("failed to create temporary artifact: {error}"))?;
+        file.write_all(bytes)
+            .map_err(|error| format!("failed to write temporary artifact: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("failed to flush temporary artifact: {error}"))?;
+        Ok(())
+    })();
+
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error);
+    }
+
+    let mut last_error = None;
+    for attempt in 0..5 {
+        match fs::rename(&tmp_path, path) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < 4 {
+                    thread::sleep(Duration::from_millis(25 * (attempt + 1)));
+                }
+            }
+        }
+    }
+
+    let _ = fs::remove_file(&tmp_path);
+    Err(format!(
+        "failed to replace artifact atomically: {}",
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "unknown rename error".to_string())
+    ))
 }
 
 pub(crate) fn read_text_file(path: &Path) -> Result<String, String> {
@@ -322,7 +387,11 @@ pub(crate) fn api_error_message(body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{strip_leading_maestro_status, strip_process_management_noise};
+    use super::{
+        read_text_file, strip_leading_maestro_status, strip_process_management_noise,
+        write_binary_file, write_text_file,
+    };
+    use crate::app_paths::data_dir;
 
     #[test]
     fn strip_leading_maestro_status_removes_ready_marker_from_final_text() {
@@ -358,5 +427,31 @@ mod tests {
     fn strip_process_management_noise_preserves_body_mentions() {
         let output = "# Titulo\n\nSUCCESS: The process is described in the article.";
         assert_eq!(strip_process_management_noise(output), output);
+    }
+
+    #[test]
+    fn write_text_file_replaces_artifact_atomically() {
+        let path = data_dir()
+            .join("editorial-io-tests")
+            .join("atomic-text.txt");
+        let _ = std::fs::remove_file(&path);
+
+        write_text_file(&path, "first").unwrap();
+        write_text_file(&path, "second").unwrap();
+
+        assert_eq!(read_text_file(&path).unwrap(), "second");
+    }
+
+    #[test]
+    fn write_binary_file_persists_attachment_bytes() {
+        let path = data_dir()
+            .join("editorial-io-tests")
+            .join("atomic-binary.bin");
+        let _ = std::fs::remove_file(&path);
+
+        write_binary_file(&path, b"\x00maestro\xff").unwrap();
+
+        let checked = crate::app_paths::checked_data_child_path(&path).unwrap();
+        assert_eq!(std::fs::read(checked).unwrap(), b"\x00maestro\xff");
     }
 }

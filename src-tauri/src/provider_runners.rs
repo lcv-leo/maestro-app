@@ -47,7 +47,8 @@ use tokio_util::sync::CancellationToken;
 use crate::app_paths::checked_data_child_path;
 use crate::logging::{write_log_record, LogEventInput, LogSession};
 use crate::provider_retry::{
-    build_api_client, build_api_client_async, send_with_retry_async, ProviderRequestOutcome,
+    build_api_client, build_api_client_async, provider_http_error_status,
+    provider_reqwest_error_status, send_with_retry_async, ProviderRequestOutcome,
 };
 use crate::session_controls::{
     api_role_max_tokens, estimate_provider_cost_from_input_chars, provider_cache_plan,
@@ -547,7 +548,7 @@ pub(crate) async fn run_openai_api_agent(
     let blocking_client = match build_api_client(timeout) {
         Ok(client) => client,
         Err(error) => {
-            let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
+            let status = provider_reqwest_error_status("CLIENT_ERROR", error);
             return write_provider_error_result(
                 &invocation,
                 model_hint,
@@ -559,7 +560,7 @@ pub(crate) async fn run_openai_api_agent(
     let async_client = match build_api_client_async(timeout) {
         Ok(client) => client,
         Err(error) => {
-            let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
+            let status = provider_reqwest_error_status("CLIENT_ERROR", error);
             return write_provider_error_result(
                 &invocation,
                 model_hint,
@@ -640,7 +641,7 @@ pub(crate) async fn run_openai_api_agent(
                 );
             }
             Err(ProviderRequestOutcome::Network(error)) => {
-                let status = sanitize_text(&format!("PROVIDER_NETWORK_ERROR: {error}"), 240);
+                let status = provider_reqwest_error_status("PROVIDER_NETWORK_ERROR", error);
                 return write_provider_error_result(
                     &invocation,
                     &model,
@@ -668,14 +669,8 @@ pub(crate) async fn run_openai_api_agent(
     };
 
     if !http_status.is_success() {
-        let status = sanitize_text(
-            &format!(
-                "PROVIDER_ERROR_HTTP_{}: {}",
-                http_status.as_u16(),
-                api_error_message(&body_text)
-            ),
-            240,
-        );
+        let status =
+            provider_http_error_status(http_status.as_u16(), &api_error_message(&body_text));
         return write_provider_error_result(
             &invocation,
             &model,
@@ -776,7 +771,7 @@ pub(crate) async fn run_anthropic_api_agent(
     let blocking_client = match build_api_client(timeout) {
         Ok(client) => client,
         Err(error) => {
-            let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
+            let status = provider_reqwest_error_status("CLIENT_ERROR", error);
             return write_provider_error_result(
                 &invocation,
                 model_hint,
@@ -788,7 +783,7 @@ pub(crate) async fn run_anthropic_api_agent(
     let async_client = match build_api_client_async(timeout) {
         Ok(client) => client,
         Err(error) => {
-            let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
+            let status = provider_reqwest_error_status("CLIENT_ERROR", error);
             return write_provider_error_result(
                 &invocation,
                 model_hint,
@@ -873,7 +868,7 @@ pub(crate) async fn run_anthropic_api_agent(
             );
         }
         Err(ProviderRequestOutcome::Network(error)) => {
-            let status = sanitize_text(&format!("PROVIDER_NETWORK_ERROR: {error}"), 240);
+            let status = provider_reqwest_error_status("PROVIDER_NETWORK_ERROR", error);
             return write_provider_error_result(
                 &invocation,
                 &model,
@@ -901,14 +896,8 @@ pub(crate) async fn run_anthropic_api_agent(
     };
 
     if !http_status.is_success() {
-        let status = sanitize_text(
-            &format!(
-                "PROVIDER_ERROR_HTTP_{}: {}",
-                http_status.as_u16(),
-                api_error_message(&body_text)
-            ),
-            240,
-        );
+        let status =
+            provider_http_error_status(http_status.as_u16(), &api_error_message(&body_text));
         return write_provider_error_result(
             &invocation,
             &model,
@@ -1009,7 +998,7 @@ pub(crate) async fn run_gemini_api_agent(
     let blocking_client = match build_api_client(timeout) {
         Ok(client) => client,
         Err(error) => {
-            let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
+            let status = provider_reqwest_error_status("CLIENT_ERROR", error);
             return write_provider_error_result(
                 &invocation,
                 model_hint,
@@ -1021,7 +1010,7 @@ pub(crate) async fn run_gemini_api_agent(
     let async_client = match build_api_client_async(timeout) {
         Ok(client) => client,
         Err(error) => {
-            let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
+            let status = provider_reqwest_error_status("CLIENT_ERROR", error);
             return write_provider_error_result(
                 &invocation,
                 model_hint,
@@ -1106,7 +1095,7 @@ pub(crate) async fn run_gemini_api_agent(
                 );
             }
             Err(ProviderRequestOutcome::Network(error)) => {
-                let status = sanitize_text(&format!("PROVIDER_NETWORK_ERROR: {error}"), 240);
+                let status = provider_reqwest_error_status("PROVIDER_NETWORK_ERROR", error);
                 return write_provider_error_result(
                     &invocation,
                     &model,
@@ -1134,14 +1123,8 @@ pub(crate) async fn run_gemini_api_agent(
     };
 
     if !http_status.is_success() {
-        let status = sanitize_text(
-            &format!(
-                "PROVIDER_ERROR_HTTP_{}: {}",
-                http_status.as_u16(),
-                api_error_message(&body_text)
-            ),
-            240,
-        );
+        let status =
+            provider_http_error_status(http_status.as_u16(), &api_error_message(&body_text));
         return write_provider_error_result(
             &invocation,
             &model,

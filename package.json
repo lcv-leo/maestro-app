@@ -10,6 +10,7 @@
     "preview": "vite preview --host 127.0.0.1 --port 4173",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "format:public": "prettier --write \"**/index.html\"",
     "format:public:check": "prettier --check \"**/index.html\""
@@ -19,12 +20,16 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "6.0.1",
+    "jsdom": "^29.1.1",
+    "prettier": "^3.8.3",
     "typescript": "6.0.3",
     "vite": "8.0.12",
-    "prettier": "^3.8.3"
+    "vitest": "^4.1.5"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.0",
@@ -67,7 +72,6 @@
     "marked": "18.0.3",
     "react": "19.2.6",
     "react-dom": "19.2.6",
-    "sanitize-html": "2.17.3",
     "tiptap-markdown": "0.9.0"
   }
 }

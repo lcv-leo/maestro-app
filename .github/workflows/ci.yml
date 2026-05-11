@@ -20,6 +20,10 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
+      - name: npm audit
+        run: npm audit --audit-level=moderate
+      - name: Frontend tests
+        run: npm test
       - name: Build frontend
         run: npm run build
       - name: Verify private protocol artifacts are absent
@@ -62,7 +66,7 @@ jobs:
         run: cargo check --locked --all-targets
       - name: cargo test --locked
         working-directory: src-tauri
-        run: cargo test --locked --lib
+        run: cargo test --locked
       - name: cargo clippy --locked
         working-directory: src-tauri
         run: cargo clippy --locked --no-deps --all-targets

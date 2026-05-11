@@ -12,7 +12,8 @@ use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
 use crate::provider_retry::{
-    build_api_client, build_api_client_async, send_with_retry_async, ProviderRequestOutcome,
+    build_api_client, build_api_client_async, provider_http_error_status,
+    provider_reqwest_error_status, send_with_retry_async, ProviderRequestOutcome,
 };
 use crate::provider_runners::{
     api_cost_preflight_result, editorial_api_system_prompt, log_provider_api_started,
@@ -26,7 +27,7 @@ use crate::session_controls::{
 };
 use crate::{
     api_error_message, api_input_estimate_chars, first_env_value, provider_key_for_agent,
-    provider_remote_present, sanitize_short, sanitize_text,
+    provider_remote_present, sanitize_short,
 };
 
 const GROK_ENDPOINT: &str = "https://api.x.ai/v1/responses";
@@ -85,7 +86,7 @@ pub(crate) async fn run_grok_api_agent(
     let blocking_client = match build_api_client(timeout) {
         Ok(client) => client,
         Err(error) => {
-            let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
+            let status = provider_reqwest_error_status("CLIENT_ERROR", error);
             return write_provider_error_result(
                 &invocation,
                 &model_hint,
@@ -97,7 +98,7 @@ pub(crate) async fn run_grok_api_agent(
     let async_client = match build_api_client_async(timeout) {
         Ok(client) => client,
         Err(error) => {
-            let status = sanitize_text(&format!("CLIENT_ERROR: {error}"), 240);
+            let status = provider_reqwest_error_status("CLIENT_ERROR", error);
             return write_provider_error_result(
                 &invocation,
                 &model_hint,
@@ -164,7 +165,7 @@ pub(crate) async fn run_grok_api_agent(
                 );
             }
             Err(ProviderRequestOutcome::Network(error)) => {
-                let status = sanitize_text(&format!("PROVIDER_NETWORK_ERROR: {error}"), 240);
+                let status = provider_reqwest_error_status("PROVIDER_NETWORK_ERROR", error);
                 return write_provider_error_result(
                     &invocation,
                     &model,
@@ -192,14 +193,8 @@ pub(crate) async fn run_grok_api_agent(
     };
 
     if !http_status.is_success() {
-        let status = sanitize_text(
-            &format!(
-                "PROVIDER_ERROR_HTTP_{}: {}",
-                http_status.as_u16(),
-                api_error_message(&body_text)
-            ),
-            240,
-        );
+        let status =
+            provider_http_error_status(http_status.as_u16(), &api_error_message(&body_text));
         return write_provider_error_result(
             &invocation,
             &model,

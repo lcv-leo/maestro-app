@@ -61,7 +61,7 @@ pub(crate) fn run_link_audit(text: &str) -> LinkAuditResult {
                 failed: candidates.len(),
                 rows: vec![link_audit_row(
                     "http-client",
-                    format!("cliente HTTP falhou: {error}"),
+                    format!("cliente HTTP falhou: {}", error.without_url()),
                     "error",
                 )],
             };
@@ -271,7 +271,7 @@ fn probe_public_url_with_get(client: &Client, url: &str) -> LinkAuditRow {
                 "warn"
             },
         ),
-        Err(error) => link_audit_row(url, format!("falha HTTP: {error}"), "error"),
+        Err(error) => link_audit_row(url, format!("falha HTTP: {}", error.without_url()), "error"),
     }
 }
 

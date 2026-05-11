@@ -628,7 +628,7 @@ pub(crate) use crate::editorial_io::{
     api_error_message, command_working_dir_for_output, extract_maestro_status,
     extract_stdout_block, extract_tagged_block, log_editorial_agent_finished,
     log_editorial_agent_running, log_editorial_agent_spawned, read_text_file,
-    strip_process_management_noise, write_text_file,
+    strip_process_management_noise, write_binary_file, write_text_file,
 };
 
 #[derive(Clone)]

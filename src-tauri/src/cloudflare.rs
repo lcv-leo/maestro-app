@@ -137,7 +137,7 @@ pub(crate) fn run_cloudflare_probe(request: &CloudflareProbeRequest) -> Cloudfla
                 rows: vec![
                     probe_row(
                         "Token ativo",
-                        format!("cliente HTTP falhou: {error}"),
+                        format!("cliente HTTP falhou: {}", error.without_url()),
                         "error",
                     ),
                     probe_row("Conta acessivel", "nao executado", "blocked"),
@@ -381,11 +381,11 @@ pub(crate) fn cloudflare_get(client: &Client, token: &str, path: &str) -> Result
         .get(url)
         .bearer_auth(token)
         .send()
-        .map_err(|error| format!("falha HTTP: {error}"))?;
+        .map_err(|error| format!("falha HTTP: {}", error.without_url()))?;
     let status = response.status();
     let body = response
         .text()
-        .map_err(|error| format!("falha ao ler resposta Cloudflare: {error}"))?;
+        .map_err(|error| format!("falha ao ler resposta Cloudflare: {}", error.without_url()))?;
     let value: Value = serde_json::from_str(&body).map_err(|error| {
         format!(
             "resposta Cloudflare invalida (HTTP {}): {}",
@@ -459,11 +459,11 @@ pub(crate) fn cloudflare_post_json(
         .bearer_auth(token)
         .json(&body)
         .send()
-        .map_err(|error| format!("falha HTTP: {error}"))?;
+        .map_err(|error| format!("falha HTTP: {}", error.without_url()))?;
     let status = response.status();
     let body = response
         .text()
-        .map_err(|error| format!("falha ao ler resposta Cloudflare: {error}"))?;
+        .map_err(|error| format!("falha ao ler resposta Cloudflare: {}", error.without_url()))?;
     let value: Value = serde_json::from_str(&body).map_err(|error| {
         format!(
             "resposta Cloudflare invalida (HTTP {}): {}",
@@ -495,11 +495,11 @@ fn cloudflare_patch_json(
         .bearer_auth(token)
         .json(&body)
         .send()
-        .map_err(|error| format!("falha HTTP: {error}"))?;
+        .map_err(|error| format!("falha HTTP: {}", error.without_url()))?;
     let status = response.status();
     let body = response
         .text()
-        .map_err(|error| format!("falha ao ler resposta Cloudflare: {error}"))?;
+        .map_err(|error| format!("falha ao ler resposta Cloudflare: {}", error.without_url()))?;
     let value: Value = serde_json::from_str(&body).map_err(|error| {
         format!(
             "resposta Cloudflare invalida (HTTP {}): {}",
@@ -527,7 +527,7 @@ pub(crate) fn cloudflare_client() -> Result<Client, String> {
             env!("CARGO_PKG_VERSION")
         ))
         .build()
-        .map_err(|error| format!("cliente HTTP Cloudflare falhou: {error}"))
+        .map_err(|error| format!("cliente HTTP Cloudflare falhou: {}", error.without_url()))
 }
 
 pub(crate) fn cloudflare_verify_path(token: &str, account_id: &str) -> String {
@@ -774,10 +774,11 @@ pub(crate) fn upsert_ai_provider_secrets(
     let listed = cloudflare_get_paginated_results(client, token, &secrets_path)?;
     let mut existing = cloudflare_secret_ids_by_name(&listed);
     let mut records = Vec::new();
+    let mut persisted_names = Vec::<String>::new();
 
     for (name, value) in secrets {
         let comment = format!("Maestro Editorial AI provider credential: {name}");
-        let response = if let Some(secret_id) = existing.get(*name) {
+        let response_result = if let Some(secret_id) = existing.get(*name) {
             cloudflare_patch_json(
                 client,
                 token,
@@ -828,7 +829,19 @@ pub(crate) fn upsert_ai_provider_secrets(
                 }
                 Err(error) => Err(error),
             }
-        }?;
+        };
+        let response = match response_result {
+            Ok(response) => response,
+            Err(error) => {
+                if persisted_names.is_empty() {
+                    return Err(error);
+                }
+                return Err(format!(
+                    "{error}; partial_secret_upsert=true; persisted_remote_secrets={}",
+                    persisted_names.join(",")
+                ));
+            }
+        };
 
         let secret_id = cloudflare_secret_id_from_response(&response)
             .or_else(|| existing.get(*name).cloned())
@@ -840,6 +853,21 @@ pub(crate) fn upsert_ai_provider_secrets(
             "store_name": store.name,
             "updated_at": Utc::now().to_rfc3339()
         }));
+        persisted_names.push((*name).to_string());
+    }
+
+    let final_listed = cloudflare_get_paginated_results(client, token, &secrets_path)?;
+    let final_existing = cloudflare_secret_ids_by_name(&final_listed);
+    let missing = secrets
+        .keys()
+        .filter(|name| !final_existing.contains_key(**name))
+        .copied()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "Cloudflare Secrets Store consistency check failed; missing secrets: {}",
+            missing.join(",")
+        ));
     }
 
     Ok(records)

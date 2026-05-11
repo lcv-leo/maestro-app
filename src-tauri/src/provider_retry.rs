@@ -60,6 +60,28 @@ pub(crate) fn build_api_client_async(
     client_builder.build()
 }
 
+pub(crate) fn provider_reqwest_error_status(prefix: &str, error: reqwest::Error) -> String {
+    sanitize_text(&format!("{prefix}: {}", error.without_url()), 240)
+}
+
+pub(crate) fn provider_http_error_status(status_code: u16, message: &str) -> String {
+    let class = match status_code {
+        400 => "BAD_REQUEST",
+        401 => "AUTH",
+        403 => "PERMISSION",
+        404 => "NOT_FOUND",
+        408 => "TIMEOUT",
+        409 => "CONFLICT",
+        429 => "RATE_LIMIT",
+        500..=599 => "SERVER",
+        _ => "OTHER",
+    };
+    sanitize_text(
+        &format!("PROVIDER_ERROR_HTTP_{status_code}_{class}: {message}"),
+        240,
+    )
+}
+
 /// Maximum attempts (initial + retries) for the `send_with_retry` policy.
 /// `2` means at most one retry on transient network errors and at most one
 /// Retry-After-respecting wait on HTTP 429.
@@ -170,6 +192,9 @@ pub(crate) async fn send_with_retry_async(
             }
             Err(error) if attempt < PROVIDER_RETRY_MAX_ATTEMPTS => {
                 if let Some(next) = retry_clone {
+                    let error_is_timeout = error.is_timeout();
+                    let error_is_connect = error.is_connect();
+                    let safe_error = error.without_url().to_string();
                     let _ = write_log_record(
                         log_session,
                         LogEventInput {
@@ -181,9 +206,9 @@ pub(crate) async fn send_with_retry_async(
                                 "provider": provider_label,
                                 "attempt": attempt,
                                 "backoff_ms": PROVIDER_RETRY_NETWORK_BACKOFF_MS,
-                                "error": sanitize_text(&error.to_string(), 240),
-                                "error_is_timeout": error.is_timeout(),
-                                "error_is_connect": error.is_connect(),
+                                "error": sanitize_text(&safe_error, 240),
+                                "error_is_timeout": error_is_timeout,
+                                "error_is_connect": error_is_connect,
                             })),
                         },
                     );

@@ -3,17 +3,22 @@
 All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
+
+## [v0.5.24] - 2026-05-10
 ### Fixed
 - **Circular round semantics.** A Maestro round now stays open until the current text completes the full active-agent circuit and returns to the original drafter; individual agent actions are tracked as turns inside the round, so Gemini/DeepSeek/Grok/Codex no longer become separate numbered rounds by themselves.
 - **Resume-safe circular custody.** Resumed sessions restore the next circular turn from the latest draft/revision artifact, preventing a resumed run from assigning the current version back to the same agent that just produced it.
 - **Strict serial output contract.** Truncated or incomplete `READY` artifacts no longer count as approval or text custody. A valid turn must return a complete `<maestro_revision_report>`, balanced optional `<maestro_final_text>`, explicit `custody`, and no prompt/protocol echo.
 - **Protocol echo containment.** Prior revision history no longer injects raw stdout when a revision report is missing; downstream agents receive a compact contract-failure diagnostic instead of duplicated prompt/protocol text.
 - **Review token headroom.** Review/rewrite API calls now use the same 20k output-token ceiling as drafting, reducing false convergence and partial artifacts caused by 4k truncation.
+- **Release metadata.** App metadata was bumped to `0.5.24` so the release workflow publishes the new padded `v00.05.24` tag instead of skipping the already-published `v00.05.23`.
 ### Validation
 - GitHub code scanning checked before tests: no open alerts returned for `LCV-Ideas-Software/maestro-app`.
 - `npm run build`: passed once, with the existing Vite large-chunk warning only.
 - `cargo test --manifest-path src-tauri\Cargo.toml --locked --lib`: 153 passed.
+- `cargo check --locked --all-targets`, `cargo test --locked --lib`, and `cargo clippy --locked --no-deps --all-targets`: passed after the CI import-scope hotfix.
 - `git diff --check`: passed.
+- `cross-review-v2` sessions `a549bc27-383c-4fdb-8ca4-a6bba143f949` and `b7f845f4-0c1c-4227-a30f-bd6ace80ea04`: converged.
 
 ## [v0.5.23] - 2026-05-10
 ### Changed

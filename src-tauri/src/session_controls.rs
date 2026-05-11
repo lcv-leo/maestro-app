@@ -6,7 +6,7 @@ use crate::{
     EditorialAgentSpec, ProviderCacheTelemetry,
 };
 
-const REVIEW_MAX_TOKENS: u64 = 4096;
+const REVIEW_MAX_TOKENS: u64 = 20_000;
 const DRAFT_MAX_TOKENS: u64 = 20_000;
 
 #[derive(Clone, Copy)]

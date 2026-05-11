@@ -325,7 +325,12 @@ pub(crate) fn build_revision_history_block(agents: &[EditorialAgentResult]) -> S
         let artifact = read_text_file(Path::new(&agent.output_path)).unwrap_or_default();
         let stdout = extract_stdout_block(&artifact).unwrap_or(artifact.as_str());
         let report = extract_tagged_block(stdout, "maestro_revision_report")
-            .unwrap_or_else(|| stdout.chars().take(8_000).collect::<String>());
+            .unwrap_or_else(|| {
+                format!(
+                    "No complete maestro_revision_report block was returned by {}. Treat this artifact as a contract failure, not as deliberative substance.",
+                    agent.name
+                )
+            });
         let report = report.trim();
         if report.is_empty() {
             continue;
@@ -374,6 +379,7 @@ pub(crate) fn build_serial_revision_prompt(
     current_text: &str,
     current_author_key: &str,
     reviewer_key: &str,
+    closing_turn: bool,
     previous_revision_history: &str,
     evidence_block: &str,
 ) -> String {
@@ -381,7 +387,7 @@ pub(crate) fn build_serial_revision_prompt(
         r#"# Maestro Editorial AI - Serial Review-Rewrite Turn
 
 Run: `{run_id}`
-Serial turn: `{turn}`
+Round turn: `{turn}`
 Session: {}
 
 ## Language Contract
@@ -389,13 +395,18 @@ Session: {}
 - Internal coordination, critique, changelog, and revision report MUST be written in en_US.
 - The operator-facing article inside `<maestro_final_text>` MUST be written in Brazilian Portuguese (pt_BR).
 - Keep protocol markers exactly as specified.
+- The editorial protocol is authoritative input, not output. Read and obey it, but do not quote, summarize, restate, or reproduce protocol text in the artifact. Cite compact section IDs only, such as `§V.14` or `§11.7`.
 
 ## Role Contract
 
 - Current version author/curator: `{}`.
 - Current reviewer-reviser: `{}`.
-- You are not allowed to review a version you just produced. If you are the current version author, return `MAESTRO_STATUS: NOT_READY` and state `SELF_REVIEW_BLOCKED`.
+- Closing redactor turn: `{}`.
+- You are not allowed to revise a version you just produced.
+- If you are the current version author and this is not the closing redactor turn, return `MAESTRO_STATUS: NOT_READY` and state `SELF_REVIEW_BLOCKED`.
+- If you are the current version author during the closing redactor turn, audit only the completed peer circuit and leave custody `"unchanged"` unless another agent has produced the current version.
 - You must act as reviewer and reviser in one turn: inspect the current text, apply only authorized corrections, and return the complete current article.
+- A Maestro round is a full circular pass through all active AI agents. This call is one turn inside that round; do not call it a new round in your own report.
 
 ## Sovereign Approved-Content Lock
 
@@ -434,9 +445,12 @@ The answer MUST contain exactly these parts:
    - `changes`: list of changed passages, received line/passage reference, reason, protocol citation, and whether the change was required.
    - `out_of_scope`: concerns intentionally not changed.
    - `quality_preservation`: explicit statement that approved strong formulations were preserved; if not, justify each reduction.
-3. `<maestro_final_text>` containing only the complete operator-facing article in pt_BR.
+   - `custody`: exactly `"revised"` when you changed the article, or exactly `"unchanged"` when you approve/criticize without changing custody.
+3. Include `<maestro_final_text>` containing only the complete operator-facing article in pt_BR only when `custody` is `"revised"`.
+4. If `custody` is `"unchanged"`, omit `<maestro_final_text>` entirely. Do not repeat the current article.
 
 Anything outside those tags may be discarded by the app.
+An incomplete tag, missing closing tag, reproduced protocol text, or truncated JSON/report is a contract violation and will not count as READY.
 
 ## Operator Request
 
@@ -462,6 +476,7 @@ Anything outside those tags may be discarded by the app.
         sanitize_text(&request.session_name, 200),
         sanitize_text(current_author_key, 80),
         sanitize_text(reviewer_key, 80),
+        closing_turn,
         request.prompt,
         request.protocol_text,
         current_text,
@@ -619,6 +634,7 @@ mod tests {
             "Texto atual",
             "codex",
             "deepseek",
+            false,
             "No prior reports.",
             "",
         );

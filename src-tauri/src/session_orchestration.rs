@@ -57,8 +57,8 @@ use crate::provider_config::{
 use crate::session_artifacts::parse_agent_artifact_name;
 use crate::session_controls::{
     api_role_max_tokens, effective_draft_lead, estimate_provider_cost_from_input_chars,
-    independent_review_agent_specs, provider_cost_guard_for, sanitize_optional_positive_f64,
-    sanitize_optional_positive_u64, selected_editorial_agent_specs, ReviewPanelSelectionError,
+    provider_cost_guard_for, sanitize_optional_positive_f64, sanitize_optional_positive_u64,
+    selected_editorial_agent_specs,
 };
 use crate::session_evidence::process_session_evidence;
 use crate::session_minutes::build_session_minutes;
@@ -361,6 +361,10 @@ pub(crate) fn run_editorial_session_core(
     let mut consecutive_reviewer_outage_rounds: u32 = 0;
     let mut stable_serial_approval_agents = BTreeSet::<String>::new();
     let mut serial_turns = 0usize;
+    let mut round_turn_index = 0usize;
+    let mut valid_round_agents = BTreeSet::<String>::new();
+    let mut round_had_substantive_change = false;
+    let mut round_had_editorial_divergence = false;
     const ALL_ERROR_ESCALATION_THRESHOLD: u32 = 3;
 
     if let Some(invalid_initial_agent) = invalid_initial_agent {
@@ -585,10 +589,90 @@ pub(crate) fn run_editorial_session_core(
         ));
     }
 
+    let round_turn_specs = circular_round_turn_specs(draft_lead_key, &active_agent_keys);
+    let round_turn_count = round_turn_specs.len();
+    if round_turn_count < 2 {
+        let _ = write_log_record(
+            log_session,
+            LogEventInput {
+                level: "error".to_string(),
+                category: "session.review.no_independent_reviewer".to_string(),
+                message: "no circular review peer remains after selecting the cycle lead"
+                    .to_string(),
+                context: Some(json!({
+                    "run_id": &run_id,
+                    "round": round,
+                    "cycle_lead": draft_lead_key,
+                    "active_agents": active_agent_keys.clone(),
+                    "policy": "circular_round_requires_at_least_two_agents"
+                })),
+            },
+        );
+        let minutes_path = session_dir.join("ata-da-sessao.md");
+        write_text_file(
+            &minutes_path,
+            &build_session_minutes(request, &run_id, &agents, false, None),
+        )?;
+        let context = SessionResultContext {
+            run_id: &run_id,
+            session_dir: &session_dir,
+            prompt_path: &prompt_path,
+            protocol_path: &protocol_path,
+            active_agents: &active_agent_keys,
+            max_session_cost_usd,
+            max_session_minutes,
+            observed_cost_usd: cost_ledger.total_observed_cost_usd,
+            links_path: evidence.links_path.as_ref(),
+            attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
+            human_log_path: &human_log_path,
+        };
+        return Ok(editorial_session_result(
+            &context,
+            None,
+            &minutes_path,
+            current_draft_path,
+            agents,
+            false,
+            "PAUSED_REVIEWERS_UNAVAILABLE",
+        ));
+    }
+    if is_resume && !current_draft.trim().is_empty() {
+        let progress = restore_circular_resume_progress(
+            &agent_dir,
+            current_draft_path.as_ref(),
+            &agents,
+            round,
+            &round_turn_specs,
+        );
+        round = progress.round;
+        round_turn_index = progress.turn_index;
+        valid_round_agents = progress.valid_agents;
+        round_had_substantive_change = progress.had_substantive_change;
+        round_had_editorial_divergence = progress.had_editorial_divergence;
+        let _ = write_log_record(
+            log_session,
+            LogEventInput {
+                level: "info".to_string(),
+                category: "session.resume.circular_progress_restored".to_string(),
+                message: "circular review progress restored from existing artifacts".to_string(),
+                context: Some(json!({
+                    "run_id": &run_id,
+                    "round": round,
+                    "next_turn": round_turn_index + 1,
+                    "round_turn_count": round_turn_count,
+                    "valid_round_agents": valid_round_agents.iter().cloned().collect::<Vec<_>>(),
+                    "round_had_substantive_change": round_had_substantive_change,
+                    "round_had_editorial_divergence": round_had_editorial_divergence,
+                    "policy": "resume_continues_the_circular_circuit_without_self_review"
+                })),
+            },
+        );
+    }
+
     let final_path: PathBuf;
     loop {
-        // Operator-driven stop check at the top of every round. Granularity
-        // is "between rounds" for the orchestration; in-flight CLI peer is
+        // Operator-driven stop check at the top of every turn. Granularity
+        // is "between turns" for the orchestration; in-flight CLI peer is
         // killed via `command_spawn::run_resolved_command_observed` 250ms
         // poll; in-flight API peer is dropped via `tokio::select!` in
         // `provider_retry::send_with_retry_async`.
@@ -598,7 +682,7 @@ pub(crate) fn run_editorial_session_core(
                 LogEventInput {
                     level: "warn".to_string(),
                     category: "session.user.stop_completed".to_string(),
-                    message: "editorial session stopped by operator between rounds".to_string(),
+                    message: "editorial session stopped by operator between turns".to_string(),
                     context: Some(json!({
                         "run_id": run_id.clone(),
                         "round": round,
@@ -663,123 +747,8 @@ pub(crate) fn run_editorial_session_core(
                 "TIME_LIMIT_REACHED",
             ));
         }
-        let review_specs = match independent_review_agent_specs(
-            draft_lead_key,
-            &active_agent_keys,
-            current_draft_author_key.as_deref(),
-        ) {
-            Ok(specs) => specs,
-            Err(ReviewPanelSelectionError::DraftAuthorUnknown) => {
-                let _ = write_log_record(
-                    log_session,
-                    LogEventInput {
-                        level: "error".to_string(),
-                        category: "session.tribunal.draft_author_unknown".to_string(),
-                        message: "review cycle blocked because the current draft author could not be verified".to_string(),
-                        context: Some(json!({
-                            "run_id": &run_id,
-                            "round": round,
-                            "current_draft_path": current_draft_path.as_ref().map(|path| path.to_string_lossy().to_string()),
-                            "active_agents": active_agent_keys.clone(),
-                            "policy": "fail_closed_no_self_review_without_known_petitioner"
-                        })),
-                    },
-                );
-                let minutes_path = session_dir.join("ata-da-sessao.md");
-                write_text_file(
-                    &minutes_path,
-                    &build_session_minutes(request, &run_id, &agents, false, None),
-                )?;
-                let context = SessionResultContext {
-                    run_id: &run_id,
-                    session_dir: &session_dir,
-                    prompt_path: &prompt_path,
-                    protocol_path: &protocol_path,
-                    active_agents: &active_agent_keys,
-                    max_session_cost_usd,
-                    max_session_minutes,
-                    observed_cost_usd: cost_ledger.total_observed_cost_usd,
-                    links_path: evidence.links_path.as_ref(),
-                    attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
-                    human_log_path: &human_log_path,
-                };
-                return Ok(editorial_session_result(
-                    &context,
-                    None,
-                    &minutes_path,
-                    current_draft_path,
-                    agents,
-                    false,
-                    "PAUSED_DRAFT_AUTHOR_UNKNOWN",
-                ));
-            }
-        };
         let draft_author_key = current_draft_author_key.as_deref().unwrap_or("unknown");
-        if let Some(author_key) = current_draft_author_key.as_deref() {
-            let _ = write_log_record(
-                log_session,
-                LogEventInput {
-                    level: "info".to_string(),
-                    category: "session.serial.author_excluded".to_string(),
-                    message: "current version author excluded from serial reviewer-reviser turn"
-                        .to_string(),
-                    context: Some(json!({
-                        "run_id": &run_id,
-                        "round": round,
-                        "draft_author_key": author_key,
-                        "review_agents": review_specs.iter().map(|spec| spec.key).collect::<Vec<_>>(),
-                        "policy": "agent_never_reviews_own_draft"
-                    })),
-                },
-            );
-        }
-        if review_specs.is_empty() {
-            let _ = write_log_record(
-                log_session,
-                LogEventInput {
-                    level: "error".to_string(),
-                    category: "session.review.no_independent_reviewer".to_string(),
-                    message: "no independent review peer remains after excluding the draft author"
-                        .to_string(),
-                    context: Some(json!({
-                        "run_id": &run_id,
-                        "round": round,
-                        "draft_author_key": current_draft_author_key.clone(),
-                        "active_agents": active_agent_keys.clone(),
-                        "policy": "select_at_least_two_agents_for_independent_editorial_consensus"
-                    })),
-                },
-            );
-            let minutes_path = session_dir.join("ata-da-sessao.md");
-            write_text_file(
-                &minutes_path,
-                &build_session_minutes(request, &run_id, &agents, false, None),
-            )?;
-            let context = SessionResultContext {
-                run_id: &run_id,
-                session_dir: &session_dir,
-                prompt_path: &prompt_path,
-                protocol_path: &protocol_path,
-                active_agents: &active_agent_keys,
-                max_session_cost_usd,
-                max_session_minutes,
-                observed_cost_usd: cost_ledger.total_observed_cost_usd,
-                links_path: evidence.links_path.as_ref(),
-                attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
-                human_log_path: &human_log_path,
-            };
-            return Ok(editorial_session_result(
-                &context,
-                None,
-                &minutes_path,
-                current_draft_path,
-                agents,
-                false,
-                "PAUSED_REVIEWERS_UNAVAILABLE",
-            ));
-        }
-        let independent_reviewer_count = review_specs.len();
-        let max_serial_turns = std::cmp::min(12, std::cmp::max(6, independent_reviewer_count * 3));
+        let max_serial_turns = std::cmp::max(round_turn_count * 4, round_turn_count);
         serial_turns += 1;
         if serial_turns > max_serial_turns {
             let _ = write_log_record(
@@ -792,6 +761,7 @@ pub(crate) fn run_editorial_session_core(
                     context: Some(json!({
                         "run_id": &run_id,
                         "round": round,
+                        "turn": round_turn_index + 1,
                         "serial_turns": serial_turns,
                         "max_serial_turns": max_serial_turns,
                         "stable_serial_approvals": stable_serial_approval_agents.len(),
@@ -828,16 +798,136 @@ pub(crate) fn run_editorial_session_core(
             ));
         }
 
-        let reviewer_index = (round.saturating_sub(1)) % review_specs.len();
-        let spec = review_specs[reviewer_index];
+        let spec = round_turn_specs[round_turn_index];
+        let closing_turn = spec.key == draft_lead_key;
+        let valid_agents_required_before_closure = round_turn_specs
+            .iter()
+            .filter(|turn_spec| turn_spec.key != draft_lead_key)
+            .count();
+        if closing_turn && valid_round_agents.len() < valid_agents_required_before_closure {
+            let _ = write_log_record(
+                log_session,
+                LogEventInput {
+                    level: "warn".to_string(),
+                    category: "session.serial.round_incomplete_before_closure".to_string(),
+                    message: "circular round cannot return to the original redactor before every other peer completes a valid turn".to_string(),
+                    context: Some(json!({
+                        "run_id": &run_id,
+                        "round": round,
+                        "turn": round_turn_index + 1,
+                        "cycle_lead": draft_lead_key,
+                        "valid_round_agents": valid_round_agents.iter().cloned().collect::<Vec<_>>(),
+                        "required_valid_peer_count_before_closure": valid_agents_required_before_closure,
+                        "policy": "round_closes_only_after_full_peer_circuit"
+                    })),
+                },
+            );
+            let minutes_path = session_dir.join("ata-da-sessao.md");
+            write_text_file(
+                &minutes_path,
+                &build_session_minutes(request, &run_id, &agents, false, None),
+            )?;
+            let context = SessionResultContext {
+                run_id: &run_id,
+                session_dir: &session_dir,
+                prompt_path: &prompt_path,
+                protocol_path: &protocol_path,
+                active_agents: &active_agent_keys,
+                max_session_cost_usd,
+                max_session_minutes,
+                observed_cost_usd: cost_ledger.total_observed_cost_usd,
+                links_path: evidence.links_path.as_ref(),
+                attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
+                human_log_path: &human_log_path,
+            };
+            return Ok(editorial_session_result(
+                &context,
+                None,
+                &minutes_path,
+                current_draft_path,
+                agents,
+                false,
+                "PAUSED_ROUND_INCOMPLETE",
+            ));
+        }
+
+        if spec.key == draft_author_key && !(closing_turn && !round_had_substantive_change) {
+            let _ = write_log_record(
+                log_session,
+                LogEventInput {
+                    level: "error".to_string(),
+                    category: "session.tribunal.self_review_blocked".to_string(),
+                    message:
+                        "serial scheduler attempted to assign the current version to its own author"
+                            .to_string(),
+                    context: Some(json!({
+                        "run_id": &run_id,
+                        "round": round,
+                        "turn": round_turn_index + 1,
+                        "reviewer": spec.key,
+                        "current_author": draft_author_key,
+                        "closing_turn": closing_turn,
+                        "policy": "agent_never_reviews_own_current_version"
+                    })),
+                },
+            );
+            let minutes_path = session_dir.join("ata-da-sessao.md");
+            write_text_file(
+                &minutes_path,
+                &build_session_minutes(request, &run_id, &agents, false, None),
+            )?;
+            let context = SessionResultContext {
+                run_id: &run_id,
+                session_dir: &session_dir,
+                prompt_path: &prompt_path,
+                protocol_path: &protocol_path,
+                active_agents: &active_agent_keys,
+                max_session_cost_usd,
+                max_session_minutes,
+                observed_cost_usd: cost_ledger.total_observed_cost_usd,
+                links_path: evidence.links_path.as_ref(),
+                attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
+                human_log_path: &human_log_path,
+            };
+            return Ok(editorial_session_result(
+                &context,
+                None,
+                &minutes_path,
+                current_draft_path,
+                agents,
+                false,
+                "PAUSED_SELF_REVIEW_BLOCKED",
+            ));
+        }
+
+        if let Some(author_key) = current_draft_author_key.as_deref() {
+            let _ = write_log_record(
+                log_session,
+                LogEventInput {
+                    level: "info".to_string(),
+                    category: "session.serial.author_excluded".to_string(),
+                    message: "current version author excluded from serial reviewer-reviser turn"
+                        .to_string(),
+                    context: Some(json!({
+                        "run_id": &run_id,
+                        "round": round,
+                        "turn": round_turn_index + 1,
+                        "draft_author_key": author_key,
+                        "review_agents": round_turn_specs.iter().map(|spec| spec.key).collect::<Vec<_>>(),
+                        "policy": "agent_never_reviews_own_current_version"
+                    })),
+                },
+            );
+        }
         let previous_revision_history = build_revision_history_block(&agents);
         let review_prompt = build_serial_revision_prompt(
             request,
             &run_id,
-            round,
+            round_turn_index + 1,
             &current_draft,
             draft_author_key,
             spec.key,
+            closing_turn,
             &previous_revision_history,
             &evidence.block,
         );
@@ -850,11 +940,13 @@ pub(crate) fn run_editorial_session_core(
                 context: Some(json!({
                     "run_id": &run_id,
                     "round": round,
+                    "turn": round_turn_index + 1,
                     "reviewer": spec.key,
                     "current_author": draft_author_key,
                     "stable_serial_approvals": stable_serial_approval_agents.len(),
-                    "independent_reviewer_count": independent_reviewer_count,
-                    "policy": "one_peer_revises_then_passes_to_next_peer_no_self_review"
+                    "round_turn_count": round_turn_count,
+                    "closing_turn": closing_turn,
+                    "policy": "one_peer_revises_then_passes_to_next_peer_no_self_review_round_closes_on_return_to_redactor"
                 })),
             },
         );
@@ -891,7 +983,7 @@ pub(crate) fn run_editorial_session_core(
                             "run_id": &run_id,
                             "round": round,
                             "observed_cost_usd": cost_ledger.total_observed_cost_usd,
-                            "projected_review_round_cost_usd": projected_round_cost_usd,
+                            "projected_review_turn_cost_usd": projected_round_cost_usd,
                             "max_session_cost_usd": max_cost_usd,
                             "review_agent": spec.key,
                             "policy": "do_not_start_paid_serial_turn_when_cost_cap_would_interrupt_it"
@@ -939,7 +1031,7 @@ pub(crate) fn run_editorial_session_core(
         } else {
             None
         };
-        let result = run_editorial_agent_for_spec(
+        let mut result = run_editorial_agent_for_spec(
             log_session,
             &run_id,
             spec,
@@ -1049,33 +1141,152 @@ pub(crate) fn run_editorial_session_core(
                     "PAUSED_REVIEWER_OPERATIONAL_OUTAGE",
                 ));
             }
-            round += 1;
+            round_turn_index += 1;
+            if round_turn_index >= round_turn_count {
+                let minutes_path = session_dir.join("ata-da-sessao.md");
+                write_text_file(
+                    &minutes_path,
+                    &build_session_minutes(request, &run_id, &agents, false, None),
+                )?;
+                let context = SessionResultContext {
+                    run_id: &run_id,
+                    session_dir: &session_dir,
+                    prompt_path: &prompt_path,
+                    protocol_path: &protocol_path,
+                    active_agents: &active_agent_keys,
+                    max_session_cost_usd,
+                    max_session_minutes,
+                    observed_cost_usd: cost_ledger.total_observed_cost_usd,
+                    links_path: evidence.links_path.as_ref(),
+                    attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
+                    human_log_path: &human_log_path,
+                };
+                return Ok(editorial_session_result(
+                    &context,
+                    None,
+                    &minutes_path,
+                    current_draft_path,
+                    agents,
+                    false,
+                    "PAUSED_ROUND_INCOMPLETE",
+                ));
+            }
             continue;
         }
         consecutive_reviewer_outage_rounds = 0;
 
         let artifact = read_text_file(&output_path).unwrap_or_default();
         let stdout = extract_stdout_block(&artifact).unwrap_or(artifact.as_str());
-        let Some(revised_text) = extract_tagged_block(stdout, "maestro_final_text") else {
+        let serial_output = match validate_serial_turn_output(stdout, &result.status) {
+            Ok(output) => output,
+            Err(reason) => {
+                result.status = "CONTRACT_VIOLATION".to_string();
+                result.tone = "error".to_string();
+                if let Some(last) = agents.last_mut() {
+                    last.status = result.status.clone();
+                    last.tone = result.tone.clone();
+                }
+                reclassify_agent_artifact_status(&output_path, "CONTRACT_VIOLATION", &reason);
+                consecutive_reviewer_outage_rounds += 1;
+                stable_serial_approval_agents.clear();
+                round_had_editorial_divergence = true;
+                let _ = write_log_record(
+                    log_session,
+                    LogEventInput {
+                        level: "warn".to_string(),
+                        category: "session.serial.contract_violation".to_string(),
+                        message:
+                            "serial reviewer-reviser returned an incomplete or unusable output contract"
+                                .to_string(),
+                        context: Some(json!({
+                            "run_id": &run_id,
+                            "round": round,
+                            "turn": round_turn_index + 1,
+                            "agent": spec.key,
+                            "status": result.status,
+                            "reason": reason,
+                            "policy": "strict_output_contract_required_for_serial_custody_or_approval"
+                        })),
+                    },
+                );
+                round_turn_index += 1;
+                if round_turn_index >= round_turn_count {
+                    let minutes_path = session_dir.join("ata-da-sessao.md");
+                    write_text_file(
+                        &minutes_path,
+                        &build_session_minutes(request, &run_id, &agents, false, None),
+                    )?;
+                    let context = SessionResultContext {
+                        run_id: &run_id,
+                        session_dir: &session_dir,
+                        prompt_path: &prompt_path,
+                        protocol_path: &protocol_path,
+                        active_agents: &active_agent_keys,
+                        max_session_cost_usd,
+                        max_session_minutes,
+                        observed_cost_usd: cost_ledger.total_observed_cost_usd,
+                        links_path: evidence.links_path.as_ref(),
+                        attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
+                        human_log_path: &human_log_path,
+                    };
+                    return Ok(editorial_session_result(
+                        &context,
+                        None,
+                        &minutes_path,
+                        current_draft_path,
+                        agents,
+                        false,
+                        "PAUSED_ROUND_INCOMPLETE",
+                    ));
+                }
+                continue;
+            }
+        };
+        valid_round_agents.insert(spec.key.to_string());
+        let Some(revised_text) = serial_output.final_text else {
             let _ = write_log_record(
                 log_session,
                 LogEventInput {
-                    level: "warn".to_string(),
-                    category: "session.serial.contract_violation".to_string(),
+                    level: "info".to_string(),
+                    category: "session.serial.stable_approval".to_string(),
                     message:
-                        "serial reviewer-reviser did not return a usable maestro_final_text block"
+                        "serial reviewer-reviser approved or objected without changing custody"
                             .to_string(),
                     context: Some(json!({
                         "run_id": &run_id,
                         "round": round,
+                        "turn": round_turn_index + 1,
                         "agent": spec.key,
                         "status": result.status,
-                        "policy": "strict_output_contract_required_for_serial_custody"
+                        "stable_serial_approvals": stable_serial_approval_agents.len(),
+                        "policy": "unchanged_turn_does_not_transfer_text_custody"
                     })),
                 },
             );
-            stable_serial_approval_agents.clear();
-            round += 1;
+            if result.status == "READY" {
+                stable_serial_approval_agents.insert(spec.key.to_string());
+            } else {
+                round_had_editorial_divergence = true;
+                stable_serial_approval_agents.clear();
+            }
+            round_turn_index += 1;
+            if round_turn_index >= round_turn_count {
+                if !round_had_substantive_change
+                    && !round_had_editorial_divergence
+                    && valid_round_agents.len() >= round_turn_count
+                {
+                    let path = session_dir.join("texto-final.md");
+                    write_text_file(&path, &strip_leading_maestro_status(&current_draft))?;
+                    final_path = path;
+                    break;
+                }
+                round += 1;
+                round_turn_index = 0;
+                valid_round_agents.clear();
+                stable_serial_approval_agents.clear();
+                round_had_substantive_change = false;
+                round_had_editorial_divergence = false;
+            }
             continue;
         };
 
@@ -1096,6 +1307,7 @@ pub(crate) fn run_editorial_session_core(
                     context: Some(json!({
                         "run_id": &run_id,
                         "round": round,
+                        "turn": round_turn_index + 1,
                         "reviewer": spec.key,
                         "current_author": current_draft_author_key.clone(),
                         "current_chars": current_draft.chars().count(),
@@ -1105,7 +1317,16 @@ pub(crate) fn run_editorial_session_core(
                 },
             );
             stable_serial_approval_agents.clear();
-            round += 1;
+            round_had_editorial_divergence = true;
+            round_turn_index += 1;
+            if round_turn_index >= round_turn_count {
+                round += 1;
+                round_turn_index = 0;
+                valid_round_agents.clear();
+                stable_serial_approval_agents.clear();
+                round_had_substantive_change = false;
+                round_had_editorial_divergence = false;
+            }
             continue;
         }
 
@@ -1114,6 +1335,7 @@ pub(crate) fn run_editorial_session_core(
             current_draft_path = Some(output_path);
             current_draft_author_key = Some(spec.key.to_string());
             stable_serial_approval_agents.clear();
+            round_had_substantive_change = true;
             let _ = write_log_record(
                 log_session,
                 LogEventInput {
@@ -1123,6 +1345,7 @@ pub(crate) fn run_editorial_session_core(
                     context: Some(json!({
                         "run_id": &run_id,
                         "round": round,
+                        "turn": round_turn_index + 1,
                         "author": spec.key,
                         "status": result.status,
                         "policy": "new_version_requires_full_independent_rotation"
@@ -1130,8 +1353,6 @@ pub(crate) fn run_editorial_session_core(
                 },
             );
         } else if result.status == "READY" {
-            current_draft_path = Some(output_path);
-            current_draft_author_key = Some(spec.key.to_string());
             stable_serial_approval_agents.insert(spec.key.to_string());
             let _ = write_log_record(
                 log_session,
@@ -1142,29 +1363,38 @@ pub(crate) fn run_editorial_session_core(
                     context: Some(json!({
                         "run_id": &run_id,
                         "round": round,
+                        "turn": round_turn_index + 1,
                         "reviewer": spec.key,
                         "stable_serial_approvals": stable_serial_approval_agents.len(),
                         "stable_serial_approval_agents": stable_serial_approval_agents.iter().cloned().collect::<Vec<_>>(),
-                        "required_stable_approvals": independent_reviewer_count,
+                        "required_stable_approvals": round_turn_count,
                         "policy": "converge_after_full_rotation_without_substantive_change"
                     })),
                 },
             );
         } else {
             stable_serial_approval_agents.clear();
+            round_had_editorial_divergence = true;
         }
 
-        if result.status == "READY"
-            && !substantive_change
-            && stable_serial_approval_agents.len() >= independent_reviewer_count
-        {
-            let path = session_dir.join("texto-final.md");
-            write_text_file(&path, &strip_leading_maestro_status(&current_draft))?;
-            final_path = path;
-            break;
+        round_turn_index += 1;
+        if round_turn_index >= round_turn_count {
+            if !round_had_substantive_change
+                && !round_had_editorial_divergence
+                && valid_round_agents.len() >= round_turn_count
+            {
+                let path = session_dir.join("texto-final.md");
+                write_text_file(&path, &strip_leading_maestro_status(&current_draft))?;
+                final_path = path;
+                break;
+            }
+            round += 1;
+            round_turn_index = 0;
+            valid_round_agents.clear();
+            stable_serial_approval_agents.clear();
+            round_had_substantive_change = false;
+            round_had_editorial_divergence = false;
         }
-
-        round += 1;
     }
 
     let minutes_path = session_dir.join("ata-da-sessao.md");
@@ -1205,6 +1435,231 @@ fn current_draft_author_from_path(agent_dir: &Path, path: Option<&PathBuf>) -> O
     } else {
         None
     }
+}
+
+fn circular_round_turn_specs(
+    first_key: &str,
+    active_agents: &[String],
+) -> Vec<crate::EditorialAgentSpec> {
+    let mut specs = selected_editorial_agent_specs(first_key, active_agents);
+    if specs.len() > 1 {
+        specs.rotate_left(1);
+    }
+    specs
+}
+
+struct CircularResumeProgress {
+    round: usize,
+    turn_index: usize,
+    valid_agents: BTreeSet<String>,
+    had_substantive_change: bool,
+    had_editorial_divergence: bool,
+}
+
+fn restore_circular_resume_progress(
+    agent_dir: &Path,
+    current_draft_path: Option<&PathBuf>,
+    agents: &[EditorialAgentResult],
+    fallback_round: usize,
+    round_turn_specs: &[crate::EditorialAgentSpec],
+) -> CircularResumeProgress {
+    let mut progress = CircularResumeProgress {
+        round: fallback_round.max(1),
+        turn_index: 0,
+        valid_agents: BTreeSet::new(),
+        had_substantive_change: false,
+        had_editorial_divergence: false,
+    };
+    let Some(path) = current_draft_path else {
+        return progress;
+    };
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return progress;
+    };
+    let Some(current_artifact) = parse_agent_artifact_name(agent_dir, name) else {
+        return progress;
+    };
+
+    progress.round = current_artifact.round.max(1);
+    if current_artifact.role == "revision" {
+        progress.had_substantive_change = true;
+        if let Some(index) = round_turn_specs
+            .iter()
+            .position(|spec| spec.key == current_artifact.agent)
+        {
+            progress.turn_index = index + 1;
+        }
+    }
+    if progress.turn_index >= round_turn_specs.len() {
+        progress.round += 1;
+        progress.turn_index = 0;
+        progress.had_substantive_change = false;
+        return progress;
+    }
+
+    for agent in agents {
+        let path = Path::new(&agent.output_path);
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let Some(artifact) = parse_agent_artifact_name(agent_dir, name) else {
+            continue;
+        };
+        if artifact.round != progress.round
+            || !matches!(artifact.role.as_str(), "revision" | "review")
+        {
+            continue;
+        }
+        let Some(index) = round_turn_specs
+            .iter()
+            .position(|spec| spec.key == artifact.agent)
+        else {
+            continue;
+        };
+        if index >= progress.turn_index {
+            continue;
+        }
+        let artifact_text = read_text_file(&artifact.path).unwrap_or_default();
+        let stdout = extract_stdout_block(&artifact_text).unwrap_or(artifact_text.as_str());
+        if validate_serial_turn_output(stdout, &agent.status).is_err() {
+            continue;
+        }
+        progress.valid_agents.insert(artifact.agent.clone());
+        if agent.status != "READY" {
+            progress.had_editorial_divergence = true;
+        }
+    }
+    progress
+}
+
+#[derive(Debug)]
+struct SerialTurnOutput {
+    final_text: Option<String>,
+}
+
+fn validate_serial_turn_output(stdout: &str, status: &str) -> Result<SerialTurnOutput, String> {
+    if status != "READY" && status != "NOT_READY" {
+        return Err(format!("invalid serial status: {status}"));
+    }
+    if contains_prompt_or_protocol_echo(stdout) {
+        return Err("output appears to reproduce prompt/protocol scaffolding".to_string());
+    }
+    require_balanced_tag(stdout, "maestro_revision_report")?;
+    require_balanced_optional_tag(stdout, "maestro_final_text")?;
+
+    let Some(report) = extract_tagged_block(stdout, "maestro_revision_report") else {
+        return Err("missing complete maestro_revision_report block".to_string());
+    };
+    if report.trim().is_empty() {
+        return Err("empty maestro_revision_report block".to_string());
+    }
+    let final_text = extract_tagged_block(stdout, "maestro_final_text");
+    let has_revised_custody = report_declares_custody_value(&report, "revised");
+    let has_unchanged_custody = report_declares_custody_value(&report, "unchanged");
+    if has_revised_custody && has_unchanged_custody {
+        return Err("ambiguous custody declaration in maestro_revision_report".to_string());
+    }
+    if let Some(text) = final_text.as_ref() {
+        if text.trim().is_empty() {
+            return Err("empty maestro_final_text block".to_string());
+        }
+        if !has_revised_custody {
+            return Err("maestro_final_text requires custody revised in the report".to_string());
+        }
+    }
+    if status == "READY" && final_text.is_none() && !has_unchanged_custody {
+        return Err(
+            "READY without maestro_final_text must explicitly declare custody unchanged"
+                .to_string(),
+        );
+    }
+    if final_text.is_none() && has_revised_custody {
+        return Err("revised custody requires a complete maestro_final_text block".to_string());
+    }
+    Ok(SerialTurnOutput { final_text })
+}
+
+fn require_balanced_tag(stdout: &str, tag: &str) -> Result<(), String> {
+    let open = stdout.matches(&format!("<{tag}>")).count();
+    let close = stdout.matches(&format!("</{tag}>")).count();
+    if open == 1 && close == 1 {
+        Ok(())
+    } else if open == 0 && close == 0 {
+        Err(format!("missing {tag} block"))
+    } else {
+        Err(format!("incomplete or duplicated {tag} block"))
+    }
+}
+
+fn require_balanced_optional_tag(stdout: &str, tag: &str) -> Result<(), String> {
+    let open = stdout.matches(&format!("<{tag}>")).count();
+    let close = stdout.matches(&format!("</{tag}>")).count();
+    if open == close && open <= 1 {
+        Ok(())
+    } else {
+        Err(format!("incomplete or duplicated {tag} block"))
+    }
+}
+
+fn report_declares_custody_value(report: &str, value: &str) -> bool {
+    let normalized = report.to_ascii_lowercase();
+    let value = value.to_ascii_lowercase();
+    [
+        format!("\"custody\": \"{value}\""),
+        format!("\"custody\":\"{value}\""),
+        format!("'custody': '{value}'"),
+        format!("'custody':'{value}'"),
+        format!("custody: \"{value}\""),
+        format!("custody:\"{value}\""),
+        format!("custody: `{value}`"),
+        format!("custody:`{value}`"),
+        format!("custody: {value}"),
+        format!("custody:{value}"),
+    ]
+    .iter()
+    .any(|pattern| normalized.contains(pattern))
+}
+
+fn contains_prompt_or_protocol_echo(stdout: &str) -> bool {
+    let normalized = stdout.to_ascii_lowercase();
+    [
+        "# maestro editorial ai - serial review-rewrite turn",
+        "## full editorial protocol",
+        "## required output contract",
+        "## sovereign approved-content lock",
+        "## current text under custody",
+        "## prior serial revision reports",
+        "internal coordination, critique, changelog, and revision report",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
+fn reclassify_agent_artifact_status(output_path: &Path, status: &str, reason: &str) {
+    let Ok(contents) = read_text_file(output_path) else {
+        return;
+    };
+    let mut replaced = false;
+    let mut rewritten = Vec::new();
+    for line in contents.lines() {
+        if !replaced && line.trim_start().starts_with("- Status: `") {
+            rewritten.push(format!("- Status: `{status}`"));
+            replaced = true;
+        } else {
+            rewritten.push(line.to_string());
+        }
+    }
+    if !replaced {
+        rewritten.insert(0, format!("- Status: `{status}`"));
+    }
+    let mut text = rewritten.join("\n");
+    if !text.contains("Reclassificado para CONTRACT_VIOLATION") {
+        text.push_str(&format!(
+            "\n> Reclassificado para CONTRACT_VIOLATION: {}.\n",
+            sanitize_text(reason, 300)
+        ));
+    }
+    let _ = write_text_file(output_path, &text);
 }
 
 #[cfg(test)]
@@ -1285,9 +1740,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        agent_attempt_output_path, current_draft_author_from_path,
+        agent_attempt_output_path, circular_round_turn_specs, current_draft_author_from_path,
         is_operational_only_review_round, is_substantive_editorial_change,
-        quality_guard_blocks_revision,
+        quality_guard_blocks_revision, restore_circular_resume_progress,
+        validate_serial_turn_output,
     };
     use crate::EditorialAgentResult;
 
@@ -1427,5 +1883,120 @@ mod tests {
             &after,
             true
         ));
+    }
+
+    #[test]
+    fn circular_round_order_returns_to_original_redactor_last() {
+        let active = vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "gemini".to_string(),
+            "deepseek".to_string(),
+            "grok".to_string(),
+        ];
+
+        let order = circular_round_turn_specs("claude", &active)
+            .into_iter()
+            .map(|spec| spec.key)
+            .collect::<Vec<_>>();
+
+        assert_eq!(order, vec!["codex", "gemini", "deepseek", "grok", "claude"]);
+    }
+
+    #[test]
+    fn circular_resume_continues_after_latest_revision_author() {
+        let dir = crate::sessions_dir()
+            .join(format!(
+                "maestro-circular-resume-test-{}",
+                std::process::id()
+            ))
+            .join("agent-runs");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let artifact_path = dir.join("round-001-codex-revision.md");
+        std::fs::write(
+            &artifact_path,
+            r#"MAESTRO_STATUS: READY
+<maestro_revision_report>
+{ "reviewer": "codex", "status": "READY", "custody": "revised", "changes": [] }
+</maestro_revision_report>
+<maestro_final_text>
+Texto revisado.
+</maestro_final_text>"#,
+        )
+        .unwrap();
+        let active = vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "gemini".to_string(),
+            "deepseek".to_string(),
+            "grok".to_string(),
+        ];
+        let specs = circular_round_turn_specs("claude", &active);
+        let mut result = review_result("Codex", "READY", "ok");
+        result.output_path = artifact_path.to_string_lossy().to_string();
+
+        let progress =
+            restore_circular_resume_progress(&dir, Some(&artifact_path), &[result], 1, &specs);
+
+        assert_eq!(progress.round, 1);
+        assert_eq!(progress.turn_index, 1);
+        assert!(progress.valid_agents.contains("codex"));
+        assert!(progress.had_substantive_change);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn serial_contract_accepts_unchanged_ready_without_final_text() {
+        let stdout = r#"MAESTRO_STATUS: READY
+<maestro_revision_report>
+{ "reviewer": "codex", "status": "READY", "custody": "unchanged", "changes": [] }
+</maestro_revision_report>"#;
+
+        let output = validate_serial_turn_output(stdout, "READY").unwrap();
+
+        assert!(output.final_text.is_none());
+    }
+
+    #[test]
+    fn serial_contract_rejects_truncated_ready_final_text() {
+        let stdout = r#"MAESTRO_STATUS: READY
+<maestro_revision_report>
+{ "reviewer": "codex", "status": "READY", "custody": "revised", "changes": [] }
+</maestro_revision_report>
+<maestro_final_text>
+Texto incompleto"#;
+
+        let error = validate_serial_turn_output(stdout, "READY").unwrap_err();
+
+        assert!(error.contains("maestro_final_text"));
+    }
+
+    #[test]
+    fn serial_contract_rejects_prompt_or_protocol_echo() {
+        let stdout = r#"MAESTRO_STATUS: READY
+# Maestro Editorial AI - Serial Review-Rewrite Turn
+<maestro_revision_report>
+{ "reviewer": "codex", "status": "READY", "custody": "unchanged", "changes": [] }
+</maestro_revision_report>"#;
+
+        let error = validate_serial_turn_output(stdout, "READY").unwrap_err();
+
+        assert!(error.contains("prompt/protocol"));
+    }
+
+    #[test]
+    fn serial_contract_rejects_duplicate_revision_report() {
+        let stdout = r#"MAESTRO_STATUS: READY
+<maestro_revision_report>
+{ "reviewer": "codex", "status": "READY", "custody": "unchanged", "changes": [] }
+</maestro_revision_report>
+<maestro_revision_report>
+{ "reviewer": "codex", "status": "READY", "custody": "unchanged", "changes": [] }
+</maestro_revision_report>"#;
+
+        let error = validate_serial_turn_output(stdout, "READY").unwrap_err();
+
+        assert!(error.contains("maestro_revision_report"));
     }
 }

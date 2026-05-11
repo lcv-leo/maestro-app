@@ -92,7 +92,7 @@ pub(crate) async fn run_editorial_session(
 /// (already finished, never started, or unknown id). Idempotent: repeated
 /// calls on a still-running id keep returning `true`. Sync command —
 /// returns immediately even if the session loop is mid-API-call; the loop
-/// observes the cancellation token at its next checkpoint (between rounds
+/// observes the cancellation token at its next checkpoint (between turns
 /// or inside `tokio::select!` for in-flight HTTP requests).
 #[tauri::command]
 pub(crate) fn stop_editorial_session(

@@ -3,6 +3,8 @@
 All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
+
+## [v0.5.26] - 2026-05-11
 ### Hardened
 - Added atomic temp-file write/flush/rename behavior to editorial artifacts, local JSON configuration writes, and binary evidence attachments, reducing the risk of truncated session files after crashes or interrupted writes.
 - Classified provider HTTP failures by operational class (`AUTH`, `PERMISSION`, `RATE_LIMIT`, `SERVER`, etc.) and stripped request URLs from provider, Cloudflare, AI probe, and link-audit network errors before surfacing them.

@@ -38,7 +38,11 @@ use reqwest::{blocking::Client, redirect::Policy, Url};
 use crate::{sanitize_short, sanitize_text, LinkAuditResult, LinkAuditRow};
 
 pub(crate) fn run_link_audit(text: &str) -> LinkAuditResult {
-    let urls = extract_public_urls(text);
+    let candidates = extract_url_candidates(text);
+    let public_urls = candidates
+        .iter()
+        .filter_map(|candidate| candidate.public.then(|| candidate.url.clone()))
+        .collect::<Vec<_>>();
     let client = match Client::builder()
         .timeout(Duration::from_secs(15))
         .redirect(Policy::limited(5))
@@ -51,10 +55,10 @@ pub(crate) fn run_link_audit(text: &str) -> LinkAuditResult {
         Ok(client) => client,
         Err(error) => {
             return LinkAuditResult {
-                urls_found: urls.len(),
+                urls_found: candidates.len(),
                 checked: 0,
                 ok: 0,
-                failed: urls.len(),
+                failed: candidates.len(),
                 rows: vec![link_audit_row(
                     "http-client",
                     format!("cliente HTTP falhou: {error}"),
@@ -64,10 +68,21 @@ pub(crate) fn run_link_audit(text: &str) -> LinkAuditResult {
         }
     };
 
-    let rows = urls
+    let mut rows = candidates
         .iter()
-        .map(|url| probe_public_url(&client, url))
+        .filter_map(|candidate| {
+            candidate
+                .rejection
+                .as_ref()
+                .map(|reason| link_audit_row(candidate.url.clone(), reason.clone(), "blocked"))
+        })
         .collect::<Vec<_>>();
+    rows.extend(
+        public_urls
+            .iter()
+            .map(|url| probe_public_url(&client, url))
+            .collect::<Vec<_>>(),
+    );
     let ok = rows.iter().filter(|row| row.tone == "ok").count();
     let failed = rows
         .iter()
@@ -75,14 +90,15 @@ pub(crate) fn run_link_audit(text: &str) -> LinkAuditResult {
         .count();
 
     LinkAuditResult {
-        urls_found: urls.len(),
-        checked: rows.len(),
+        urls_found: candidates.len(),
+        checked: public_urls.len(),
         ok,
         failed,
         rows,
     }
 }
 
+#[cfg(test)]
 pub(crate) fn extract_public_urls(text: &str) -> Vec<String> {
     let Some(regex) = Regex::new(r#"https?://[^\s<>"')\]]+"#).ok() else {
         return Vec::new();
@@ -104,30 +120,70 @@ pub(crate) fn extract_public_urls(text: &str) -> Vec<String> {
     urls.into_iter().collect()
 }
 
+struct LinkCandidate {
+    url: String,
+    public: bool,
+    rejection: Option<String>,
+}
+
+fn extract_url_candidates(text: &str) -> Vec<LinkCandidate> {
+    let Some(regex) = Regex::new(r#"https?://[^\s<>"')\]]+"#).ok() else {
+        return Vec::new();
+    };
+
+    let mut seen = BTreeSet::new();
+    let mut candidates = Vec::new();
+    for matched in regex.find_iter(text).take(80) {
+        let cleaned = matched
+            .as_str()
+            .trim_end_matches(['.', ',', ';', ':'])
+            .to_string();
+        if !seen.insert(cleaned.clone()) {
+            continue;
+        }
+        let rejection = public_http_url_rejection_reason(&cleaned);
+        candidates.push(LinkCandidate {
+            url: cleaned,
+            public: rejection.is_none(),
+            rejection,
+        });
+        if candidates.len() >= 30 {
+            break;
+        }
+    }
+    candidates
+}
+
 pub(crate) fn is_public_http_url(value: &str) -> bool {
+    public_http_url_rejection_reason(value).is_none()
+}
+
+fn public_http_url_rejection_reason(value: &str) -> Option<String> {
     let Ok(url) = Url::parse(value) else {
-        return false;
+        return Some("URL invalida ou incompleta".to_string());
     };
     if !matches!(url.scheme(), "http" | "https") {
-        return false;
+        return Some("somente links http:// ou https:// podem ser auditados".to_string());
     }
     let Some(host) = url.host_str().map(|host| host.to_ascii_lowercase()) else {
-        return false;
+        return Some("link sem host/dominio".to_string());
     };
 
     if matches!(host.as_str(), "localhost" | "localhost.localdomain")
         || host.ends_with(".localhost")
         || host.ends_with(".local")
     {
-        return false;
+        return Some("endereco local bloqueado por seguranca".to_string());
     }
 
     let host_for_ip = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = host_for_ip.parse::<IpAddr>() {
-        return !is_blocked_link_audit_ip(ip);
+        if is_blocked_link_audit_ip(ip) {
+            return Some("IP privado, reservado ou local bloqueado por seguranca".to_string());
+        }
     }
 
-    true
+    None
 }
 
 fn is_blocked_link_audit_ip(ip: IpAddr) -> bool {
@@ -224,9 +280,23 @@ fn link_audit_row(
     status: impl Into<String>,
     tone: impl Into<String>,
 ) -> LinkAuditRow {
+    let status = status.into();
+    let tone = tone.into();
+    let invalidity = link_invalidity_summary(&status, &tone);
     LinkAuditRow {
         url: sanitize_text(&url.into(), 240),
-        status: sanitize_text(&status.into(), 160),
-        tone: sanitize_short(&tone.into(), 16),
+        status: sanitize_text(&status, 160),
+        invalidity: sanitize_text(&invalidity, 180),
+        tone: sanitize_short(&tone, 16),
     }
+}
+
+fn link_invalidity_summary(status: &str, tone: &str) -> String {
+    if tone == "ok" {
+        return "link acessivel".to_string();
+    }
+    if let Some(code) = status.strip_prefix("HTTP ") {
+        return format!("resposta HTTP {code}");
+    }
+    status.to_string()
 }

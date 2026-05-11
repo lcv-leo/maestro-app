@@ -259,6 +259,7 @@ pub(crate) struct LinkAuditRequest {
 pub(crate) struct LinkAuditRow {
     pub(crate) url: String,
     pub(crate) status: String,
+    pub(crate) invalidity: String,
     pub(crate) tone: String,
 }
 
@@ -625,8 +626,9 @@ pub(crate) use crate::app_init::{hidden_command, initialize_app_root, install_pr
 
 pub(crate) use crate::editorial_io::{
     api_error_message, command_working_dir_for_output, extract_maestro_status,
-    extract_stdout_block, log_editorial_agent_finished, log_editorial_agent_running,
-    log_editorial_agent_spawned, read_text_file, strip_process_management_noise, write_text_file,
+    extract_stdout_block, extract_tagged_block, log_editorial_agent_finished,
+    log_editorial_agent_running, log_editorial_agent_spawned, read_text_file,
+    strip_process_management_noise, write_text_file,
 };
 
 #[derive(Clone)]
@@ -739,7 +741,7 @@ mod tests {
     use crate::command_spawn::{apply_editorial_agent_environment, classify_pipe_error};
     use crate::editorial_inputs::{effective_agent_input, prepare_agent_input};
     use crate::editorial_prompts::{claude_args, codex_args, gemini_args};
-    use crate::link_audit::{extract_public_urls, is_public_http_url};
+    use crate::link_audit::{extract_public_urls, is_public_http_url, run_link_audit};
     use crate::provider_retry::parse_retry_after_header;
     use crate::session_artifacts::{parse_agent_artifact_name, parse_agent_artifact_result};
     use crate::session_controls::{normalize_active_agents, provider_cost};
@@ -1030,6 +1032,23 @@ mod tests {
             "Veja https://example.com/a, http://localhost:8787/x e https://example.org/b.",
         );
         assert_eq!(urls, vec!["https://example.com/a", "https://example.org/b"]);
+    }
+
+    #[test]
+    fn link_audit_reports_blocked_links_with_invalidity() {
+        let audit = run_link_audit("Veja http://localhost:8787/x e http://127.0.0.1/test.");
+
+        assert_eq!(audit.urls_found, 2);
+        assert_eq!(audit.checked, 0);
+        assert_eq!(audit.failed, 2);
+        assert!(audit
+            .rows
+            .iter()
+            .any(|row| row.url == "http://localhost:8787/x" && row.tone == "blocked"));
+        assert!(audit
+            .rows
+            .iter()
+            .all(|row| !row.invalidity.trim().is_empty()));
     }
 
     #[test]
@@ -2167,12 +2186,17 @@ mod tests {
         .unwrap();
         write_text_file(
             &agent_dir.join("round-007-gemini-revision.md"),
-            "# Gemini - revision\n\n- CLI: `gemini`\n- Status: `DRAFT_CREATED`\n- Exit code: `0`\n- Duration ms: `20`\n\n## Stdout\n\n```text\nrascunho revisado\n```\n\n## Stderr\n\n```text\n\n```\n",
+            "# Gemini - revision\n\n- CLI: `gemini`\n- Status: `DRAFT_CREATED`\n- Exit code: `0`\n- Duration ms: `20`\n\n## Stdout\n\n```text\nMAESTRO_STATUS: READY\n<maestro_revision_report>{\"changes\":[]}</maestro_revision_report>\n<maestro_final_text>rascunho revisado</maestro_final_text>\n```\n\n## Stderr\n\n```text\n\n```\n",
         )
         .unwrap();
         write_text_file(
             &agent_dir.join("round-008-claude-revision.md"),
             "# Claude - revision\n\n- CLI: `claude`\n- Status: `RUNNING`\n- Exit code: `unknown`\n- Duration ms: `0`\n\n## Stdout\n\n```text\n\n```\n\n## Stderr\n\n```text\n\n```\n",
+        )
+        .unwrap();
+        write_text_file(
+            &agent_dir.join("round-009-codex-revision.md"),
+            "# Codex - revision\n\n- CLI: `codex`\n- Status: `READY`\n- Exit code: `0`\n- Duration ms: `30`\n\n## Stdout\n\n```text\nMAESTRO_STATUS: READY\n<maestro_revision_report>{\"changes\":[]}</maestro_revision_report>\nrelatorio interno sem bloco final\n```\n\n## Stderr\n\n```text\n\n```\n",
         )
         .unwrap();
 
@@ -2190,7 +2214,7 @@ mod tests {
         let state = load_resume_session_state(&agent_dir).unwrap();
         assert_eq!(state.current_draft, "rascunho revisado");
         assert_eq!(state.next_review_round, 7);
-        assert_eq!(state.existing_agents.len(), 3);
+        assert_eq!(state.existing_agents.len(), 4);
 
         let _ = fs::remove_dir_all(&session_dir);
     }

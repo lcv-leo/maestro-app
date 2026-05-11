@@ -242,6 +242,21 @@ pub(crate) fn strip_leading_maestro_status(output: &str) -> String {
     }
 }
 
+pub(crate) fn extract_tagged_block(output: &str, tag: &str) -> Option<String> {
+    if tag
+        .chars()
+        .any(|character| !character.is_ascii_alphanumeric() && character != '_' && character != '-')
+    {
+        return None;
+    }
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = output.find(&open)? + open.len();
+    let end = output[start..].find(&close)? + start;
+    let value = output[start..end].trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
 pub(crate) fn strip_process_management_noise(output: &str) -> String {
     let mut kept = Vec::new();
     let mut dropping_leading_noise = true;

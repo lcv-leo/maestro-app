@@ -36,8 +36,8 @@
 use std::path::Path;
 
 use crate::{
-    extract_stdout_block, read_text_file, sanitize_text, EditorialAgentResult, EditorialAgentSpec,
-    EditorialSessionRequest,
+    extract_stdout_block, extract_tagged_block, read_text_file, sanitize_text,
+    EditorialAgentResult, EditorialAgentSpec, EditorialSessionRequest,
 };
 
 pub(crate) fn claude_args() -> Vec<String> {
@@ -193,6 +193,7 @@ Do not invent links. If evidence is missing, mark it explicitly as `[EVIDENCIA_P
     )
 }
 
+#[cfg(test)]
 pub(crate) fn build_review_prompt(
     request: &EditorialSessionRequest,
     run_id: &str,
@@ -288,6 +289,7 @@ Every `NOT_READY` item must identify the exact passage or requirement that is un
     )
 }
 
+#[cfg(test)]
 pub(crate) fn build_review_objections_block(review_agents: &[EditorialAgentResult]) -> String {
     let mut review_notes = String::new();
     for agent in review_agents {
@@ -311,6 +313,39 @@ pub(crate) fn build_review_objections_block(review_agents: &[EditorialAgentResul
     review_notes
 }
 
+pub(crate) fn build_revision_history_block(agents: &[EditorialAgentResult]) -> String {
+    let mut history = String::new();
+    for agent in agents {
+        if agent.role != "review" && agent.role != "revision" {
+            continue;
+        }
+        if is_operational_agent_result(agent) {
+            continue;
+        }
+        let artifact = read_text_file(Path::new(&agent.output_path)).unwrap_or_default();
+        let stdout = extract_stdout_block(&artifact).unwrap_or(artifact.as_str());
+        let report = extract_tagged_block(stdout, "maestro_revision_report")
+            .unwrap_or_else(|| stdout.chars().take(8_000).collect::<String>());
+        let report = report.trim();
+        if report.is_empty() {
+            continue;
+        }
+        history.push_str(&format!(
+            "\n### {} / {} / `{}`\n\nArtifact: `{}`\n\n```text\n{}\n```\n",
+            agent.name,
+            agent.role,
+            agent.status,
+            agent.output_path,
+            report.chars().take(12_000).collect::<String>()
+        ));
+    }
+    if history.trim().is_empty() {
+        "No prior revision reports are recorded for this serial cycle.".to_string()
+    } else {
+        history
+    }
+}
+
 pub(crate) fn is_operational_agent_result(agent: &EditorialAgentResult) -> bool {
     agent.tone == "error"
         || agent.tone == "blocked"
@@ -332,6 +367,110 @@ pub(crate) fn is_operational_agent_result(agent: &EditorialAgentResult) -> bool 
         || agent.status.starts_with("PROVIDER_")
 }
 
+pub(crate) fn build_serial_revision_prompt(
+    request: &EditorialSessionRequest,
+    run_id: &str,
+    turn: usize,
+    current_text: &str,
+    current_author_key: &str,
+    reviewer_key: &str,
+    previous_revision_history: &str,
+    evidence_block: &str,
+) -> String {
+    format!(
+        r#"# Maestro Editorial AI - Serial Review-Rewrite Turn
+
+Run: `{run_id}`
+Serial turn: `{turn}`
+Session: {}
+
+## Language Contract
+
+- Internal coordination, critique, changelog, and revision report MUST be written in en_US.
+- The operator-facing article inside `<maestro_final_text>` MUST be written in Brazilian Portuguese (pt_BR).
+- Keep protocol markers exactly as specified.
+
+## Role Contract
+
+- Current version author/curator: `{}`.
+- Current reviewer-reviser: `{}`.
+- You are not allowed to review a version you just produced. If you are the current version author, return `MAESTRO_STATUS: NOT_READY` and state `SELF_REVIEW_BLOCKED`.
+- You must act as reviewer and reviser in one turn: inspect the current text, apply only authorized corrections, and return the complete current article.
+
+## Sovereign Approved-Content Lock
+
+Approved content is locked by default.
+You may alter a passage only when at least one hard gate applies:
+
+1. A prior revision report or blocker explicitly cites that passage.
+2. The passage contains a concrete, protocol-grounded defect that blocks safe final delivery.
+3. A tiny adjacent edit is strictly necessary to keep grammar or continuity after an authorized correction.
+
+If none of those gates applies, preserve the passage exactly. Do not restyle, shorten, reorder, simplify, expand, or replace it.
+If a concern is optional, stylistic, vague, or outside scope, mark it as `OUT_OF_SCOPE` in the report and leave the text unchanged.
+
+## Quality Preservation / Anti-Impoverishment Gate
+
+Codex and Claude are the strongest long-form writers in this system. Gemini is second. DeepSeek and Grok are useful reviewers but must not flatten stronger prose.
+Preserve the strongest existing formulation unless a concrete editorial-protocol defect requires a narrow change.
+Do not reduce breadth, depth, articulation, nuance, reflexivity, or argumentative amplitude.
+Any deletion, compression, simplification, or structural narrowing must be justified in the report with:
+
+- the exact passage changed;
+- the exact protocol requirement;
+- why preserving the stronger formulation would be unsafe or incorrect.
+
+If you are unsure, preserve the passage and report the concern instead of rewriting it.
+
+## Required Output Contract
+
+The answer MUST contain exactly these parts:
+
+1. First line: `MAESTRO_STATUS: READY` or `MAESTRO_STATUS: NOT_READY`.
+2. `<maestro_revision_report>` containing en_US JSON-like audit data:
+   - `reviewer`
+   - `current_author`
+   - `status`
+   - `changes`: list of changed passages, received line/passage reference, reason, protocol citation, and whether the change was required.
+   - `out_of_scope`: concerns intentionally not changed.
+   - `quality_preservation`: explicit statement that approved strong formulations were preserved; if not, justify each reduction.
+3. `<maestro_final_text>` containing only the complete operator-facing article in pt_BR.
+
+Anything outside those tags may be discarded by the app.
+
+## Operator Request
+
+{}
+
+## Full Editorial Protocol
+
+```markdown
+{}
+```
+
+## Current Text Under Custody
+
+```markdown
+{}
+```
+
+## Prior Serial Revision Reports
+
+{}
+{}
+"#,
+        sanitize_text(&request.session_name, 200),
+        sanitize_text(current_author_key, 80),
+        sanitize_text(reviewer_key, 80),
+        request.prompt,
+        request.protocol_text,
+        current_text,
+        previous_revision_history,
+        evidence_block
+    )
+}
+
+#[cfg(test)]
 pub(crate) fn build_revision_prompt(
     request: &EditorialSessionRequest,
     run_id: &str,
@@ -406,7 +545,7 @@ Write the entire revised text only to stdout. Do not create local files.
 mod tests {
     use super::{
         build_draft_prompt, build_review_objections_block, build_review_prompt,
-        build_revision_prompt,
+        build_revision_history_block, build_revision_prompt, build_serial_revision_prompt,
     };
     use crate::{app_paths::sessions_dir, EditorialAgentResult, EditorialSessionRequest};
     use std::path::PathBuf;
@@ -472,6 +611,27 @@ mod tests {
     }
 
     #[test]
+    fn serial_revision_prompt_separates_report_from_final_text_and_quality_gate() {
+        let prompt = build_serial_revision_prompt(
+            &test_request(),
+            "run-test",
+            3,
+            "Texto atual",
+            "codex",
+            "deepseek",
+            "No prior reports.",
+            "",
+        );
+
+        assert!(prompt.contains("Serial Review-Rewrite Turn"));
+        assert!(prompt.contains("<maestro_revision_report>"));
+        assert!(prompt.contains("<maestro_final_text>"));
+        assert!(prompt.contains("Quality Preservation / Anti-Impoverishment Gate"));
+        assert!(prompt.contains("must not flatten stronger prose"));
+        assert!(prompt.contains("Internal coordination, critique, changelog, and revision report MUST be written in en_US"));
+    }
+
+    #[test]
     fn review_objections_block_excludes_ready_votes() {
         let dir = sessions_dir().join(format!("maestro-review-objections-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
@@ -496,6 +656,39 @@ mod tests {
 
         assert!(!block.contains("Approved."));
         assert!(block.contains("Fix citation 3 only."));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn revision_history_block_extracts_internal_report_only() {
+        let dir = sessions_dir().join(format!("maestro-revision-history-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let artifact_path = dir.join("round-002-codex-revision.md");
+        std::fs::write(
+            &artifact_path,
+            "# Codex\n\n## Stdout\n\n```text\nMAESTRO_STATUS: READY\n<maestro_revision_report>{\"changes\":[]}</maestro_revision_report>\n<maestro_final_text>Texto final</maestro_final_text>\n```\n",
+        )
+        .unwrap();
+        let agents = vec![EditorialAgentResult {
+            name: "Codex".to_string(),
+            role: "review".to_string(),
+            cli: "codex".to_string(),
+            tone: "ok".to_string(),
+            status: "READY".to_string(),
+            duration_ms: 1,
+            exit_code: Some(0),
+            output_path: artifact_path.to_string_lossy().to_string(),
+            usage_input_tokens: None,
+            usage_output_tokens: None,
+            cost_usd: None,
+            cost_estimated: None,
+            cache: None,
+        }];
+
+        let block = build_revision_history_block(&agents);
+
+        assert!(block.contains("{\"changes\":[]}"));
+        assert!(!block.contains("Texto final"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

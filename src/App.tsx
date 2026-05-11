@@ -177,6 +177,7 @@ export function App() {
   const [discussionItems, setDiscussionItems] = useState<DiscussionRound[]>(initialDiscussionRounds);
   const [agentCards, setAgentCards] = useState<AgentCard[]>(initialAgents);
   const [evidenceRows, setEvidenceRows] = useState<EvidenceRow[]>(initialEvidenceRows);
+  const [linkAuditRows, setLinkAuditRows] = useState<LinkAuditResult['rows']>([]);
   const [protocolGateItems, setProtocolGateItems] = useState<ProtocolReadingGate[]>(initialProtocolReadingGates);
   const [cloudflarePermissionRows, setCloudflarePermissionRows] = useState<CloudflarePermissionRow[]>(
     initialCloudflarePermissionChecks,
@@ -218,6 +219,10 @@ export function App() {
       : 'Iniciar sessao';
   const formalState = humanizeRunStatus(operation.status);
   const linkEvidenceState = evidenceRows.find((item) => item.label === 'Links')?.value ?? 'nao iniciado';
+  const invalidLinkRows = useMemo(
+    () => linkAuditRows.filter((row) => row.tone === 'error' || row.tone === 'blocked' || row.tone === 'warn'),
+    [linkAuditRows],
+  );
   const activeNavItem = navItems.find((item) => item.section === activeSection) ?? navItems[0];
   const cloudflareTokenAvailable = cloudflareApiToken.length > 0 || Boolean(cloudflareEnvSnapshot?.api_token_present);
   const operationIndeterminate = operation.status === 'running';
@@ -412,6 +417,7 @@ export function App() {
   async function auditEvidenceNow() {
     const sourceText = [editorialPrompt, protocolText, mainSiteHtml].join('\n\n');
     setIsAuditingEvidence(true);
+    setLinkAuditRows([]);
     setEvidenceRows((current) =>
       current.map((row) => (row.label === 'Links' ? { ...row, value: 'verificando links', tone: 'info' } : row)),
     );
@@ -420,6 +426,9 @@ export function App() {
       const result = await invoke<LinkAuditResult>('audit_links', {
         request: { text: sourceText },
       });
+      const failedLinkLabel =
+        result.failed === 1 ? '1 link com problema' : `${result.failed.toLocaleString('pt-BR')} links com problema`;
+      setLinkAuditRows(result.rows);
       setEvidenceRows((current) =>
         current.map((row) => {
           if (row.label !== 'Links') return row;
@@ -429,7 +438,7 @@ export function App() {
           if (result.failed > 0) {
             return {
               ...row,
-              value: `${result.failed.toLocaleString('pt-BR')} falhas em ${result.checked.toLocaleString('pt-BR')} links`,
+              value: failedLinkLabel,
               tone: 'warn',
             };
           }
@@ -446,7 +455,7 @@ export function App() {
         detail:
           result.urls_found === 0
             ? 'Nenhum link foi encontrado no prompt, protocolo ou texto em edicao.'
-            : `${result.ok.toLocaleString('pt-BR')} acessiveis; ${result.failed.toLocaleString('pt-BR')} com falha.`,
+            : `${result.ok.toLocaleString('pt-BR')} acessiveis; ${failedLinkLabel}.`,
       });
       void logEvent({
         level: result.failed > 0 ? 'warn' : 'info',
@@ -457,10 +466,16 @@ export function App() {
           checked: result.checked,
           ok: result.ok,
           failed: result.failed,
-          rows: result.rows.map((row) => ({ url: row.url, tone: row.tone, status: row.status })),
+          rows: result.rows.map((row) => ({
+            url: row.url,
+            tone: row.tone,
+            status: row.status,
+            invalidity: row.invalidity,
+          })),
         },
       });
     } catch (error) {
+      setLinkAuditRows([]);
       setEvidenceRows((current) =>
         current.map((row) => (row.label === 'Links' ? { ...row, value: 'falha na auditoria', tone: 'danger' } : row)),
       );
@@ -2685,6 +2700,19 @@ export function App() {
                   </div>
                 ))}
               </div>
+              {invalidLinkRows.length > 0 && (
+                <div className="link-audit-list" aria-label="Links com problema">
+                  {invalidLinkRows.map((row) => (
+                    <div className={`link-audit-row ${row.tone}`} key={`${row.url}-${row.status}`}>
+                      <div>
+                        <strong>{row.url}</strong>
+                        <span>{row.invalidity || row.status}</span>
+                      </div>
+                      <small>{row.status}</small>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div className="panel">

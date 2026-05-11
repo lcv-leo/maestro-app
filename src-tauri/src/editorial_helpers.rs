@@ -38,10 +38,10 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 
+#[cfg(test)]
+use crate::extract_stdout_block;
 use crate::session_controls::normalize_active_agents;
-use crate::{
-    extract_stdout_block, read_text_file, sanitize_text, write_text_file, EditorialAgentResult,
-};
+use crate::{read_text_file, sanitize_text, write_text_file, EditorialAgentResult};
 
 pub(crate) fn filter_existing_agents_to_active_set(
     existing: Vec<EditorialAgentResult>,
@@ -95,6 +95,7 @@ pub(crate) fn resolve_effective_active_agents(
 /// so consecutive identical NOT_READY rebuttals can be detected as persistent
 /// divergence. Walks the artifact's `## Stdout` block, collapses whitespace,
 /// and returns a stable u64 fingerprint based on the first 1024 chars.
+#[cfg(test)]
 pub(crate) fn review_complaint_fingerprint(artifact: &str) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};

@@ -29,7 +29,6 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::thread;
 
 use crate::app_paths::{
     checked_data_child_path, human_log_path_for, sanitize_path_segment, sessions_dir,
@@ -37,18 +36,19 @@ use crate::app_paths::{
 use crate::editorial_agent_runners::run_editorial_agent_for_spec;
 use crate::editorial_helpers::{
     filter_existing_agents_to_active_set, resolve_effective_active_agents,
-    review_complaint_fingerprint, FinalizeRunningArtifactsGuard,
+    FinalizeRunningArtifactsGuard,
 };
 use crate::editorial_inputs::{
     build_active_agents_resolved_log_context, resolve_time_budget_anchor,
 };
 use crate::editorial_io::{
-    editorial_session_result, extract_stdout_block, read_text_file, strip_leading_maestro_status,
-    write_text_file, SessionResultContext,
+    editorial_session_result, extract_stdout_block, extract_tagged_block, read_text_file,
+    strip_leading_maestro_status, write_text_file, SessionResultContext,
 };
+#[cfg(test)]
+use crate::editorial_prompts::is_operational_agent_result;
 use crate::editorial_prompts::{
-    build_draft_prompt, build_review_objections_block, build_review_prompt, build_revision_prompt,
-    is_operational_agent_result,
+    build_draft_prompt, build_revision_history_block, build_serial_revision_prompt,
 };
 use crate::logging::{write_log_record, LogEventInput, LogSession};
 use crate::provider_config::{
@@ -67,9 +67,11 @@ use crate::session_persistence::{
 };
 use crate::session_resume::{parse_created_at, remaining_session_duration, session_time_exhausted};
 use crate::tauri_commands::read_ai_provider_config;
+#[cfg(test)]
+use crate::EditorialAgentResult;
 use crate::{
-    api_input_estimate_chars, sanitize_text, AiProviderConfig, EditorialAgentResult,
-    EditorialSessionRequest, EditorialSessionResult, ResumeSessionState, SessionContract,
+    api_input_estimate_chars, sanitize_text, AiProviderConfig, EditorialSessionRequest,
+    EditorialSessionResult, ResumeSessionState, SessionContract,
 };
 
 pub(crate) fn run_editorial_session_inner(
@@ -356,9 +358,9 @@ pub(crate) fn run_editorial_session_core(
     let mut current_draft_path: Option<PathBuf> = None;
     let mut current_draft_author_key: Option<String> = None;
     let mut round = 1usize;
-    let mut agent_review_fingerprints: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     let mut consecutive_reviewer_outage_rounds: u32 = 0;
-    let mut previous_blocking_review_notes = String::new();
+    let mut stable_serial_approval_agents = BTreeSet::<String>::new();
+    let mut serial_turns = 0usize;
     const ALL_ERROR_ESCALATION_THRESHOLD: u32 = 3;
 
     if let Some(invalid_initial_agent) = invalid_initial_agent {
@@ -407,7 +409,6 @@ pub(crate) fn run_editorial_session_core(
         current_draft_author_key =
             current_draft_author_from_path(&agent_dir, current_draft_path.as_ref());
         round = state.next_review_round.max(1);
-        previous_blocking_review_notes = build_review_objections_block(&agents);
         let _ = write_log_record(
             log_session,
             LogEventInput {
@@ -714,22 +715,14 @@ pub(crate) fn run_editorial_session_core(
             }
         };
         let draft_author_key = current_draft_author_key.as_deref().unwrap_or("unknown");
-        let review_prompt = build_review_prompt(
-            request,
-            &run_id,
-            round,
-            &current_draft,
-            draft_author_key,
-            &previous_blocking_review_notes,
-            &evidence.block,
-        );
         if let Some(author_key) = current_draft_author_key.as_deref() {
             let _ = write_log_record(
                 log_session,
                 LogEventInput {
                     level: "info".to_string(),
-                    category: "session.review.author_excluded".to_string(),
-                    message: "current draft author excluded from peer review round".to_string(),
+                    category: "session.serial.author_excluded".to_string(),
+                    message: "current version author excluded from serial reviewer-reviser turn"
+                        .to_string(),
                     context: Some(json!({
                         "run_id": &run_id,
                         "round": round,
@@ -785,22 +778,106 @@ pub(crate) fn run_editorial_session_core(
                 "PAUSED_REVIEWERS_UNAVAILABLE",
             ));
         }
+        let independent_reviewer_count = review_specs.len();
+        let max_serial_turns = std::cmp::min(12, std::cmp::max(6, independent_reviewer_count * 3));
+        serial_turns += 1;
+        if serial_turns > max_serial_turns {
+            let _ = write_log_record(
+                log_session,
+                LogEventInput {
+                    level: "warn".to_string(),
+                    category: "session.serial.turn_cap_reached".to_string(),
+                    message: "serial editorial cycle paused after the configured hard turn cap"
+                        .to_string(),
+                    context: Some(json!({
+                        "run_id": &run_id,
+                        "round": round,
+                        "serial_turns": serial_turns,
+                        "max_serial_turns": max_serial_turns,
+                        "stable_serial_approvals": stable_serial_approval_agents.len(),
+                        "policy": "avoid_infinite_serial_deliberation"
+                    })),
+                },
+            );
+            let minutes_path = session_dir.join("ata-da-sessao.md");
+            write_text_file(
+                &minutes_path,
+                &build_session_minutes(request, &run_id, &agents, false, None),
+            )?;
+            let context = SessionResultContext {
+                run_id: &run_id,
+                session_dir: &session_dir,
+                prompt_path: &prompt_path,
+                protocol_path: &protocol_path,
+                active_agents: &active_agent_keys,
+                max_session_cost_usd,
+                max_session_minutes,
+                observed_cost_usd: cost_ledger.total_observed_cost_usd,
+                links_path: evidence.links_path.as_ref(),
+                attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
+                human_log_path: &human_log_path,
+            };
+            return Ok(editorial_session_result(
+                &context,
+                None,
+                &minutes_path,
+                current_draft_path,
+                agents,
+                false,
+                "PAUSED_EDITORIAL_CYCLE_LIMIT",
+            ));
+        }
+
+        let reviewer_index = (round.saturating_sub(1)) % review_specs.len();
+        let spec = review_specs[reviewer_index];
+        let previous_revision_history = build_revision_history_block(&agents);
+        let review_prompt = build_serial_revision_prompt(
+            request,
+            &run_id,
+            round,
+            &current_draft,
+            draft_author_key,
+            spec.key,
+            &previous_revision_history,
+            &evidence.block,
+        );
+        let _ = write_log_record(
+            log_session,
+            LogEventInput {
+                level: "info".to_string(),
+                category: "session.serial.reviewer_selected".to_string(),
+                message: "serial reviewer-reviser selected for the current version".to_string(),
+                context: Some(json!({
+                    "run_id": &run_id,
+                    "round": round,
+                    "reviewer": spec.key,
+                    "current_author": draft_author_key,
+                    "stable_serial_approvals": stable_serial_approval_agents.len(),
+                    "independent_reviewer_count": independent_reviewer_count,
+                    "policy": "one_peer_revises_then_passes_to_next_peer_no_self_review"
+                })),
+            },
+        );
         if let Some(max_cost_usd) = max_session_cost_usd {
-            let projected_round_cost_usd = review_specs
-                .iter()
-                .filter(|spec| api_agent_keys.contains(spec.key))
-                .filter_map(|spec| {
-                    let provider = api_provider_for_agent(spec.key)?;
-                    let rates = provider_cost_rates.get(spec.key).copied()?;
-                    let input_estimate_chars =
-                        api_input_estimate_chars(&review_prompt, &evidence.attachments, provider);
-                    Some(estimate_provider_cost_from_input_chars(
-                        input_estimate_chars,
-                        api_role_max_tokens("review"),
-                        rates,
-                    ))
-                })
-                .sum::<f64>();
+            let projected_round_cost_usd = if api_agent_keys.contains(spec.key) {
+                api_provider_for_agent(spec.key)
+                    .and_then(|provider| {
+                        let rates = provider_cost_rates.get(spec.key).copied()?;
+                        let input_estimate_chars = api_input_estimate_chars(
+                            &review_prompt,
+                            &evidence.attachments,
+                            provider,
+                        );
+                        Some(estimate_provider_cost_from_input_chars(
+                            input_estimate_chars,
+                            api_role_max_tokens("review"),
+                            rates,
+                        ))
+                    })
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
             if projected_round_cost_usd > 0.0
                 && cost_ledger.total_observed_cost_usd + projected_round_cost_usd > max_cost_usd
             {
@@ -808,16 +885,16 @@ pub(crate) fn run_editorial_session_core(
                     log_session,
                     LogEventInput {
                         level: "warn".to_string(),
-                        category: "session.cost.review_round_blocked".to_string(),
-                        message: "review round not started because remaining budget cannot cover all independent reviewers".to_string(),
+                        category: "session.cost.serial_turn_blocked".to_string(),
+                        message: "serial reviewer-reviser turn not started because remaining budget cannot cover it".to_string(),
                         context: Some(json!({
                             "run_id": &run_id,
                             "round": round,
                             "observed_cost_usd": cost_ledger.total_observed_cost_usd,
                             "projected_review_round_cost_usd": projected_round_cost_usd,
                             "max_session_cost_usd": max_cost_usd,
-                            "review_agents": review_specs.iter().map(|spec| spec.key).collect::<Vec<_>>(),
-                            "policy": "do_not_start_partial_review_round_when_cost_cap_would_interrupt_it"
+                            "review_agent": spec.key,
+                            "policy": "do_not_start_paid_serial_turn_when_cost_cap_would_interrupt_it"
                         })),
                     },
                 );
@@ -850,126 +927,36 @@ pub(crate) fn run_editorial_session_core(
                 ));
             }
         }
-        let enforce_sequential_budget = max_session_cost_usd.is_some()
-            && review_specs
-                .iter()
-                .any(|spec| api_agent_keys.contains(spec.key));
-        let mut round_results = Vec::new();
-        if enforce_sequential_budget {
-            for spec in review_specs {
-                let output_path = agent_attempt_output_path(&agent_dir, round, spec.key, "review");
-                let timeout = remaining_session_duration(time_budget_anchor, max_session_minutes);
-                let use_api_agent = api_agent_keys.contains(spec.key);
-                let cost_guard = if use_api_agent {
-                    provider_cost_guard_for(
-                        max_session_cost_usd,
-                        provider_cost_rates.get(spec.key).copied(),
-                        &cost_ledger,
-                    )
-                } else {
-                    None
-                };
-                let result = run_editorial_agent_for_spec(
-                    log_session,
-                    &run_id,
-                    spec,
-                    "review",
-                    review_prompt.clone(),
-                    &evidence.attachments,
-                    &output_path,
-                    timeout,
-                    &ai_provider_config,
-                    cost_guard,
-                    use_api_agent,
-                    cancel_token,
-                );
-                let cost_limit_reached = result.status == "COST_LIMIT_REACHED";
-                round_results.push(result.clone());
-                append_agent_cost_to_ledger(
-                    &session_dir,
-                    &mut cost_ledger,
-                    &cost_scope_id,
-                    &result,
-                )?;
-                agents.push(result);
-                if cost_limit_reached {
-                    break;
-                }
-            }
+        let output_path = agent_attempt_output_path(&agent_dir, round, spec.key, "revision");
+        let timeout = remaining_session_duration(time_budget_anchor, max_session_minutes);
+        let use_api_agent = api_agent_keys.contains(spec.key);
+        let cost_guard = if use_api_agent {
+            provider_cost_guard_for(
+                max_session_cost_usd,
+                provider_cost_rates.get(spec.key).copied(),
+                &cost_ledger,
+            )
         } else {
-            let review_handles = review_specs
-                .into_iter()
-                .map(|spec| {
-                    let prompt = review_prompt.clone();
-                    let attachments = evidence.attachments.clone();
-                    let output_path =
-                        agent_attempt_output_path(&agent_dir, round, spec.key, "review");
-                    let run_id = run_id.clone();
-                    let log_session = log_session.clone();
-                    let ai_provider_config = ai_provider_config.clone();
-                    let timeout =
-                        remaining_session_duration(time_budget_anchor, max_session_minutes);
-                    let use_api_agent = api_agent_keys.contains(spec.key);
-                    let cost_guard = if use_api_agent {
-                        provider_cost_guard_for(
-                            max_session_cost_usd,
-                            provider_cost_rates.get(spec.key).copied(),
-                            &cost_ledger,
-                        )
-                    } else {
-                        None
-                    };
-                    let thread_cancel = cancel_token.clone();
-                    thread::spawn(move || {
-                        run_editorial_agent_for_spec(
-                            &log_session,
-                            &run_id,
-                            spec,
-                            "review",
-                            prompt,
-                            &attachments,
-                            &output_path,
-                            timeout,
-                            &ai_provider_config,
-                            cost_guard,
-                            use_api_agent,
-                            &thread_cancel,
-                        )
-                    })
-                })
-                .collect::<Vec<_>>();
+            None
+        };
+        let result = run_editorial_agent_for_spec(
+            log_session,
+            &run_id,
+            spec,
+            "review",
+            review_prompt,
+            &evidence.attachments,
+            &output_path,
+            timeout,
+            &ai_provider_config,
+            cost_guard,
+            use_api_agent,
+            cancel_token,
+        );
+        append_agent_cost_to_ledger(&session_dir, &mut cost_ledger, &cost_scope_id, &result)?;
+        agents.push(result.clone());
 
-            for handle in review_handles {
-                let result = handle.join().unwrap_or_else(|_| EditorialAgentResult {
-                    name: "Unknown".to_string(),
-                    role: "review".to_string(),
-                    cli: "unknown".to_string(),
-                    tone: "error".to_string(),
-                    status: "thread de revisao falhou".to_string(),
-                    duration_ms: 0,
-                    exit_code: None,
-                    output_path: String::new(),
-                    usage_input_tokens: None,
-                    usage_output_tokens: None,
-                    cost_usd: None,
-                    cost_estimated: None,
-                    cache: None,
-                });
-                round_results.push(result.clone());
-                append_agent_cost_to_ledger(
-                    &session_dir,
-                    &mut cost_ledger,
-                    &cost_scope_id,
-                    &result,
-                )?;
-                agents.push(result);
-            }
-        }
-
-        if round_results
-            .iter()
-            .any(|agent| agent.status == "COST_LIMIT_REACHED")
-        {
+        if result.status == "COST_LIMIT_REACHED" {
             let minutes_path = session_dir.join("ata-da-sessao.md");
             write_text_file(
                 &minutes_path,
@@ -999,97 +986,21 @@ pub(crate) fn run_editorial_session_core(
             ));
         }
 
-        let consensus_ready = round_results
-            .iter()
-            .all(|agent| agent.tone == "ok" && agent.status == "READY");
-        if consensus_ready {
-            let path = session_dir.join("texto-final.md");
-            let public_final_text = strip_leading_maestro_status(&current_draft);
-            write_text_file(&path, &public_final_text)?;
-            final_path = path;
-            break;
-        }
-
-        let operational_failure = round_results
-            .iter()
-            .any(|agent| agent.tone == "error" || agent.tone == "blocked");
-        if operational_failure {
+        if result.tone == "error" || result.tone == "blocked" {
+            consecutive_reviewer_outage_rounds += 1;
             let _ = write_log_record(
                 log_session,
                 LogEventInput {
                     level: "warn".to_string(),
-                    category: "session.review.operational_failure".to_string(),
-                    message: "review round has an operational agent failure; final delivery remains unavailable".to_string(),
+                    category: "session.serial.operational_failure".to_string(),
+                    message: "serial reviewer-reviser turn had an operational failure; keeping current text and moving on".to_string(),
                     context: Some(json!({
                         "run_id": &run_id,
                         "round": round,
-                        "policy": "no_final_delivery_without_unanimity",
-                        "next_state": "continue_with_revision_and_retry_reviews"
-                    })),
-                },
-            );
-        }
-
-        previous_blocking_review_notes = build_review_objections_block(&round_results);
-
-        for agent in &round_results {
-            if agent.status == "READY" {
-                continue;
-            }
-            if is_operational_agent_result(agent) {
-                continue;
-            }
-            let fingerprint = review_complaint_fingerprint(
-                &read_text_file(Path::new(&agent.output_path)).unwrap_or_default(),
-            );
-            let history = agent_review_fingerprints
-                .entry(agent.name.clone())
-                .or_default();
-            history.push(fingerprint);
-            if history.len() > 3 {
-                history.remove(0);
-            }
-            if history.len() == 3 && history.windows(2).all(|pair| pair[0] == pair[1]) {
-                let _ = write_log_record(
-                    log_session,
-                    LogEventInput {
-                        level: "warn".to_string(),
-                        category: "session.divergence.persistent".to_string(),
-                        message: "agent has repeated the same NOT_READY rebuttal across 3 consecutive rounds".to_string(),
-                        context: Some(json!({
-                            "run_id": &run_id,
-                            "round": round,
-                            "agent": agent.name.clone(),
-                            "status": agent.status.clone(),
-                            "fingerprint": history.last().copied(),
-                            "policy": "partial_v0_3_15_surface_only_no_auto_resolve"
-                        })),
-                    },
-                );
-            }
-        }
-
-        let has_editorial_blockers = round_results.iter().any(|agent| {
-            agent.role == "review" && agent.status != "READY" && !is_operational_agent_result(agent)
-        });
-        if !has_editorial_blockers {
-            if is_operational_only_review_round(&round_results) {
-                consecutive_reviewer_outage_rounds += 1;
-            } else {
-                consecutive_reviewer_outage_rounds = 0;
-            }
-            let _ = write_log_record(
-                log_session,
-                LogEventInput {
-                    level: "warn".to_string(),
-                    category: "session.revision.skipped_operational_only".to_string(),
-                    message: "revision skipped because this round produced only operational failures, not editorial blockers".to_string(),
-                    context: Some(json!({
-                        "run_id": &run_id,
-                        "round": round,
+                        "agent": result.name,
+                        "status": result.status,
                         "consecutive_reviewer_outage_rounds": consecutive_reviewer_outage_rounds,
-                        "threshold": ALL_ERROR_ESCALATION_THRESHOLD,
-                        "policy": "operational_failures_trigger_review_retry_not_text_revision"
+                        "policy": "operational_failure_does_not_modify_editorial_text"
                     })),
                 },
             );
@@ -1099,26 +1010,13 @@ pub(crate) fn run_editorial_session_core(
                     LogEventInput {
                         level: "error".to_string(),
                         category: "session.escalation.reviewer_operational_outage".to_string(),
-                        message: "all independent review peers failed operationally across N consecutive rounds; pausing recoverably for operator review".to_string(),
+                        message: "serial reviewer-reviser turns failed operationally across N consecutive attempts; pausing recoverably for operator review".to_string(),
                         context: Some(json!({
                             "run_id": &run_id,
                             "round": round,
                             "draft_author_key": current_draft_author_key.clone(),
                             "consecutive_reviewer_outage_rounds": consecutive_reviewer_outage_rounds,
                             "threshold": ALL_ERROR_ESCALATION_THRESHOLD,
-                            "reviewer_count": round_results.len(),
-                            "peer_statuses": round_results.iter()
-                                .map(|agent| json!({
-                                    "agent": agent.name,
-                                    "status": agent.status,
-                                    "tone": agent.tone,
-                                }))
-                                .collect::<Vec<_>>(),
-                            "recommended_actions": [
-                                "retry_failed_reviewers",
-                                "switch_transport_or_mode",
-                                "enable_additional_independent_reviewers"
-                            ],
                             "policy": "recoverable_pause_no_self_review_no_text_revision"
                         })),
                     },
@@ -1151,165 +1049,122 @@ pub(crate) fn run_editorial_session_core(
                     "PAUSED_REVIEWER_OPERATIONAL_OUTAGE",
                 ));
             }
-            previous_blocking_review_notes.clear();
             round += 1;
             continue;
         }
         consecutive_reviewer_outage_rounds = 0;
 
-        let _ = write_log_record(
-            log_session,
-            LogEventInput {
-                level: "info".to_string(),
-                category: "session.review.not_ready".to_string(),
-                message: "review round has concrete editorial blockers; continuing with a bounded revision round"
-                    .to_string(),
-                context: Some(json!({
-                    "run_id": &run_id,
-                    "round": round,
-                    "policy": "continue_until_unanimous_ready_without_self_review",
-                    "not_ready_agents": round_results.iter()
-                        .filter(|agent| agent.status != "READY" && !is_operational_agent_result(agent))
-                        .map(|agent| agent.name.clone())
-                        .collect::<Vec<_>>()
-                })),
-            },
-        );
-
-        round += 1;
-        let revision_prompt = build_revision_prompt(
-            request,
-            &run_id,
-            round,
-            &current_draft,
-            &round_results,
-            &evidence.block,
-        );
-        let revision_specs = selected_editorial_agent_specs(draft_lead_key, &active_agent_keys);
-        let mut revised = false;
-        for spec in revision_specs {
-            if session_time_exhausted(time_budget_anchor, max_session_minutes) {
-                let minutes_path = session_dir.join("ata-da-sessao.md");
-                write_text_file(
-                    &minutes_path,
-                    &build_session_minutes(request, &run_id, &agents, false, None),
-                )?;
-                let context = SessionResultContext {
-                    run_id: &run_id,
-                    session_dir: &session_dir,
-                    prompt_path: &prompt_path,
-                    protocol_path: &protocol_path,
-                    active_agents: &active_agent_keys,
-                    max_session_cost_usd,
-                    max_session_minutes,
-                    observed_cost_usd: cost_ledger.total_observed_cost_usd,
-                    links_path: evidence.links_path.as_ref(),
-                    attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
-                    human_log_path: &human_log_path,
-                };
-                return Ok(editorial_session_result(
-                    &context,
-                    None,
-                    &minutes_path,
-                    current_draft_path,
-                    agents,
-                    false,
-                    "TIME_LIMIT_REACHED",
-                ));
-            }
-            let output_path = agent_attempt_output_path(&agent_dir, round, spec.key, "revision");
-            let timeout = remaining_session_duration(time_budget_anchor, max_session_minutes);
-            let use_api_agent = api_agent_keys.contains(spec.key);
-            let cost_guard = if use_api_agent {
-                provider_cost_guard_for(
-                    max_session_cost_usd,
-                    provider_cost_rates.get(spec.key).copied(),
-                    &cost_ledger,
-                )
-            } else {
-                None
-            };
-            let revision_run = run_editorial_agent_for_spec(
-                log_session,
-                &run_id,
-                spec,
-                "revision",
-                revision_prompt.clone(),
-                &evidence.attachments,
-                &output_path,
-                timeout,
-                &ai_provider_config,
-                cost_guard,
-                use_api_agent,
-                cancel_token,
-            );
-            agents.push(revision_run.clone());
-            append_agent_cost_to_ledger(
-                &session_dir,
-                &mut cost_ledger,
-                &cost_scope_id,
-                &revision_run,
-            )?;
-            if revision_run.status == "COST_LIMIT_REACHED" {
-                let minutes_path = session_dir.join("ata-da-sessao.md");
-                write_text_file(
-                    &minutes_path,
-                    &build_session_minutes(request, &run_id, &agents, false, None),
-                )?;
-                let context = SessionResultContext {
-                    run_id: &run_id,
-                    session_dir: &session_dir,
-                    prompt_path: &prompt_path,
-                    protocol_path: &protocol_path,
-                    active_agents: &active_agent_keys,
-                    max_session_cost_usd,
-                    max_session_minutes,
-                    observed_cost_usd: cost_ledger.total_observed_cost_usd,
-                    links_path: evidence.links_path.as_ref(),
-                    attachments_manifest_path: evidence.attachments_manifest_path.as_ref(),
-                    human_log_path: &human_log_path,
-                };
-                return Ok(editorial_session_result(
-                    &context,
-                    None,
-                    &minutes_path,
-                    current_draft_path,
-                    agents,
-                    false,
-                    "COST_LIMIT_REACHED",
-                ));
-            }
-            let artifact = read_text_file(&output_path).unwrap_or_default();
-            let revised_text = extract_stdout_block(&artifact).unwrap_or(artifact.as_str());
-            if revision_run.tone != "error"
-                && revision_run.tone != "blocked"
-                && !revised_text.trim().is_empty()
-            {
-                current_draft = revised_text.trim().to_string();
-                current_draft_path = Some(output_path);
-                current_draft_author_key = Some(spec.key.to_string());
-                revised = true;
-                break;
-            }
-        }
-
-        if !revised {
+        let artifact = read_text_file(&output_path).unwrap_or_default();
+        let stdout = extract_stdout_block(&artifact).unwrap_or(artifact.as_str());
+        let Some(revised_text) = extract_tagged_block(stdout, "maestro_final_text") else {
             let _ = write_log_record(
                 log_session,
                 LogEventInput {
                     level: "warn".to_string(),
-                    category: "session.revision.unavailable".to_string(),
+                    category: "session.serial.contract_violation".to_string(),
                     message:
-                        "no revision agent produced usable text; keeping current draft and retrying review"
+                        "serial reviewer-reviser did not return a usable maestro_final_text block"
                             .to_string(),
                     context: Some(json!({
                         "run_id": &run_id,
                         "round": round,
-                        "policy": "continue_until_unanimous_ready"
+                        "agent": spec.key,
+                        "status": result.status,
+                        "policy": "strict_output_contract_required_for_serial_custody"
                     })),
                 },
             );
+            stable_serial_approval_agents.clear();
+            round += 1;
+            continue;
+        };
+
+        let substantive_change = is_substantive_editorial_change(&current_draft, &revised_text);
+        if quality_guard_blocks_revision(
+            current_draft_author_key.as_deref(),
+            spec.key,
+            &current_draft,
+            &revised_text,
+            substantive_change,
+        ) {
+            let _ = write_log_record(
+                log_session,
+                LogEventInput {
+                    level: "warn".to_string(),
+                    category: "session.serial.quality_guard_blocked".to_string(),
+                    message: "serial revision rejected because a lower-tier peer materially shrank a stronger formulation without enough protection".to_string(),
+                    context: Some(json!({
+                        "run_id": &run_id,
+                        "round": round,
+                        "reviewer": spec.key,
+                        "current_author": current_draft_author_key.clone(),
+                        "current_chars": current_draft.chars().count(),
+                        "revised_chars": revised_text.chars().count(),
+                        "policy": "anti_impoverishment_quality_ratchet"
+                    })),
+                },
+            );
+            stable_serial_approval_agents.clear();
+            round += 1;
+            continue;
         }
+
+        if substantive_change {
+            current_draft = revised_text;
+            current_draft_path = Some(output_path);
+            current_draft_author_key = Some(spec.key.to_string());
+            stable_serial_approval_agents.clear();
+            let _ = write_log_record(
+                log_session,
+                LogEventInput {
+                    level: "info".to_string(),
+                    category: "session.serial.version_advanced".to_string(),
+                    message: "serial reviewer-reviser produced a new current version".to_string(),
+                    context: Some(json!({
+                        "run_id": &run_id,
+                        "round": round,
+                        "author": spec.key,
+                        "status": result.status,
+                        "policy": "new_version_requires_full_independent_rotation"
+                    })),
+                },
+            );
+        } else if result.status == "READY" {
+            current_draft_path = Some(output_path);
+            current_draft_author_key = Some(spec.key.to_string());
+            stable_serial_approval_agents.insert(spec.key.to_string());
+            let _ = write_log_record(
+                log_session,
+                LogEventInput {
+                    level: "info".to_string(),
+                    category: "session.serial.stable_approval".to_string(),
+                    message: "serial reviewer-reviser approved the current version without substantive changes".to_string(),
+                    context: Some(json!({
+                        "run_id": &run_id,
+                        "round": round,
+                        "reviewer": spec.key,
+                        "stable_serial_approvals": stable_serial_approval_agents.len(),
+                        "stable_serial_approval_agents": stable_serial_approval_agents.iter().cloned().collect::<Vec<_>>(),
+                        "required_stable_approvals": independent_reviewer_count,
+                        "policy": "converge_after_full_rotation_without_substantive_change"
+                    })),
+                },
+            );
+        } else {
+            stable_serial_approval_agents.clear();
+        }
+
+        if result.status == "READY"
+            && !substantive_change
+            && stable_serial_approval_agents.len() >= independent_reviewer_count
+        {
+            let path = session_dir.join("texto-final.md");
+            write_text_file(&path, &strip_leading_maestro_status(&current_draft))?;
+            final_path = path;
+            break;
+        }
+
+        round += 1;
     }
 
     let minutes_path = session_dir.join("ata-da-sessao.md");
@@ -1352,11 +1207,56 @@ fn current_draft_author_from_path(agent_dir: &Path, path: Option<&PathBuf>) -> O
     }
 }
 
+#[cfg(test)]
 fn is_operational_only_review_round(round_results: &[EditorialAgentResult]) -> bool {
     !round_results.is_empty()
         && round_results.iter().all(|agent| {
             agent.role == "review" && agent.status != "READY" && is_operational_agent_result(agent)
         })
+}
+
+fn normalized_editorial_text(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
+}
+
+fn is_substantive_editorial_change(before: &str, after: &str) -> bool {
+    normalized_editorial_text(before) != normalized_editorial_text(after)
+}
+
+fn editorial_quality_tier(agent_key: &str) -> u8 {
+    match agent_key.to_ascii_lowercase().as_str() {
+        "claude" | "codex" => 3,
+        "gemini" => 2,
+        "deepseek" | "grok" => 1,
+        _ => 0,
+    }
+}
+
+fn quality_guard_blocks_revision(
+    current_author_key: Option<&str>,
+    reviewer_key: &str,
+    before: &str,
+    after: &str,
+    substantive_change: bool,
+) -> bool {
+    if !substantive_change {
+        return false;
+    }
+    let Some(author_key) = current_author_key else {
+        return false;
+    };
+    if editorial_quality_tier(reviewer_key) >= editorial_quality_tier(author_key) {
+        return false;
+    }
+    let before_chars = before.chars().count();
+    let after_chars = after.chars().count();
+    before_chars >= 400 && after_chars * 100 < before_chars * 85
 }
 
 fn agent_attempt_output_path(agent_dir: &Path, round: usize, agent: &str, role: &str) -> PathBuf {
@@ -1385,7 +1285,9 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        agent_attempt_output_path, current_draft_author_from_path, is_operational_only_review_round,
+        agent_attempt_output_path, current_draft_author_from_path,
+        is_operational_only_review_round, is_substantive_editorial_change,
+        quality_guard_blocks_revision,
     };
     use crate::EditorialAgentResult;
 
@@ -1461,11 +1363,10 @@ mod tests {
 
     #[test]
     fn agent_attempt_output_path_preserves_existing_artifacts_append_only() {
-        let dir = std::env::temp_dir().join(format!(
-            "maestro-agent-attempt-{}-{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-        ));
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("maestro-agent-attempt-path-test");
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("round-003-codex-review.md"), "old").unwrap();
 
@@ -1496,5 +1397,35 @@ mod tests {
         ];
 
         assert!(!is_operational_only_review_round(&round));
+    }
+
+    #[test]
+    fn substantive_change_ignores_whitespace_only_deltas() {
+        assert!(!is_substantive_editorial_change(
+            "Linha 1\r\n\r\nLinha    2",
+            " Linha 1\nLinha 2 "
+        ));
+        assert!(is_substantive_editorial_change("Linha 1.", "Linha 1"));
+    }
+
+    #[test]
+    fn quality_guard_blocks_lower_tier_shrinkage_of_stronger_text() {
+        let before = "Paragrafo amplo e reflexivo. ".repeat(30);
+        let after = "Resumo curto.".to_string();
+
+        assert!(quality_guard_blocks_revision(
+            Some("codex"),
+            "grok",
+            &before,
+            &after,
+            true
+        ));
+        assert!(!quality_guard_blocks_revision(
+            Some("grok"),
+            "codex",
+            &before,
+            &after,
+            true
+        ));
     }
 }

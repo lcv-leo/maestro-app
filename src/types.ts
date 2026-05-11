@@ -163,6 +163,7 @@ export type AiProviderProbeResult = {
 export type LinkAuditRow = {
   url: string;
   status: string;
+  invalidity: string;
   tone: 'ok' | 'warn' | 'blocked' | 'error';
 };
 

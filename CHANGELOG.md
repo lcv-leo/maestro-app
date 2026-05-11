@@ -4,6 +4,25 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.23] - 2026-05-10
+### Changed
+- **Serial editorial deliberation.** Maestro no longer runs the editorial loop as parallel critique plus redactor rewrite. The current text now moves through a serial reviewer-reviser cycle: each independent peer receives the previous peer's text, applies only protocol-grounded corrections, records a revision report, and passes the result onward until every independent reviewer approves the stable text without substantive change.
+- **No-self-review hardening.** The current draft/revision author is excluded from the reviewer-reviser panel, and each prompt carries a defensive `SELF_REVIEW_BLOCKED` contract if a bypass ever tries to make an agent revise its own immediately produced text.
+- **Approved-content lock.** Reviewer-revisers must preserve already-approved content and may alter only passages tied to concrete prior objections, protocol-blocking defects, or minimal adjacent grammar/continuity fixes. Stable approval now tracks reviewer identities rather than a raw counter, avoiding double-counted convergence.
+- **Internal report separation.** Serial revisions write an English internal `<maestro_revision_report>` plus a Brazilian Portuguese `<maestro_final_text>`. Resume recovery accepts only the final-text tag for revision artifacts, preventing internal analysis from leaking into the next public draft.
+- **Quality guard for weaker peers.** Lower-tier reviewers such as DeepSeek and Grok are blocked from materially shrinking stronger Claude/Codex text unless the change is protocol-grounded, reducing flattening and loss of argumentative depth.
+- **Evidence link audit details.** The evidence panel now lists each invalid, blocked, local/private, malformed, or HTTP-failing link with a specific invalidity reason instead of only reporting a generic invalid-link count.
+- **CodeQL test hardening.** The session-orchestration artifact-path test now uses a deterministic crate-local target path instead of a dynamic temp path, addressing the current remote `rust/path-injection` alert pattern pending a GitHub CodeQL rerun after push.
+
+### Validation
+- GitHub code scanning checked before tests: 5 open remote CodeQL `rust/path-injection` alerts still present pending this push and a new CodeQL run.
+- `cargo test --manifest-path src-tauri\Cargo.toml`: 147 passed.
+- `npm run typecheck`: passed.
+- `npm run build`: passed once, with the existing Vite large-chunk warning only.
+- `git diff --check`: passed.
+- `cross-review-v2` session `09c21d7a-008f-48b1-bd48-93d93985cd43`: initial `ship` submission exposed a cross-review-v2 evidence-provenance bug in Grok's relator draft; controlled evidence-backed `ask_peers` recovered unanimity with Claude, Gemini, DeepSeek, and Grok READY, then finalized `converged`.
+- `src-tauri/target` verified absent after final validation per workspace directive.
+
 ## [v0.5.22] - 2026-05-10
 ### Changed
 - **Recoverable reviewer operational outage.** Review rounds made only of operational reviewer failures no longer flow into text revision or generic "all peers failing" aborts. After repeated independent-reviewer transport/runtime outages, Maestro pauses recoverably as `PAUSED_REVIEWER_OPERATIONAL_OUTAGE`, keeps the current draft, preserves the no-self-review rule, and tells the operator to retry reviewers, switch transport/mode, or enable more independent reviewers.

@@ -40,8 +40,8 @@ use crate::session_resume::{
     humanize_agent_name, known_session_activity_unix,
 };
 use crate::{
-    extract_stdout_block, read_text_file, EditorialAgentResult, ProviderCacheTelemetry,
-    ResumableSessionInfo, ResumeSessionState, SessionArtifact,
+    extract_stdout_block, extract_tagged_block, read_text_file, EditorialAgentResult,
+    ProviderCacheTelemetry, ResumableSessionInfo, ResumeSessionState, SessionArtifact,
 };
 
 pub(crate) fn inspect_resumable_session_dir(
@@ -138,10 +138,8 @@ pub(crate) fn load_resume_session_state(agent_dir: &Path) -> Result<ResumeSessio
 
     if let Some(artifact) = latest_draft {
         let text = read_text_file(&artifact.path)?;
-        let draft = extract_stdout_block(&text)
-            .unwrap_or(text.as_str())
-            .trim()
-            .to_string();
+        let stdout = extract_stdout_block(&text).unwrap_or(text.as_str());
+        let draft = resumable_text_from_artifact_stdout(&artifact.role, stdout).unwrap_or_default();
         if !draft.is_empty() {
             return Ok(ResumeSessionState {
                 current_draft: draft,
@@ -183,13 +181,24 @@ fn find_latest_draft_artifact_from_artifacts(
 
     for artifact in artifacts {
         let text = read_text_file(&artifact.path).unwrap_or_default();
-        let draft = extract_stdout_block(&text).unwrap_or(text.as_str());
+        let stdout = extract_stdout_block(&text).unwrap_or(text.as_str());
+        let draft = resumable_text_from_artifact_stdout(&artifact.role, stdout).unwrap_or_default();
         if !draft.trim().is_empty() {
             return Ok(Some(artifact));
         }
     }
 
     Ok(None)
+}
+
+fn resumable_text_from_artifact_stdout(role: &str, stdout: &str) -> Option<String> {
+    if role == "revision" {
+        return extract_tagged_block(stdout, "maestro_final_text");
+    }
+    extract_tagged_block(stdout, "maestro_final_text").or_else(|| {
+        let text = stdout.trim();
+        (!text.is_empty()).then(|| text.to_string())
+    })
 }
 
 fn artifact_resume_rank(artifact: &SessionArtifact) -> (usize, usize, usize) {

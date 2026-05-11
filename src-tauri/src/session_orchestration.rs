@@ -362,8 +362,6 @@ pub(crate) fn run_editorial_session_core(
     let mut serial_turns = 0usize;
     let mut round_turn_index = 0usize;
     let mut valid_round_agents = BTreeSet::<String>::new();
-    let mut round_had_substantive_change = false;
-    let mut round_had_editorial_divergence = false;
     const ALL_ERROR_ESCALATION_THRESHOLD: u32 = 3;
 
     if let Some(invalid_initial_agent) = invalid_initial_agent {
@@ -643,11 +641,11 @@ pub(crate) fn run_editorial_session_core(
             round,
             &round_turn_specs,
         );
+        let restored_round_had_substantive_change = progress.had_substantive_change;
+        let restored_round_had_editorial_divergence = progress.had_editorial_divergence;
         round = progress.round;
         round_turn_index = progress.turn_index;
         valid_round_agents = progress.valid_agents;
-        round_had_substantive_change = progress.had_substantive_change;
-        round_had_editorial_divergence = progress.had_editorial_divergence;
         let _ = write_log_record(
             log_session,
             LogEventInput {
@@ -660,8 +658,8 @@ pub(crate) fn run_editorial_session_core(
                     "next_turn": round_turn_index + 1,
                     "round_turn_count": round_turn_count,
                     "valid_round_agents": valid_round_agents.iter().cloned().collect::<Vec<_>>(),
-                    "round_had_substantive_change": round_had_substantive_change,
-                    "round_had_editorial_divergence": round_had_editorial_divergence,
+                    "round_had_substantive_change": restored_round_had_substantive_change,
+                    "round_had_editorial_divergence": restored_round_had_editorial_divergence,
                     "policy": "resume_continues_the_circular_circuit_without_self_review"
                 })),
             },
@@ -746,6 +744,16 @@ pub(crate) fn run_editorial_session_core(
                 "TIME_LIMIT_REACHED",
             ));
         }
+        if current_version_has_all_independent_approvals(
+            &round_turn_specs,
+            current_draft_author_key.as_deref(),
+            &stable_serial_approval_agents,
+        ) {
+            let path = session_dir.join("texto-final.md");
+            write_text_file(&path, &strip_leading_maestro_status(&current_draft))?;
+            final_path = path;
+            break;
+        }
         let draft_author_key = current_draft_author_key.as_deref().unwrap_or("unknown");
         let max_serial_turns = std::cmp::max(round_turn_count * 4, round_turn_count);
         serial_turns += 1;
@@ -797,13 +805,65 @@ pub(crate) fn run_editorial_session_core(
             ));
         }
 
+        let nominal_turn_index = round_turn_index % round_turn_count;
+        let selection_seed = Utc::now().timestamp_nanos_opt().unwrap_or_default() as u64;
+        let Some(selected_turn_index) = select_serial_reviewer_index(
+            &round_turn_specs,
+            nominal_turn_index,
+            draft_author_key,
+            draft_lead_key,
+            &stable_serial_approval_agents,
+            selection_seed,
+        ) else {
+            let path = session_dir.join("texto-final.md");
+            write_text_file(&path, &strip_leading_maestro_status(&current_draft))?;
+            final_path = path;
+            break;
+        };
+        if selected_turn_index != nominal_turn_index {
+            let nominal_reviewer = round_turn_specs[nominal_turn_index].key;
+            let selected_reviewer = round_turn_specs[selected_turn_index].key;
+            let redraw_reason = if nominal_reviewer == draft_author_key {
+                "nominal_reviewer_is_current_author"
+            } else {
+                "nominal_reviewer_already_approved_current_version"
+            };
+            let _ = write_log_record(
+                log_session,
+                LogEventInput {
+                    level: "info".to_string(),
+                    category: "session.serial.reviewer_redrawn".to_string(),
+                    message:
+                        "serial scheduler automatically redrew an eligible independent reviewer"
+                            .to_string(),
+                    context: Some(json!({
+                        "run_id": &run_id,
+                        "round": round,
+                        "turn": nominal_turn_index + 1,
+                        "current_author": draft_author_key,
+                        "nominal_reviewer": nominal_reviewer,
+                        "selected_reviewer": selected_reviewer,
+                        "reason": redraw_reason,
+                        "policy": "autonomous_random_redraw_preserves_no_self_review_and_keeps_work_running"
+                    })),
+                },
+            );
+        }
+        round_turn_index = selected_turn_index;
         let spec = round_turn_specs[round_turn_index];
         let closing_turn = spec.key == draft_lead_key;
         let valid_agents_required_before_closure = round_turn_specs
             .iter()
             .filter(|turn_spec| turn_spec.key != draft_lead_key)
             .count();
-        if closing_turn && valid_round_agents.len() < valid_agents_required_before_closure {
+        if closing_turn
+            && !closing_turn_has_required_prior_reviews(
+                &round_turn_specs,
+                draft_lead_key,
+                draft_author_key,
+                &stable_serial_approval_agents,
+            )
+        {
             let _ = write_log_record(
                 log_session,
                 LogEventInput {
@@ -850,14 +910,14 @@ pub(crate) fn run_editorial_session_core(
             ));
         }
 
-        if (round_had_substantive_change || !closing_turn) && spec.key == draft_author_key {
+        if spec.key == draft_author_key {
             let _ = write_log_record(
                 log_session,
                 LogEventInput {
                     level: "error".to_string(),
                     category: "session.tribunal.self_review_blocked".to_string(),
                     message:
-                        "serial scheduler attempted to assign the current version to its own author"
+                        "serial scheduler attempted to assign the current version to its own author after redraw"
                             .to_string(),
                     context: Some(json!({
                         "run_id": &run_id,
@@ -1188,7 +1248,6 @@ pub(crate) fn run_editorial_session_core(
                 reclassify_agent_artifact_status(&output_path, "CONTRACT_VIOLATION", &reason);
                 consecutive_reviewer_outage_rounds += 1;
                 stable_serial_approval_agents.clear();
-                round_had_editorial_divergence = true;
                 let _ = write_log_record(
                     log_session,
                     LogEventInput {
@@ -1265,15 +1324,15 @@ pub(crate) fn run_editorial_session_core(
             if result.status == "READY" {
                 stable_serial_approval_agents.insert(spec.key.to_string());
             } else {
-                round_had_editorial_divergence = true;
                 stable_serial_approval_agents.clear();
             }
             round_turn_index += 1;
             if round_turn_index >= round_turn_count {
-                if !round_had_substantive_change
-                    && !round_had_editorial_divergence
-                    && valid_round_agents.len() >= round_turn_count
-                {
+                if current_version_has_all_independent_approvals(
+                    &round_turn_specs,
+                    current_draft_author_key.as_deref(),
+                    &stable_serial_approval_agents,
+                ) {
                     let path = session_dir.join("texto-final.md");
                     write_text_file(&path, &strip_leading_maestro_status(&current_draft))?;
                     final_path = path;
@@ -1282,9 +1341,6 @@ pub(crate) fn run_editorial_session_core(
                 round += 1;
                 round_turn_index = 0;
                 valid_round_agents.clear();
-                stable_serial_approval_agents.clear();
-                round_had_substantive_change = false;
-                round_had_editorial_divergence = false;
             }
             continue;
         };
@@ -1316,15 +1372,12 @@ pub(crate) fn run_editorial_session_core(
                 },
             );
             stable_serial_approval_agents.clear();
-            round_had_editorial_divergence = true;
             round_turn_index += 1;
             if round_turn_index >= round_turn_count {
                 round += 1;
                 round_turn_index = 0;
                 valid_round_agents.clear();
                 stable_serial_approval_agents.clear();
-                round_had_substantive_change = false;
-                round_had_editorial_divergence = false;
             }
             continue;
         }
@@ -1334,7 +1387,6 @@ pub(crate) fn run_editorial_session_core(
             current_draft_path = Some(output_path);
             current_draft_author_key = Some(spec.key.to_string());
             stable_serial_approval_agents.clear();
-            round_had_substantive_change = true;
             let _ = write_log_record(
                 log_session,
                 LogEventInput {
@@ -1373,15 +1425,15 @@ pub(crate) fn run_editorial_session_core(
             );
         } else {
             stable_serial_approval_agents.clear();
-            round_had_editorial_divergence = true;
         }
 
         round_turn_index += 1;
         if round_turn_index >= round_turn_count {
-            if !round_had_substantive_change
-                && !round_had_editorial_divergence
-                && valid_round_agents.len() >= round_turn_count
-            {
+            if current_version_has_all_independent_approvals(
+                &round_turn_specs,
+                current_draft_author_key.as_deref(),
+                &stable_serial_approval_agents,
+            ) {
                 let path = session_dir.join("texto-final.md");
                 write_text_file(&path, &strip_leading_maestro_status(&current_draft))?;
                 final_path = path;
@@ -1390,9 +1442,6 @@ pub(crate) fn run_editorial_session_core(
             round += 1;
             round_turn_index = 0;
             valid_round_agents.clear();
-            stable_serial_approval_agents.clear();
-            round_had_substantive_change = false;
-            round_had_editorial_divergence = false;
         }
     }
 
@@ -1713,6 +1762,80 @@ fn quality_guard_blocks_revision(
     before_chars >= 400 && after_chars * 100 < before_chars * 85
 }
 
+fn current_version_has_all_independent_approvals(
+    round_turn_specs: &[crate::EditorialAgentSpec],
+    current_author_key: Option<&str>,
+    stable_serial_approval_agents: &BTreeSet<String>,
+) -> bool {
+    let Some(author_key) = current_author_key else {
+        return false;
+    };
+    let required = round_turn_specs
+        .iter()
+        .filter(|spec| spec.key != author_key)
+        .map(|spec| spec.key)
+        .collect::<Vec<_>>();
+    !required.is_empty()
+        && required
+            .iter()
+            .all(|agent| stable_serial_approval_agents.contains(*agent))
+}
+
+fn select_serial_reviewer_index(
+    round_turn_specs: &[crate::EditorialAgentSpec],
+    nominal_turn_index: usize,
+    current_author_key: &str,
+    draft_lead_key: &str,
+    stable_serial_approval_agents: &BTreeSet<String>,
+    selection_seed: u64,
+) -> Option<usize> {
+    if round_turn_specs.is_empty() {
+        return None;
+    }
+    let nominal_turn_index = nominal_turn_index % round_turn_specs.len();
+    let nominal = round_turn_specs[nominal_turn_index];
+    let closure_ready = closing_turn_has_required_prior_reviews(
+        round_turn_specs,
+        draft_lead_key,
+        current_author_key,
+        stable_serial_approval_agents,
+    );
+    let nominal_is_pending = nominal.key != current_author_key
+        && !stable_serial_approval_agents.contains(nominal.key)
+        && (nominal.key != draft_lead_key || closure_ready);
+    if nominal_is_pending {
+        return Some(nominal_turn_index);
+    }
+
+    let pending = round_turn_specs
+        .iter()
+        .enumerate()
+        .filter(|(_, spec)| {
+            spec.key != current_author_key
+                && !stable_serial_approval_agents.contains(spec.key)
+                && (spec.key != draft_lead_key || closure_ready)
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return None;
+    }
+    let offset = selection_seed as usize % pending.len();
+    Some(pending[offset])
+}
+
+fn closing_turn_has_required_prior_reviews(
+    round_turn_specs: &[crate::EditorialAgentSpec],
+    draft_lead_key: &str,
+    current_author_key: &str,
+    stable_serial_approval_agents: &BTreeSet<String>,
+) -> bool {
+    round_turn_specs
+        .iter()
+        .filter(|spec| spec.key != draft_lead_key && spec.key != current_author_key)
+        .all(|spec| stable_serial_approval_agents.contains(spec.key))
+}
+
 fn agent_attempt_output_path(agent_dir: &Path, round: usize, agent: &str, role: &str) -> PathBuf {
     let canonical = agent_dir.join(format!("round-{round:03}-{agent}-{role}.md"));
     if !canonical.exists() {
@@ -1736,12 +1859,14 @@ fn agent_attempt_output_path(agent_dir: &Path, round: usize, agent: &str, role: 
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::path::PathBuf;
 
     use super::{
         agent_attempt_output_path, circular_round_turn_specs, current_draft_author_from_path,
-        is_operational_only_review_round, is_substantive_editorial_change,
-        quality_guard_blocks_revision, restore_circular_resume_progress,
+        current_version_has_all_independent_approvals, is_operational_only_review_round,
+        is_substantive_editorial_change, quality_guard_blocks_revision,
+        restore_circular_resume_progress, select_serial_reviewer_index,
         validate_serial_turn_output,
     };
     use crate::EditorialAgentResult;
@@ -1900,6 +2025,111 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(order, vec!["codex", "gemini", "deepseek", "grok", "claude"]);
+    }
+
+    #[test]
+    fn serial_reviewer_redraws_when_nominal_reviewer_is_current_author() {
+        let active = vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "gemini".to_string(),
+            "deepseek".to_string(),
+            "grok".to_string(),
+        ];
+        let specs = circular_round_turn_specs("claude", &active);
+        let approvals = BTreeSet::<String>::new();
+        let deepseek_index = specs
+            .iter()
+            .position(|spec| spec.key == "deepseek")
+            .unwrap();
+
+        let selected = select_serial_reviewer_index(
+            &specs,
+            deepseek_index,
+            "deepseek",
+            "claude",
+            &approvals,
+            0,
+        )
+        .unwrap();
+
+        assert_ne!(specs[selected].key, "deepseek");
+    }
+
+    #[test]
+    fn serial_reviewer_redraws_to_unapproved_independent_peer() {
+        let active = vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "gemini".to_string(),
+            "deepseek".to_string(),
+            "grok".to_string(),
+        ];
+        let specs = circular_round_turn_specs("claude", &active);
+        let mut approvals = BTreeSet::<String>::new();
+        approvals.insert("codex".to_string());
+        approvals.insert("gemini".to_string());
+        approvals.insert("grok".to_string());
+        let codex_index = specs.iter().position(|spec| spec.key == "codex").unwrap();
+
+        let selected =
+            select_serial_reviewer_index(&specs, codex_index, "deepseek", "claude", &approvals, 0)
+                .unwrap();
+
+        assert_eq!(specs[selected].key, "claude");
+    }
+
+    #[test]
+    fn serial_reviewer_does_not_return_to_initial_redactor_before_independent_approvals() {
+        let active = vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "gemini".to_string(),
+            "deepseek".to_string(),
+            "grok".to_string(),
+        ];
+        let specs = circular_round_turn_specs("claude", &active);
+        let mut approvals = BTreeSet::<String>::new();
+        approvals.insert("codex".to_string());
+        approvals.insert("gemini".to_string());
+        let claude_index = specs.iter().position(|spec| spec.key == "claude").unwrap();
+
+        let selected =
+            select_serial_reviewer_index(&specs, claude_index, "deepseek", "claude", &approvals, 0)
+                .unwrap();
+
+        assert_ne!(specs[selected].key, "claude");
+        assert_eq!(specs[selected].key, "grok");
+    }
+
+    #[test]
+    fn serial_current_version_converges_after_all_independent_peers_approve() {
+        let active = vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "gemini".to_string(),
+            "deepseek".to_string(),
+            "grok".to_string(),
+        ];
+        let specs = circular_round_turn_specs("claude", &active);
+        let mut approvals = BTreeSet::<String>::new();
+        approvals.insert("codex".to_string());
+        approvals.insert("gemini".to_string());
+        approvals.insert("grok".to_string());
+
+        assert!(!current_version_has_all_independent_approvals(
+            &specs,
+            Some("deepseek"),
+            &approvals
+        ));
+
+        approvals.insert("claude".to_string());
+
+        assert!(current_version_has_all_independent_approvals(
+            &specs,
+            Some("deepseek"),
+            &approvals
+        ));
     }
 
     #[test]

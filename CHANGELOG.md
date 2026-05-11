@@ -4,6 +4,16 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.25] - 2026-05-11
+### Fixed
+- **Autonomous serial reviewer redraw.** The circular scheduler no longer pauses with `PAUSED_SELF_REVIEW_BLOCKED` when the nominal next reviewer is also the current text author. It now autonomously redraws an eligible independent pending reviewer, preserving the hard no-self-review rule while keeping the session moving.
+- **Closing-turn guard.** The original redactor cannot receive the closing turn until the independent reviewers for the current version have approved it, so a round cannot shortcut the full editorial circuit.
+- **Current-version convergence.** Serial convergence is now based on all independent reviewers approving the current version since the last substantive text change, not on stale per-round flags.
+- **Dependabot automerge concurrency.** The automerge workflow now keys concurrency by pull request number, with a `github.ref` fallback for future non-PR triggers, preventing unrelated Dependabot PRs from canceling each other.
+### Validation
+- `cargo test --locked --lib serial_`: 9 passed.
+- `cross-review-v2` session `7075ed2c-8bb0-408c-b622-fe16fbbf9ea1`: recovered unanimity after DeepSeek's evidence follow-up; Claude, Gemini, DeepSeek, and Grok READY.
+
 ## [v0.5.24] - 2026-05-10
 ### Fixed
 - **Circular round semantics.** A Maestro round now stays open until the current text completes the full active-agent circuit and returns to the original drafter; individual agent actions are tracked as turns inside the round, so Gemini/DeepSeek/Grok/Codex no longer become separate numbered rounds by themselves.

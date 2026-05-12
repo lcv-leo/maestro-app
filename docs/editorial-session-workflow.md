@@ -1,6 +1,6 @@
 # Editorial Session Workflow
 
-Status: implementation contract with functional background, hardened resume pass in `v0.3.5`, startup crash recovery hardening in `v0.3.6`, long-running agent diagnostics in `v0.3.7`, DeepSeek API peer support in `v0.3.11`, per-session controls/log readability in `v0.3.13`, Grok/xAI as fifth API peer in `v0.5.16`, and provider prompt-cache policy telemetry in `v0.5.19`.
+Status: implementation contract with functional background, hardened resume pass in `v0.3.5`, startup crash recovery hardening in `v0.3.6`, long-running agent diagnostics in `v0.3.7`, DeepSeek API peer support in `v0.3.11`, per-session controls/log readability in `v0.3.13`, Grok/xAI as fifth API peer in `v0.5.16`, provider prompt-cache policy telemetry in `v0.5.19`, and Perplexity/Sonar as sixth API-only peer in `v0.5.27`.
 
 Maestro's core workflow starts from an operator prompt and an active editorial protocol. The app must not deliver a final text until every AI peer selected for that session and Maestro's deterministic local checks all return `READY` in the same accepted round.
 
@@ -14,7 +14,7 @@ The operator provides:
 - Generation prompt.
 - Active editorial protocol snapshot.
 - Optional source files/anexos, public HTTP/HTTPS links, shared chat links, PDFs, Markdown, HTML, and MainSite post references.
-- Active AI peer set: 1 to 5 among Claude, Codex, Gemini, DeepSeek, and Grok.
+- Active AI peer set: 1 to 6 among Claude, Codex, Gemini, DeepSeek, Grok, and Perplexity.
 - Optional max session time in minutes. Blank means ignored.
 - Optional max observed direct-API cost in USD. Blank means ignored.
 
@@ -43,11 +43,11 @@ If any peer remains `NOT_READY` or `NEEDS_EVIDENCE`, the session continues, paus
 `v0.3.1` introduced the real executable pass:
 
 - The UI blocks execution unless the full Markdown protocol text was imported.
-- Claude, Codex, and Gemini are called without visible terminal windows in Windows release builds when CLI transport is selected. DeepSeek and Grok are API-only peers and therefore participate only in API or hybrid transport.
+- Claude, Codex, and Gemini are called without visible terminal windows in Windows release builds when CLI transport is selected. DeepSeek, Grok, and Perplexity are API-only peers and therefore participate only in API or hybrid transport.
 - Real editorial calls run without artificial timeout; model latency is treated as normal operational time.
 - The UI remains responsive and shows heartbeat progress while the native worker waits for long-running agents.
-- Draft generation can fall back across Claude, Codex, Gemini, and DeepSeek when an earlier agent fails to produce usable text.
-- Claude, Codex, Gemini, and DeepSeek are called in background to review the draft.
+- Draft generation can fall back across the selected active agents when an earlier agent fails to produce usable text.
+- Selected active agents are called in background to review the draft, excluding the current draft/revision author.
 - From `v0.3.13`, only the selected peers participate in draft fallback, revision fallback, and review consensus. Unselected peers do not run and cannot block final delivery.
 - If a review returns `NOT_READY`, Maestro feeds the review artifacts into a revision prompt and starts another round instead of treating divergence as task completion.
 - If an operational failure prevents progress, Maestro writes the session minutes and pauses without emitting a final text.
@@ -62,7 +62,7 @@ If any peer remains `NOT_READY` or `NEEDS_EVIDENCE`, the session continues, paus
 - Maestro scans `data/sessions/` for sessions that have `prompt.md` and `protocolo.md` but no `texto-final.md`.
 - If one interrupted session exists, the UI resumes it directly; if several exist, the operator chooses which one to continue.
 - Maestro recovers the latest usable draft or revision artifact and continues review from that round instead of restarting from zero.
-- If the operator has imported a new protocol before resuming, that protocol is passed to Claude, Codex, Gemini, and DeepSeek; the previous `protocolo.md` is preserved as a local `protocolo-anterior-*.md` artifact before the new protocol becomes active.
+- If the operator has imported a new protocol before resuming, that protocol is passed to the selected active agents; the previous `protocolo.md` is preserved as a local `protocolo-anterior-*.md` artifact before the new protocol becomes active.
 - If no new protocol is loaded, Maestro uses the `protocolo.md` saved inside the session folder.
 
 `v0.3.7` adds an explicit trace for the "apparently stopped" state:
@@ -93,7 +93,7 @@ This pass is still conservative. The deterministic link checker, ABNT engine, ca
 - Direct observed API cost is checked against the single session-level USD budget. The budget is not per model, and consensus is never redefined by silently removing a selected peer.
 - Provider tariffs are mandatory UI configuration in `Configuracoes > Agentes via API > Tabela de tarifas`; there is no env-var fallback. Any selected peer that will run via direct provider API is blocked before invocation if its provider tariff is blank. CLI peers remain labeled as subscription/unknown cost and do not decrement the USD budget.
 - Attachments are capped at 8 files, 25 MiB per file, and 75 MiB total. Small text-like files get bounded previews. CLI peers receive local paths/manifest; direct API peers receive native file/media parts when their provider supports the attachment type and the file is within the native inline size cap, and unsupported/oversized-native types remain manifest/path only.
-- The session UI shows a pre-run delivery hint per attachment and per active API provider, so mixed support is explicit: a file can be native for Gemini while remaining manifest/previews for OpenAI, Anthropic, or DeepSeek.
+- The session UI shows a pre-run delivery hint per attachment and per active API provider, so mixed support is explicit: a file can be native for Gemini while remaining manifest/previews for OpenAI, Anthropic, DeepSeek, Grok, or Perplexity.
 - Direct API cost projection includes the native attachment payloads before the paid call is made, so a large supported file cannot bypass the optional USD session cap.
 - Links must be public-looking HTTP/HTTPS URLs. Localhost, loopback/private IPs, `file:`, `data:`, and similar schemes are rejected.
 
@@ -104,6 +104,7 @@ This pass is still conservative. The deterministic link checker, ABNT engine, ca
 - Anthropic/Claude direct API calls mark the stable `system` text block with `cache_control: { "type": "ephemeral" }` and record provider cache read/create token usage when returned.
 - DeepSeek uses its provider-side automatic prefix/disk cache and records hit/miss token usage when returned.
 - Gemini keeps the normal thinking-preserving GenerateContent flow. Maestro records Gemini cached-token usage when returned by `usageMetadata`.
+- Perplexity/Sonar currently has no documented prompt-cache control comparable to the other direct editorial flows. Maestro does not add invented cache fields and records only non-secret source/cache-plan metadata when available.
 - Logs and artifacts store only cache mode, key hash, retention label, and token counts. They never store raw API keys, full prompts, protocols, or cache keys that could reveal private content.
 
 1. Maestro builds an evidence pack and protocol pack.

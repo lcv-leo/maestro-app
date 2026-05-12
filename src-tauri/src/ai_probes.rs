@@ -64,6 +64,7 @@ pub(crate) fn run_ai_provider_probe(config: &AiProviderConfig) -> AiProviderProb
             probe_gemini_api(&client, config),
             probe_deepseek_api(&client, config),
             probe_grok_api(&client, config),
+            probe_perplexity_api(&client, config),
         ],
         checked_at: Utc::now().to_rfc3339(),
     }
@@ -143,6 +144,21 @@ fn probe_grok_api(client: &Client, config: &AiProviderConfig) -> AiProviderProbe
         .bearer_auth(&key)
         .send();
     summarize_ai_probe_response("Grok / xAI", response)
+}
+
+fn probe_perplexity_api(client: &Client, config: &AiProviderConfig) -> AiProviderProbeRow {
+    let Some((key, _source)) = effective_provider_key(
+        config.perplexity_api_key.as_deref(),
+        &["MAESTRO_PERPLEXITY_API_KEY", "PERPLEXITY_API_KEY"],
+    ) else {
+        return missing_provider_key_row("Perplexity / Sonar", config.perplexity_api_key_remote);
+    };
+
+    let response = client
+        .get("https://api.perplexity.ai/v1/models")
+        .bearer_auth(&key)
+        .send();
+    summarize_ai_probe_response("Perplexity / Sonar", response)
 }
 
 fn missing_provider_key_row(label: &str, remote_present: bool) -> AiProviderProbeRow {

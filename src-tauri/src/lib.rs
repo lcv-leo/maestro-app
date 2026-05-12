@@ -42,6 +42,7 @@ mod logging;
 mod provider_config;
 mod provider_deepseek;
 mod provider_grok;
+mod provider_perplexity;
 mod provider_retry;
 mod provider_routing;
 mod provider_runners;
@@ -192,6 +193,8 @@ pub(crate) struct AiProviderConfig {
     #[serde(default)]
     pub(crate) grok_api_key: Option<String>,
     #[serde(default)]
+    pub(crate) perplexity_api_key: Option<String>,
+    #[serde(default)]
     pub(crate) openai_api_key_remote: bool,
     #[serde(default)]
     pub(crate) anthropic_api_key_remote: bool,
@@ -201,6 +204,8 @@ pub(crate) struct AiProviderConfig {
     pub(crate) deepseek_api_key_remote: bool,
     #[serde(default)]
     pub(crate) grok_api_key_remote: bool,
+    #[serde(default)]
+    pub(crate) perplexity_api_key_remote: bool,
     #[serde(default)]
     openai_input_usd_per_million: Option<f64>,
     #[serde(default)]
@@ -221,6 +226,10 @@ pub(crate) struct AiProviderConfig {
     grok_input_usd_per_million: Option<f64>,
     #[serde(default)]
     grok_output_usd_per_million: Option<f64>,
+    #[serde(default)]
+    perplexity_input_usd_per_million: Option<f64>,
+    #[serde(default)]
+    perplexity_output_usd_per_million: Option<f64>,
     #[serde(default)]
     cloudflare_secret_store_id: Option<String>,
     #[serde(default)]
@@ -571,11 +580,13 @@ impl Default for AiProviderConfig {
             gemini_api_key: None,
             deepseek_api_key: None,
             grok_api_key: None,
+            perplexity_api_key: None,
             openai_api_key_remote: false,
             anthropic_api_key_remote: false,
             gemini_api_key_remote: false,
             deepseek_api_key_remote: false,
             grok_api_key_remote: false,
+            perplexity_api_key_remote: false,
             openai_input_usd_per_million: None,
             openai_output_usd_per_million: None,
             anthropic_input_usd_per_million: None,
@@ -586,6 +597,8 @@ impl Default for AiProviderConfig {
             deepseek_output_usd_per_million: None,
             grok_input_usd_per_million: None,
             grok_output_usd_per_million: None,
+            perplexity_input_usd_per_million: None,
+            perplexity_output_usd_per_million: None,
             cloudflare_secret_store_id: None,
             cloudflare_secret_store_name: None,
             updated_at: Utc::now().to_rfc3339(),
@@ -818,6 +831,7 @@ mod tests {
         assert_eq!(resolve_initial_agent_key(Some("Google")).0, "gemini");
         assert_eq!(resolve_initial_agent_key(Some("Anthropic")).0, "claude");
         assert_eq!(resolve_initial_agent_key(Some("DeepSeek")).0, "deepseek");
+        assert_eq!(resolve_initial_agent_key(Some("Sonar")).0, "perplexity");
         let (fallback, invalid) = resolve_initial_agent_key(Some("unknown-peer"));
         assert_eq!(fallback, "claude");
         assert_eq!(invalid.as_deref(), Some("unknown-peer"));
@@ -921,6 +935,10 @@ mod tests {
             api_input_estimate_chars("abcd", &[pdf.clone(), unknown.clone()], "deepseek"),
             prompt_chars
         );
+        assert_eq!(
+            api_input_estimate_chars("abcd", &[pdf.clone(), unknown.clone()], "perplexity"),
+            prompt_chars
+        );
         assert!(
             api_input_estimate_chars("abcd", &[pdf.clone(), unknown.clone()], "openai")
                 > prompt_chars
@@ -954,7 +972,14 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             claude_order,
-            vec!["claude", "codex", "gemini", "deepseek", "grok"]
+            vec![
+                "claude",
+                "codex",
+                "gemini",
+                "deepseek",
+                "grok",
+                "perplexity"
+            ]
         );
 
         let codex_order = ordered_editorial_agent_specs("codex")
@@ -963,7 +988,14 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             codex_order,
-            vec!["codex", "claude", "gemini", "deepseek", "grok"]
+            vec![
+                "codex",
+                "claude",
+                "gemini",
+                "deepseek",
+                "grok",
+                "perplexity"
+            ]
         );
 
         let gemini_order = ordered_editorial_agent_specs("gemini")
@@ -972,7 +1004,14 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             gemini_order,
-            vec!["gemini", "claude", "codex", "deepseek", "grok"]
+            vec![
+                "gemini",
+                "claude",
+                "codex",
+                "deepseek",
+                "grok",
+                "perplexity"
+            ]
         );
 
         let deepseek_order = ordered_editorial_agent_specs("deepseek")
@@ -981,7 +1020,14 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             deepseek_order,
-            vec!["deepseek", "claude", "codex", "gemini", "grok"]
+            vec![
+                "deepseek",
+                "claude",
+                "codex",
+                "gemini",
+                "grok",
+                "perplexity"
+            ]
         );
 
         let grok_order = ordered_editorial_agent_specs("grok")
@@ -990,7 +1036,30 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             grok_order,
-            vec!["grok", "claude", "codex", "gemini", "deepseek"]
+            vec![
+                "grok",
+                "claude",
+                "codex",
+                "gemini",
+                "deepseek",
+                "perplexity"
+            ]
+        );
+
+        let perplexity_order = ordered_editorial_agent_specs("perplexity")
+            .into_iter()
+            .map(|spec| spec.key)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            perplexity_order,
+            vec![
+                "perplexity",
+                "claude",
+                "codex",
+                "gemini",
+                "deepseek",
+                "grok"
+            ]
         );
     }
 
@@ -1062,11 +1131,13 @@ mod tests {
             gemini_api_key: Some("AIza-test-value".to_string()),
             deepseek_api_key: Some("ds-test-value".to_string()),
             grok_api_key: Some("xai-test-value".to_string()),
+            perplexity_api_key: Some("pplx-test-value".to_string()),
             openai_api_key_remote: false,
             anthropic_api_key_remote: false,
             gemini_api_key_remote: false,
             deepseek_api_key_remote: false,
             grok_api_key_remote: false,
+            perplexity_api_key_remote: false,
             openai_input_usd_per_million: Some(2.50),
             openai_output_usd_per_million: Some(10.0),
             anthropic_input_usd_per_million: Some(3.0),
@@ -1077,6 +1148,8 @@ mod tests {
             deepseek_output_usd_per_million: Some(2.19),
             grok_input_usd_per_million: Some(3.0),
             grok_output_usd_per_million: Some(15.0),
+            perplexity_input_usd_per_million: Some(1.0),
+            perplexity_output_usd_per_million: Some(1.0),
             cloudflare_secret_store_id: None,
             cloudflare_secret_store_name: None,
             updated_at: "old".to_string(),
@@ -1093,11 +1166,13 @@ mod tests {
         assert!(text.contains("\"gemini_api_key_remote\": true"));
         assert!(text.contains("\"deepseek_api_key_remote\": true"));
         assert!(text.contains("\"grok_api_key_remote\": true"));
+        assert!(text.contains("\"perplexity_api_key_remote\": true"));
         assert!(!text.contains("sk-test-value"));
         assert!(!text.contains("sk-ant-test-value"));
         assert!(!text.contains("AIza-test-value"));
         assert!(!text.contains("ds-test-value"));
         assert!(!text.contains("xai-test-value"));
+        assert!(!text.contains("pplx-test-value"));
         let _ = fs::remove_file(path);
     }
 
@@ -1112,11 +1187,13 @@ mod tests {
             gemini_api_key: Some("AIza-test-value".to_string()),
             deepseek_api_key: Some("ds-test-value".to_string()),
             grok_api_key: Some("xai-test-value".to_string()),
+            perplexity_api_key: Some("pplx-test-value".to_string()),
             openai_api_key_remote: false,
             anthropic_api_key_remote: false,
             gemini_api_key_remote: false,
             deepseek_api_key_remote: false,
             grok_api_key_remote: false,
+            perplexity_api_key_remote: false,
             openai_input_usd_per_million: Some(2.50),
             openai_output_usd_per_million: Some(10.0),
             anthropic_input_usd_per_million: Some(3.0),
@@ -1127,6 +1204,8 @@ mod tests {
             deepseek_output_usd_per_million: Some(2.19),
             grok_input_usd_per_million: Some(3.0),
             grok_output_usd_per_million: Some(15.0),
+            perplexity_input_usd_per_million: Some(1.0),
+            perplexity_output_usd_per_million: Some(1.0),
             cloudflare_secret_store_id: None,
             cloudflare_secret_store_name: None,
             updated_at: "old".to_string(),
@@ -1134,11 +1213,12 @@ mod tests {
 
         let values = ai_provider_secret_values(&config);
 
-        assert_eq!(values.len(), 4);
+        assert_eq!(values.len(), 5);
         assert!(values.contains_key("MAESTRO_OPENAI_API_KEY"));
         assert!(values.contains_key("MAESTRO_GEMINI_API_KEY"));
         assert!(values.contains_key("MAESTRO_DEEPSEEK_API_KEY"));
         assert!(values.contains_key("MAESTRO_GROK_API_KEY"));
+        assert!(values.contains_key("MAESTRO_PERPLEXITY_API_KEY"));
         assert!(!values.contains_key("MAESTRO_ANTHROPIC_API_KEY"));
     }
 
@@ -1228,7 +1308,7 @@ mod tests {
     fn resolve_effective_active_agents_falls_back_to_default_when_both_missing() {
         let (effective, source) =
             resolve_effective_active_agents(None, None).expect("default fallback should resolve");
-        assert_eq!(effective.len(), 5);
+        assert_eq!(effective.len(), 6);
         assert_eq!(source, "default_all");
     }
 
@@ -1237,7 +1317,7 @@ mod tests {
         let saved: Vec<String> = Vec::new();
         let (effective, source) = resolve_effective_active_agents(None, Some(&saved))
             .expect("empty saved contract should fall through, not error");
-        assert_eq!(effective.len(), 5);
+        assert_eq!(effective.len(), 6);
         assert_eq!(source, "default_all");
     }
 

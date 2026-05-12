@@ -9,8 +9,8 @@
 // canonical `AiProviderConfig` artifact (`sanitize_ai_provider_config`), and
 // reads provider tariff rates and env-var fallbacks. The v0.3.38 bugfix landed
 // here too (`should_run_agent_via_api` is now strict and deterministic per
-// `provider_mode`, with hybrid sending DeepSeek to the API runner and the
-// other 3 peers to CLI).
+// `provider_mode`, with hybrid sending API-only peers to the API runner and
+// Claude/Codex/Gemini to CLI).
 //
 // What's here:
 //   - `normalize_storage_mode` / `normalize_provider_mode` /
@@ -47,9 +47,7 @@
 //
 // v0.3.40 is a pure move: every signature, status string, format string and
 // match arm is identical to the v0.3.39 lib.rs source (commit dc60061). The
-// 5 unit tests that pinned this surface (4 mode-routing invariants from
-// v0.3.38 plus `ai_provider_config_trims_empty_secret_fields`) move with the
-// implementation into this module's `mod tests`.
+// Unit tests pin the mode-routing invariants plus provider config sanitization.
 
 use chrono::Utc;
 
@@ -91,11 +89,13 @@ pub(crate) fn sanitize_ai_provider_config(config: AiProviderConfig) -> AiProvide
         gemini_api_key: sanitize_optional_secret(config.gemini_api_key),
         deepseek_api_key: sanitize_optional_secret(config.deepseek_api_key),
         grok_api_key: sanitize_optional_secret(config.grok_api_key),
+        perplexity_api_key: sanitize_optional_secret(config.perplexity_api_key),
         openai_api_key_remote: config.openai_api_key_remote,
         anthropic_api_key_remote: config.anthropic_api_key_remote,
         gemini_api_key_remote: config.gemini_api_key_remote,
         deepseek_api_key_remote: config.deepseek_api_key_remote,
         grok_api_key_remote: config.grok_api_key_remote,
+        perplexity_api_key_remote: config.perplexity_api_key_remote,
         openai_input_usd_per_million: sanitize_optional_cost_rate(
             config.openai_input_usd_per_million,
         ),
@@ -123,6 +123,12 @@ pub(crate) fn sanitize_ai_provider_config(config: AiProviderConfig) -> AiProvide
         grok_input_usd_per_million: sanitize_optional_cost_rate(config.grok_input_usd_per_million),
         grok_output_usd_per_million: sanitize_optional_cost_rate(
             config.grok_output_usd_per_million,
+        ),
+        perplexity_input_usd_per_million: sanitize_optional_cost_rate(
+            config.perplexity_input_usd_per_million,
+        ),
+        perplexity_output_usd_per_million: sanitize_optional_cost_rate(
+            config.perplexity_output_usd_per_million,
         ),
         cloudflare_secret_store_id: config
             .cloudflare_secret_store_id
@@ -170,6 +176,11 @@ pub(crate) fn provider_cost_rates_from_config(
             config.grok_input_usd_per_million,
             config.grok_output_usd_per_million,
         ),
+        "perplexity" => (
+            "Perplexity / Sonar",
+            config.perplexity_input_usd_per_million,
+            config.perplexity_output_usd_per_million,
+        ),
         _ => {
             return Err(format!(
                 "Peer editorial sem provedor de tarifa conhecido: {}.",
@@ -200,6 +211,7 @@ pub(crate) fn api_provider_for_agent(agent_key: &str) -> Option<&'static str> {
         "gemini" => Some("gemini"),
         "deepseek" => Some("deepseek"),
         "grok" => Some("grok"),
+        "perplexity" => Some("perplexity"),
         _ => None,
     }
 }
@@ -212,10 +224,10 @@ pub(crate) fn should_run_agent_via_api(agent_key: &str, config: &AiProviderConfi
         "api" => true,
         "cli" => false,
         // "hybrid" is deterministic by agent identity, not credential availability:
-        // DeepSeek and Grok run via API (no maestro-app CLI integration exists);
-        // the other peers run via CLI. If a user wants Claude/Codex/Gemini on API,
-        // they pick "api" mode explicitly.
-        _ => matches!(agent_key, "deepseek" | "grok"),
+        // DeepSeek, Grok and Perplexity run via API (no maestro-app CLI
+        // integration exists); the other peers run via CLI. If a user wants
+        // Claude/Codex/Gemini on API, they pick "api" mode explicitly.
+        _ => matches!(agent_key, "deepseek" | "grok" | "perplexity"),
     }
 }
 
@@ -244,6 +256,10 @@ pub(crate) fn merge_ai_provider_env_values(mut config: AiProviderConfig) -> AiPr
         config.grok_api_key =
             provider_env_value(&["MAESTRO_GROK_API_KEY", "GROK_API_KEY", "XAI_API_KEY"]);
     }
+    if config.perplexity_api_key.is_none() {
+        config.perplexity_api_key =
+            provider_env_value(&["MAESTRO_PERPLEXITY_API_KEY", "PERPLEXITY_API_KEY"]);
+    }
     sanitize_ai_provider_config(config)
 }
 
@@ -266,11 +282,13 @@ mod tests {
             gemini_api_key: None,
             deepseek_api_key: Some("  ds-test-value  ".to_string()),
             grok_api_key: Some("  xai-test-value  ".to_string()),
+            perplexity_api_key: Some("  pplx-test-value  ".to_string()),
             openai_api_key_remote: false,
             anthropic_api_key_remote: false,
             gemini_api_key_remote: false,
             deepseek_api_key_remote: false,
             grok_api_key_remote: false,
+            perplexity_api_key_remote: false,
             openai_input_usd_per_million: Some(2.50),
             openai_output_usd_per_million: Some(10.0),
             anthropic_input_usd_per_million: Some(3.0),
@@ -281,6 +299,8 @@ mod tests {
             deepseek_output_usd_per_million: Some(2.19),
             grok_input_usd_per_million: Some(3.0),
             grok_output_usd_per_million: Some(15.0),
+            perplexity_input_usd_per_million: Some(1.0),
+            perplexity_output_usd_per_million: Some(1.0),
             cloudflare_secret_store_id: None,
             cloudflare_secret_store_name: None,
             updated_at: "old".to_string(),
@@ -294,6 +314,10 @@ mod tests {
         assert!(config.gemini_api_key.is_none());
         assert_eq!(config.deepseek_api_key.as_deref(), Some("ds-test-value"));
         assert_eq!(config.grok_api_key.as_deref(), Some("xai-test-value"));
+        assert_eq!(
+            config.perplexity_api_key.as_deref(),
+            Some("pplx-test-value")
+        );
     }
 
     #[test]
@@ -302,7 +326,14 @@ mod tests {
             provider_mode: "api".to_string(),
             ..AiProviderConfig::default()
         };
-        for agent in ["claude", "codex", "gemini", "deepseek", "grok"] {
+        for agent in [
+            "claude",
+            "codex",
+            "gemini",
+            "deepseek",
+            "grok",
+            "perplexity",
+        ] {
             assert!(
                 should_run_agent_via_api(agent, &config),
                 "{agent} must run via API in api mode"
@@ -316,7 +347,14 @@ mod tests {
             provider_mode: "cli".to_string(),
             ..AiProviderConfig::default()
         };
-        for agent in ["claude", "codex", "gemini", "deepseek", "grok"] {
+        for agent in [
+            "claude",
+            "codex",
+            "gemini",
+            "deepseek",
+            "grok",
+            "perplexity",
+        ] {
             assert!(
                 !should_run_agent_via_api(agent, &config),
                 "{agent} must run via CLI in cli mode (API-only peers are gated before spawn)"
@@ -335,13 +373,14 @@ mod tests {
         assert!(!should_run_agent_via_api("gemini", &config));
         assert!(should_run_agent_via_api("deepseek", &config));
         assert!(should_run_agent_via_api("grok", &config));
+        assert!(should_run_agent_via_api("perplexity", &config));
     }
 
     #[test]
     fn should_run_agent_via_api_hybrid_mode_is_deterministic_regardless_of_keys() {
         // Pre-v0.3.38, hybrid sent any agent with a configured key to the API runner.
         // Post-v0.3.38 it is deterministic by agent identity: hybrid lets
-        // API-only peers (DeepSeek and Grok) join a CLI session. Other peers stay
+        // API-only peers (DeepSeek, Grok and Perplexity) join a CLI session. Other peers stay
         // on CLI even when their API key is set.
         let config = AiProviderConfig {
             provider_mode: "hybrid".to_string(),
@@ -350,6 +389,7 @@ mod tests {
             gemini_api_key: Some("AIza-test".to_string()),
             deepseek_api_key: None,
             grok_api_key: None,
+            perplexity_api_key: None,
             ..AiProviderConfig::default()
         };
         assert!(!should_run_agent_via_api("claude", &config));
@@ -359,5 +399,6 @@ mod tests {
         // missing-key failure artifacts instead of silently falling back.
         assert!(should_run_agent_via_api("deepseek", &config));
         assert!(should_run_agent_via_api("grok", &config));
+        assert!(should_run_agent_via_api("perplexity", &config));
     }
 }

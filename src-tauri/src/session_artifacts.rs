@@ -271,7 +271,7 @@ pub(crate) fn parse_agent_artifact_name(agent_dir: &Path, name: &str) -> Option<
     }
     let (agent, role) = stem.rsplit_once('-')?;
     let agent = match agent {
-        "claude" | "codex" | "gemini" | "deepseek" | "grok" => agent,
+        "claude" | "codex" | "gemini" | "deepseek" | "grok" | "perplexity" => agent,
         _ => return None,
     };
     if !matches!(role, "draft" | "review" | "revision") {

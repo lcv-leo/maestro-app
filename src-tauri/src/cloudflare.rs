@@ -757,6 +757,9 @@ pub(crate) fn ai_provider_secret_values(
     if let Some(value) = config.grok_api_key.as_ref() {
         values.insert("MAESTRO_GROK_API_KEY", value.clone());
     }
+    if let Some(value) = config.perplexity_api_key.as_ref() {
+        values.insert("MAESTRO_PERPLEXITY_API_KEY", value.clone());
+    }
     values
 }
 
@@ -924,6 +927,8 @@ pub(crate) fn write_ai_provider_metadata_to_cloudflare(
         "deepseek_output_usd_per_million": config.deepseek_output_usd_per_million,
         "grok_input_usd_per_million": config.grok_input_usd_per_million,
         "grok_output_usd_per_million": config.grok_output_usd_per_million,
+        "perplexity_input_usd_per_million": config.perplexity_input_usd_per_million,
+        "perplexity_output_usd_per_million": config.perplexity_output_usd_per_million,
         "requested_store_name": requested_store_name,
         "effective_store_name": store.name,
         "effective_store_id": store.id,

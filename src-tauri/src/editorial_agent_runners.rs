@@ -64,6 +64,7 @@ use crate::editorial_inputs::{effective_agent_input, prepare_agent_input};
 use crate::logging::{write_log_record, LogEventInput, LogSession};
 use crate::provider_deepseek::run_deepseek_api_agent;
 use crate::provider_grok::run_grok_api_agent;
+use crate::provider_perplexity::run_perplexity_api_agent;
 use crate::provider_runners::{
     run_anthropic_api_agent, run_gemini_api_agent, run_openai_api_agent,
     write_provider_error_result, write_provider_failure_result, EditorialAgentRequest,
@@ -110,7 +111,7 @@ pub(crate) fn run_editorial_agent_for_spec(
         );
     }
 
-    if matches!(spec.key, "deepseek" | "grok") {
+    if matches!(spec.key, "deepseek" | "grok" | "perplexity") {
         let invocation = ProviderInvocation {
             log_session,
             run_id,
@@ -176,6 +177,9 @@ fn run_provider_api_agent(
         "gemini" => tauri::async_runtime::block_on(run_gemini_api_agent(request, cancel_token)),
         "deepseek" => tauri::async_runtime::block_on(run_deepseek_api_agent(request, cancel_token)),
         "grok" => tauri::async_runtime::block_on(run_grok_api_agent(request, cancel_token)),
+        "perplexity" => {
+            tauri::async_runtime::block_on(run_perplexity_api_agent(request, cancel_token))
+        }
         _ => {
             let invocation = ProviderInvocation {
                 log_session: request.log_session,

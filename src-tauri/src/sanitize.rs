@@ -19,7 +19,7 @@
 //     with safe-suffix allowlist (`_present`/`_source`/`_scope`/etc.).
 //   - `redact_secrets(value)` — replaces matches of the secret regex with
 //     `<redacted>`. Handles sk-ant/sk_live/sk-/cfut_/cfat_/cfk_/xox[baprs]/
-//     gh[pousr]/AIza/re_/AKIA/PEM private-key patterns.
+//     gh[pousr]/AIza/pplx/re_/AKIA/PEM private-key patterns.
 //   - `secret_value_regex` (private) — `OnceLock<Regex>` cache.
 //
 // Re-export shim in lib.rs (v0.3.34): `pub(crate) use crate::sanitize::{
@@ -158,11 +158,21 @@ pub(crate) fn redact_secrets(value: &str) -> String {
         .to_string()
 }
 
+fn secret_value_regex() -> &'static Regex {
+    static SECRET_VALUE_REGEX: OnceLock<Regex> = OnceLock::new();
+    SECRET_VALUE_REGEX.get_or_init(|| {
+        Regex::new(
+            r"(?m)(sk-ant-[A-Za-z0-9_-]{8,}|sk_live_[A-Za-z0-9_-]{8,}|sk-[A-Za-z0-9_-]{8,}|pplx-[A-Za-z0-9_-]{8,}|cfut_[A-Za-z0-9_-]{8,}|cfat_[A-Za-z0-9_-]{8,}|cfk_[A-Za-z0-9_-]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|AIza[0-9A-Za-z_-]{8,}|re_[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN[^\r\n]*(?:\r?\n[^\r\n]*){0,80})",
+        )
+        .expect("valid secret redaction regex")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
-    use super::sanitize_value;
+    use super::{sanitize_text, sanitize_value};
 
     #[test]
     fn sanitize_value_preserves_diagnostic_field_names_while_redacting_values() {
@@ -180,14 +190,11 @@ mod tests {
         assert_eq!(sanitized["token_present"], true);
         assert!(sanitized.get("cloudfla<redacted>").is_none());
     }
-}
 
-fn secret_value_regex() -> &'static Regex {
-    static SECRET_VALUE_REGEX: OnceLock<Regex> = OnceLock::new();
-    SECRET_VALUE_REGEX.get_or_init(|| {
-        Regex::new(
-            r"(?m)(sk-ant-[A-Za-z0-9_-]{8,}|sk_live_[A-Za-z0-9_-]{8,}|sk-[A-Za-z0-9_-]{8,}|cfut_[A-Za-z0-9_-]{8,}|cfat_[A-Za-z0-9_-]{8,}|cfk_[A-Za-z0-9_-]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|AIza[0-9A-Za-z_-]{8,}|re_[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN[^\r\n]*(?:\r?\n[^\r\n]*){0,80})",
-        )
-        .expect("valid secret redaction regex")
-    })
+    #[test]
+    fn sanitize_text_redacts_perplexity_keys() {
+        let sanitized = sanitize_text("Authorization: Bearer pplx-test-secret-value", 200);
+
+        assert_eq!(sanitized, "Authorization: Bearer <redacted>");
+    }
 }

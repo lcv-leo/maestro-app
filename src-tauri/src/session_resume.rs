@@ -85,6 +85,7 @@ pub(crate) fn humanize_agent_name(value: &str) -> String {
         "gemini" => "Gemini".to_string(),
         "deepseek" => "DeepSeek".to_string(),
         "grok" => "Grok".to_string(),
+        "perplexity" => "Perplexity".to_string(),
         other => other
             .replace('_', " ")
             .split_whitespace()

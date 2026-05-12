@@ -149,6 +149,7 @@ pub(crate) fn api_provider_from_cli(cli: &str) -> Option<&'static str> {
         "gemini-api" => Some("gemini"),
         "deepseek-api" => Some("deepseek"),
         "grok-api" => Some("grok"),
+        "perplexity-api" => Some("perplexity"),
         _ => None,
     }
 }

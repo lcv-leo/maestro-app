@@ -66,8 +66,8 @@ pub(crate) fn normalize_active_agents(values: Option<&Vec<String>>) -> Result<Ve
             selected.push(key.to_string());
         }
     }
-    if selected.is_empty() || selected.len() > 5 {
-        return Err("selecione de 1 a 5 peers editoriais".to_string());
+    if selected.is_empty() || selected.len() > 6 {
+        return Err("selecione de 1 a 6 peers editoriais".to_string());
     }
     Ok(selected)
 }
@@ -80,6 +80,7 @@ pub(crate) fn canonical_editorial_agent_key(value: &str) -> Option<&'static str>
         "gemini" | "google" => Some("gemini"),
         "deepseek" | "deepseek-api" => Some("deepseek"),
         "grok" | "xai" | "grok-api" => Some("grok"),
+        "perplexity" | "sonar" | "perplexity-api" => Some("perplexity"),
         _ => None,
     }
 }
@@ -155,6 +156,7 @@ pub(crate) fn effective_draft_lead(
             "gemini" => Some("gemini"),
             "deepseek" => Some("deepseek"),
             "grok" => Some("grok"),
+            "perplexity" => Some("perplexity"),
             _ => None,
         })
         .unwrap_or("claude");
@@ -277,6 +279,11 @@ pub(crate) fn provider_cache_plan(
         "grok" => (
             "prompt_cache_key".to_string(),
             "prompt_cache_key".to_string(),
+            None,
+        ),
+        "perplexity" => (
+            "automatic_prefix".to_string(),
+            "sonar_no_documented_prompt_cache_control".to_string(),
             None,
         ),
         _ => (
@@ -491,6 +498,7 @@ mod tests {
             "gemini".to_string(),
             "deepseek".to_string(),
             "grok".to_string(),
+            "perplexity".to_string(),
         ];
 
         let selected = selected_review_agent_specs("deepseek", &active, Some("deepseek"));
@@ -499,7 +507,10 @@ mod tests {
             .map(|spec| spec.key)
             .collect::<Vec<_>>();
 
-        assert_eq!(keys, vec!["claude", "codex", "gemini", "grok"]);
+        assert_eq!(
+            keys,
+            vec!["claude", "codex", "gemini", "grok", "perplexity"]
+        );
     }
 
     #[test]
@@ -510,6 +521,7 @@ mod tests {
             "gemini".to_string(),
             "deepseek".to_string(),
             "grok".to_string(),
+            "perplexity".to_string(),
         ];
 
         let selected = selected_review_agent_specs("claude", &active, Some("  OpenAI  "));
@@ -518,7 +530,10 @@ mod tests {
             .map(|spec| spec.key)
             .collect::<Vec<_>>();
 
-        assert_eq!(keys, vec!["claude", "gemini", "deepseek", "grok"]);
+        assert_eq!(
+            keys,
+            vec!["claude", "gemini", "deepseek", "grok", "perplexity"]
+        );
     }
 
     #[test]
@@ -534,6 +549,7 @@ mod tests {
         assert!(!can_agent_review_current_draft("codex", Some("openai")));
         assert!(!can_agent_review_current_draft("gemini", Some(" GOOGLE ")));
         assert!(!can_agent_review_current_draft("grok", Some("xai")));
+        assert!(!can_agent_review_current_draft("perplexity", Some("sonar")));
         assert!(can_agent_review_current_draft("claude", Some("codex")));
         assert!(can_agent_review_current_draft("deepseek", None));
     }
@@ -649,6 +665,24 @@ mod tests {
         assert_eq!(
             plan.cache_control_status,
             "prompt_cache_key_default_retention"
+        );
+        assert_eq!(plan.cache_retention, None);
+    }
+
+    #[test]
+    fn provider_cache_plan_keeps_perplexity_without_invented_payload_fields() {
+        let plan = provider_cache_plan(
+            "perplexity",
+            "sonar-reasoning-pro",
+            "review",
+            "Perplexity",
+            "system",
+        );
+
+        assert_eq!(plan.provider_mode, "automatic_prefix");
+        assert_eq!(
+            plan.cache_control_status,
+            "sonar_no_documented_prompt_cache_control"
         );
         assert_eq!(plan.cache_retention, None);
     }

@@ -1736,7 +1736,7 @@ fn editorial_quality_tier(agent_key: &str) -> u8 {
     match agent_key.to_ascii_lowercase().as_str() {
         "claude" | "codex" => 3,
         "gemini" => 2,
-        "deepseek" | "grok" => 1,
+        "deepseek" | "grok" | "perplexity" => 1,
         _ => 0,
     }
 }
@@ -2017,6 +2017,7 @@ mod tests {
             "gemini".to_string(),
             "deepseek".to_string(),
             "grok".to_string(),
+            "perplexity".to_string(),
         ];
 
         let order = circular_round_turn_specs("claude", &active)
@@ -2024,7 +2025,17 @@ mod tests {
             .map(|spec| spec.key)
             .collect::<Vec<_>>();
 
-        assert_eq!(order, vec!["codex", "gemini", "deepseek", "grok", "claude"]);
+        assert_eq!(
+            order,
+            vec![
+                "codex",
+                "gemini",
+                "deepseek",
+                "grok",
+                "perplexity",
+                "claude"
+            ]
+        );
     }
 
     #[test]
@@ -2035,6 +2046,7 @@ mod tests {
             "gemini".to_string(),
             "deepseek".to_string(),
             "grok".to_string(),
+            "perplexity".to_string(),
         ];
         let specs = circular_round_turn_specs("claude", &active);
         let approvals = BTreeSet::<String>::new();
@@ -2064,6 +2076,7 @@ mod tests {
             "gemini".to_string(),
             "deepseek".to_string(),
             "grok".to_string(),
+            "perplexity".to_string(),
         ];
         let specs = circular_round_turn_specs("claude", &active);
         let mut approvals = BTreeSet::<String>::new();
@@ -2076,7 +2089,7 @@ mod tests {
             select_serial_reviewer_index(&specs, codex_index, "deepseek", "claude", &approvals, 0)
                 .unwrap();
 
-        assert_eq!(specs[selected].key, "claude");
+        assert_eq!(specs[selected].key, "perplexity");
     }
 
     #[test]
@@ -2087,6 +2100,7 @@ mod tests {
             "gemini".to_string(),
             "deepseek".to_string(),
             "grok".to_string(),
+            "perplexity".to_string(),
         ];
         let specs = circular_round_turn_specs("claude", &active);
         let mut approvals = BTreeSet::<String>::new();
@@ -2110,12 +2124,14 @@ mod tests {
             "gemini".to_string(),
             "deepseek".to_string(),
             "grok".to_string(),
+            "perplexity".to_string(),
         ];
         let specs = circular_round_turn_specs("claude", &active);
         let mut approvals = BTreeSet::<String>::new();
         approvals.insert("codex".to_string());
         approvals.insert("gemini".to_string());
         approvals.insert("grok".to_string());
+        approvals.insert("perplexity".to_string());
 
         assert!(!current_version_has_all_independent_approvals(
             &specs,
@@ -2160,6 +2176,7 @@ Texto revisado.
             "gemini".to_string(),
             "deepseek".to_string(),
             "grok".to_string(),
+            "perplexity".to_string(),
         ];
         let specs = circular_round_turn_specs("claude", &active);
         let mut result = review_result("Codex", "READY", "ok");

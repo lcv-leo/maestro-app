@@ -87,6 +87,10 @@ pub(crate) fn grok_args() -> Vec<String> {
     Vec::new()
 }
 
+pub(crate) fn perplexity_args() -> Vec<String> {
+    Vec::new()
+}
+
 pub(crate) fn editorial_agent_specs() -> Vec<EditorialAgentSpec> {
     vec![
         EditorialAgentSpec {
@@ -119,6 +123,12 @@ pub(crate) fn editorial_agent_specs() -> Vec<EditorialAgentSpec> {
             command: "grok-api",
             args: grok_args,
         },
+        EditorialAgentSpec {
+            key: "perplexity",
+            name: "Perplexity",
+            command: "perplexity-api",
+            args: perplexity_args,
+        },
     ]
 }
 
@@ -133,6 +143,7 @@ pub(crate) fn resolve_initial_agent_key(value: Option<&str>) -> (&'static str, O
         "gemini" | "google" => ("gemini", None),
         "deepseek" | "deepseek-api" => ("deepseek", None),
         "grok" | "xai" | "grok-api" => ("grok", None),
+        "perplexity" | "sonar" | "perplexity-api" => ("perplexity", None),
         "" => ("claude", None),
         _ => ("claude", Some(sanitize_text(value, 80))),
     }
@@ -422,7 +433,7 @@ If a concern is optional, stylistic, vague, or outside scope, mark it as `OUT_OF
 
 ## Quality Preservation / Anti-Impoverishment Gate
 
-Codex and Claude are the strongest long-form writers in this system. Gemini is second. DeepSeek and Grok are useful reviewers but must not flatten stronger prose.
+Codex and Claude are the strongest long-form writers in this system. Gemini is second. DeepSeek, Grok, and Perplexity are useful reviewers but must not flatten stronger prose.
 Preserve the strongest existing formulation unless a concrete editorial-protocol defect requires a narrow change.
 Do not reduce breadth, depth, articulation, nuance, reflexivity, or argumentative amplitude.
 Any deletion, compression, simplification, or structural narrowing must be justified in the report with:

@@ -109,7 +109,8 @@ const PostEditor = lazy(() => import('./editor/posteditor/PostEditor'));
 
 const APP_VERSION = `v${packageJson.version}`;
 
-const agentIsApiOnly = (agent: InitialAgentKey) => agent === 'deepseek' || agent === 'grok';
+const agentIsApiOnly = (agent: InitialAgentKey) =>
+  agent === 'deepseek' || agent === 'grok' || agent === 'perplexity';
 
 export function App() {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -150,6 +151,7 @@ export function App() {
     gemini: '',
     deepseek: '',
     grok: '',
+    perplexity: '',
   });
   const [providerInputUsdPerMillion, setProviderInputUsdPerMillion] = useState<Record<ProviderRateKey, string>>({
     openai: '',
@@ -157,6 +159,7 @@ export function App() {
     gemini: '',
     deepseek: '',
     grok: '',
+    perplexity: '',
   });
   const [providerOutputUsdPerMillion, setProviderOutputUsdPerMillion] = useState<Record<ProviderRateKey, string>>({
     openai: '',
@@ -164,6 +167,7 @@ export function App() {
     gemini: '',
     deepseek: '',
     grok: '',
+    perplexity: '',
   });
   const [sessionRunId, setSessionRunId] = useState<string | null>(null);
   const [lastSessionMinutesPath, setLastSessionMinutesPath] = useState<string | null>(null);
@@ -239,12 +243,14 @@ export function App() {
     gemini: 'gemini',
     deepseek: 'deepseek',
     grok: 'grok',
+    perplexity: 'perplexity',
   };
   const agentUsesApi = (agent: InitialAgentKey) => {
     if (providerMode === 'api') return true;
     if (providerMode === 'cli') return false;
-    // "hybrid" is deterministic by agent identity: DeepSeek and Grok go API
-    // (no CLI integration in maestro-app), the other peers stay on CLI.
+    // "hybrid" is deterministic by agent identity: DeepSeek, Grok and
+    // Perplexity go API (no CLI integration in maestro-app); other peers stay
+    // on CLI.
     return agentIsApiOnly(agent);
   };
   const providerRatesConfigured = (provider: AiCredentialKey) =>
@@ -271,7 +277,7 @@ export function App() {
   }, [activeAgents, initialAgent]);
 
   useEffect(() => {
-    // CLI mode is incompatible with API-only peers (DeepSeek and Grok).
+    // CLI mode is incompatible with API-only peers (DeepSeek, Grok and Perplexity).
     // Defense in depth: catches config-load AND resume-contract paths that call
     // setActiveAgents/setInitialAgent directly while providerMode is already 'cli'
     // (peer review v0.3.38: codex + deepseek raised this — providerMode-only deps
@@ -629,11 +635,13 @@ export function App() {
       gemini_api_key: aiCredentials.gemini.trim() || null,
       deepseek_api_key: aiCredentials.deepseek.trim() || null,
       grok_api_key: aiCredentials.grok.trim() || null,
+      perplexity_api_key: aiCredentials.perplexity.trim() || null,
       openai_api_key_remote: false,
       anthropic_api_key_remote: false,
       gemini_api_key_remote: false,
       deepseek_api_key_remote: false,
       grok_api_key_remote: false,
+      perplexity_api_key_remote: false,
       openai_input_usd_per_million: parseOptionalPositiveNumber(
         providerInputUsdPerMillion.openai,
         'Tarifa OpenAI de entrada',
@@ -684,6 +692,16 @@ export function App() {
         'Tarifa Grok de saida',
         10000,
       ),
+      perplexity_input_usd_per_million: parseOptionalPositiveNumber(
+        providerInputUsdPerMillion.perplexity,
+        'Tarifa Perplexity de entrada',
+        10000,
+      ),
+      perplexity_output_usd_per_million: parseOptionalPositiveNumber(
+        providerOutputUsdPerMillion.perplexity,
+        'Tarifa Perplexity de saida',
+        10000,
+      ),
       cloudflare_secret_store_id: null,
       cloudflare_secret_store_name: null,
       updated_at: new Date().toISOString(),
@@ -717,6 +735,7 @@ export function App() {
         gemini: config.gemini_api_key ?? '',
         deepseek: config.deepseek_api_key ?? '',
         grok: config.grok_api_key ?? '',
+        perplexity: config.perplexity_api_key ?? '',
       });
       applyProviderRatesFromConfig(config);
       const remoteCount = [
@@ -725,6 +744,7 @@ export function App() {
         config.gemini_api_key_remote,
         config.deepseek_api_key_remote,
         config.grok_api_key_remote,
+        config.perplexity_api_key_remote,
       ].filter(Boolean).length;
       setAiConfigStatus(
         remoteCount > 0
@@ -745,6 +765,7 @@ export function App() {
           gemini_key_present: Boolean(config.gemini_api_key),
           deepseek_key_present: Boolean(config.deepseek_api_key),
           grok_key_present: Boolean(config.grok_api_key),
+          perplexity_key_present: Boolean(config.perplexity_api_key),
           openai_rate_input_configured: config.openai_input_usd_per_million != null,
           openai_rate_output_configured: config.openai_output_usd_per_million != null,
           anthropic_rate_input_configured: config.anthropic_input_usd_per_million != null,
@@ -755,11 +776,14 @@ export function App() {
           deepseek_cost_output_configured: config.deepseek_output_usd_per_million != null,
           grok_cost_input_configured: config.grok_input_usd_per_million != null,
           grok_cost_output_configured: config.grok_output_usd_per_million != null,
+          perplexity_cost_input_configured: config.perplexity_input_usd_per_million != null,
+          perplexity_cost_output_configured: config.perplexity_output_usd_per_million != null,
           openai_remote_present: config.openai_api_key_remote,
           anthropic_remote_present: config.anthropic_api_key_remote,
           gemini_remote_present: config.gemini_api_key_remote,
           deepseek_remote_present: config.deepseek_api_key_remote,
           grok_remote_present: config.grok_api_key_remote,
+          perplexity_remote_present: config.perplexity_api_key_remote,
         },
       });
     } catch (error) {
@@ -787,6 +811,7 @@ export function App() {
         gemini: saved.gemini_api_key ?? '',
         deepseek: saved.deepseek_api_key ?? '',
         grok: saved.grok_api_key ?? '',
+        perplexity: saved.perplexity_api_key ?? '',
       });
       applyProviderRatesFromConfig(saved);
       const storageLabel = aiConfigStorageLabel(saved.credential_storage_mode);
@@ -811,6 +836,7 @@ export function App() {
           gemini_key_present: Boolean(saved.gemini_api_key),
           deepseek_key_present: Boolean(saved.deepseek_api_key),
           grok_key_present: Boolean(saved.grok_api_key),
+          perplexity_key_present: Boolean(saved.perplexity_api_key),
           openai_rate_input_configured: saved.openai_input_usd_per_million != null,
           openai_rate_output_configured: saved.openai_output_usd_per_million != null,
           anthropic_rate_input_configured: saved.anthropic_input_usd_per_million != null,
@@ -821,11 +847,14 @@ export function App() {
           deepseek_cost_output_configured: saved.deepseek_output_usd_per_million != null,
           grok_cost_input_configured: saved.grok_input_usd_per_million != null,
           grok_cost_output_configured: saved.grok_output_usd_per_million != null,
+          perplexity_cost_input_configured: saved.perplexity_input_usd_per_million != null,
+          perplexity_cost_output_configured: saved.perplexity_output_usd_per_million != null,
           openai_remote_present: saved.openai_api_key_remote,
           anthropic_remote_present: saved.anthropic_api_key_remote,
           gemini_remote_present: saved.gemini_api_key_remote,
           deepseek_remote_present: saved.deepseek_api_key_remote,
           grok_remote_present: saved.grok_api_key_remote,
+          perplexity_remote_present: saved.perplexity_api_key_remote,
         },
       });
       return saved;
@@ -1109,7 +1138,7 @@ export function App() {
         if (current.length === 1) return current;
         return current.filter((item) => item !== agent);
       }
-      return [...current, agent].filter((item, index, items) => items.indexOf(item) === index).slice(0, 5);
+      return [...current, agent].filter((item, index, items) => items.indexOf(item) === index).slice(0, 6);
     });
   }
 
@@ -1143,8 +1172,8 @@ export function App() {
   }
 
   function currentSessionRunOptions(): SessionRunOptions {
-    if (activeAgents.length < 1 || activeAgents.length > 5) {
-      throw new Error('Selecione de 1 a 5 peers para a sessao.');
+    if (activeAgents.length < 1 || activeAgents.length > 6) {
+      throw new Error('Selecione de 1 a 6 peers para a sessao.');
     }
     if (!activeAgents.includes(initialAgent)) {
       throw new Error('O agente da primeira versao precisa estar entre os peers ativos.');
@@ -1709,6 +1738,7 @@ export function App() {
         { name: 'Gemini', cli: 'gemini', state: 'blocked', note: 'falha antes de resultado estruturado' },
         { name: 'DeepSeek', cli: 'deepseek-api', state: 'blocked', note: 'falha antes de resultado estruturado' },
         { name: 'Grok', cli: 'grok-api', state: 'blocked', note: 'falha antes de resultado estruturado' },
+        { name: 'Perplexity', cli: 'perplexity-api', state: 'blocked', note: 'falha antes de resultado estruturado' },
         { name: 'Maestro', cli: 'motor local', state: 'blocked', note: 'consulte diagnostico e arquivos da sessao' },
       ]);
       void logEvent({
@@ -1780,6 +1810,8 @@ export function App() {
       gemini: config.gemini_input_usd_per_million == null ? '' : String(config.gemini_input_usd_per_million),
       deepseek: config.deepseek_input_usd_per_million == null ? '' : String(config.deepseek_input_usd_per_million),
       grok: config.grok_input_usd_per_million == null ? '' : String(config.grok_input_usd_per_million),
+      perplexity:
+        config.perplexity_input_usd_per_million == null ? '' : String(config.perplexity_input_usd_per_million),
     });
     setProviderOutputUsdPerMillion({
       openai: config.openai_output_usd_per_million == null ? '' : String(config.openai_output_usd_per_million),
@@ -1788,13 +1820,15 @@ export function App() {
       gemini: config.gemini_output_usd_per_million == null ? '' : String(config.gemini_output_usd_per_million),
       deepseek: config.deepseek_output_usd_per_million == null ? '' : String(config.deepseek_output_usd_per_million),
       grok: config.grok_output_usd_per_million == null ? '' : String(config.grok_output_usd_per_million),
+      perplexity:
+        config.perplexity_output_usd_per_million == null ? '' : String(config.perplexity_output_usd_per_million),
     });
   }
 
   function chooseProviderMode(nextMode: ProviderMode) {
     setProviderMode(nextMode);
     if (nextMode === 'cli') {
-      // CLI mode is incompatible with API-only peers (DeepSeek and Grok).
+      // CLI mode is incompatible with API-only peers (DeepSeek, Grok and Perplexity).
       // Drop them from the peer set and reassign the initial agent so the
       // operator can never enter a state where the run silently falls back to API.
       setActiveAgents((current) => {
@@ -1923,6 +1957,7 @@ export function App() {
         gemini_key_present: aiCredentials.gemini.length > 0,
         deepseek_key_present: aiCredentials.deepseek.length > 0,
         grok_key_present: aiCredentials.grok.length > 0,
+        perplexity_key_present: aiCredentials.perplexity.length > 0,
       },
     });
 
@@ -2991,10 +3026,10 @@ export function App() {
               <div className="provider-mode-note">
                 <strong>Execucao API real por peer</strong>
                 <span>
-                  <strong>API</strong> roda os 5 peers via provedores oficiais.
-                  {' '}<strong>Hibrido</strong> reserva DeepSeek e Grok para API (nao tem CLI) e
+                  <strong>API</strong> roda os 6 peers via provedores oficiais.
+                  {' '}<strong>Hibrido</strong> reserva DeepSeek, Grok e Perplexity para API (nao tem CLI) e
                   Claude, Codex, Gemini para CLI, sempre, independentemente das chaves.
-                  {' '}<strong>CLI</strong> roda os 3 peers com CLI; DeepSeek e Grok ficam desabilitados
+                  {' '}<strong>CLI</strong> roda os 3 peers com CLI; DeepSeek, Grok e Perplexity ficam desabilitados
                   porque nao possuem integracao CLI.
                   Tarifas continuam obrigatorias para qualquer chamada de API.
                 </span>

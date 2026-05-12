@@ -142,11 +142,17 @@ export function attachmentDeliveryPlan(
 ): AttachmentDeliveryPlan {
   const nativeProviders = activeApiProviders.filter(
     (provider): provider is NativeAttachmentProvider =>
-      provider !== 'deepseek' && provider !== 'grok' && providerSupportsNativeAttachment(provider, attachment),
+      provider !== 'deepseek' &&
+      provider !== 'grok' &&
+      provider !== 'perplexity' &&
+      providerSupportsNativeAttachment(provider, attachment),
   );
   const manifestProviders = activeApiProviders.filter(
     (provider) =>
-      provider === 'deepseek' || provider === 'grok' || !nativeProviders.includes(provider as NativeAttachmentProvider),
+      provider === 'deepseek' ||
+      provider === 'grok' ||
+      provider === 'perplexity' ||
+      !nativeProviders.includes(provider as NativeAttachmentProvider),
   );
   let fallbackReason: string | null = null;
   if (manifestProviders.length > 0 || nativeProviders.length === 0) {
@@ -156,7 +162,9 @@ export function attachmentDeliveryPlan(
         : activeApiProviders.length === 0
           ? 'peers ativos usam CLI'
           : manifestProviders.length > 0 &&
-              manifestProviders.every((provider) => provider === 'deepseek' || provider === 'grok')
+              manifestProviders.every(
+                (provider) => provider === 'deepseek' || provider === 'grok' || provider === 'perplexity',
+              )
             ? 'API text-only'
             : nativeProviders.length > 0
               ? 'sem suporte nativo nesses peers'
@@ -170,6 +178,7 @@ export function providerShortLabel(provider: AiCredentialKey) {
   if (provider === 'anthropic') return 'Anthropic';
   if (provider === 'gemini') return 'Gemini';
   if (provider === 'grok') return 'Grok';
+  if (provider === 'perplexity') return 'Perplexity';
   return 'DeepSeek';
 }
 
@@ -274,7 +283,7 @@ export function latestAgentResults(agents: EditorialAgentResult[]) {
       byName.set(agent.name, agent);
     }
   }
-  return ['Claude', 'Codex', 'Gemini', 'DeepSeek', 'Grok']
+  return ['Claude', 'Codex', 'Gemini', 'DeepSeek', 'Grok', 'Perplexity']
     .map((name) => byName.get(name))
     .filter((agent): agent is EditorialAgentResult => Boolean(agent));
 }

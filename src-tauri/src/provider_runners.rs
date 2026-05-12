@@ -256,6 +256,7 @@ pub(crate) fn api_cost_preflight_result(
             "gemini" => "gemini",
             "deepseek" => "deepseek",
             "grok" => "grok",
+            "perplexity" => "perplexity",
             other => other,
         }),
         estimated_cost,

@@ -4,12 +4,32 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [v0.5.27] - 2026-05-12
+
+### Added
+- Added Perplexity as the sixth editorial peer. It is API-only, uses the official Sonar endpoint (`POST https://api.perplexity.ai/v1/sonar`), defaults to `sonar-reasoning-pro`, requests high reasoning effort with web search context, and logs Perplexity citations/search-results metadata separately from the agent artifact.
+- Added Perplexity configuration surfaces across frontend state, Cloudflare Secrets Store persistence, provider credential probing, provider rate cards, environment fallbacks (`MAESTRO_PERPLEXITY_API_KEY` / `PERPLEXITY_API_KEY`), and model overrides (`MAESTRO_PERPLEXITY_MODEL` / `PERPLEXITY_MODEL`).
+
+### Changed
+- Updated provider-mode routing to keep Perplexity aligned with DeepSeek/Grok: **API** can run all 6 peers, **Hybrid** runs Claude/Codex/Gemini on CLI and DeepSeek/Grok/Perplexity on API, and **CLI** disables API-only peers instead of silently falling back.
+- Extended no-self-review, circular ordering, artifact parsing, cost-ledger provider mapping, text-only attachment fallback, source redaction, and weaker-peer quality safeguards to include Perplexity.
+
 ### Hardened
 - Scoped GitHub Actions token permissions for Scorecard, release publishing, and Dependabot automerge so workflows default to read-only permissions and request write scopes only in the jobs that need them.
 - Expanded `SECURITY.md` with a concrete private vulnerability reporting path, expected report contents, and a 7-day acknowledgement target.
 - Added `src-tauri/osv-scanner.toml` to document and time-bound OSV exceptions for Scorecard advisories that come from Tauri/Wry cross-platform GTK/unic lockfile dependencies, including evidence that the GTK/glib chain is not present in the shipped Windows target dependency tree.
 
 ### Validation
+- `npm test -- --run`: 2 files / 2 tests passed.
+- `npm audit --audit-level=moderate`: 0 vulnerabilities.
+- `cargo test --manifest-path .\src-tauri\Cargo.toml --locked`: 162 tests passed.
+- `cargo clippy --manifest-path .\src-tauri\Cargo.toml --locked --no-deps --all-targets`: passed with pre-existing warning debt only.
+- `npm run build`: passed once; Vite kept the known large-chunk warning.
+- `git diff --check`: passed with CRLF normalization warnings only.
+- Live Perplexity `/v1/models` probe was skipped because no `MAESTRO_PERPLEXITY_API_KEY` / `PERPLEXITY_API_KEY` was present in the validation shell.
+- `cross-review-v2` session `f298abfc-501b-447f-be88-760877a5`: evidence-backed review converged in 2 rounds with all eligible non-Codex reviewers supported by cross-review-v2 (`claude`, `gemini`, `deepseek`, `grok`) returning `READY`. Earlier session `127056f1-89bb-4a49-80a5-c9b419ccbd74` was treated as incomplete because it lacked inline evidence.
 - Confirmed the 11 open Code Scanning alerts are all OpenSSF Scorecard SARIF alerts, not CodeQL findings.
 - `cargo audit` reported `vulnerabilities.found=false`; the Scorecard `VulnerabilitiesID` alert maps to 14 unmaintained warnings plus 1 `glib` unsound warning in transitive Rust dependencies.
 - `cargo tree --locked --target x86_64-pc-windows-msvc -i gtk` and `-i glib`: no dependency path printed for the shipped Windows target.

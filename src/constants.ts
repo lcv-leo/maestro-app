@@ -47,6 +47,7 @@ export const initialAgents: AgentCard[] = [
   { name: 'Gemini', cli: 'gemini', state: 'blocked', note: 'aguardando sessao editorial' },
   { name: 'DeepSeek', cli: 'deepseek-api', state: 'blocked', note: 'aguardando chave de API' },
   { name: 'Grok', cli: 'grok-api', state: 'blocked', note: 'aguardando chave de API' },
+  { name: 'Perplexity', cli: 'perplexity-api', state: 'blocked', note: 'aguardando chave de API' },
   { name: 'Maestro', cli: 'motor local', state: 'blocked', note: 'aguardando verificacoes iniciais' },
 ];
 
@@ -63,6 +64,7 @@ export const initialProtocolReadingGates: ProtocolReadingGate[] = [
   { agent: 'Gemini', progress: 0, status: 'Aguardando' },
   { agent: 'DeepSeek', progress: 0, status: 'Aguardando' },
   { agent: 'Grok', progress: 0, status: 'Aguardando' },
+  { agent: 'Perplexity', progress: 0, status: 'Aguardando' },
 ];
 
 export const initialDiscussionRounds: DiscussionRound[] = [
@@ -117,6 +119,7 @@ export const initialAiProviderChecks: AiProviderProbeRow[] = [
   { label: 'Google / Gemini', value: 'pendente de verificacao', tone: 'pending' },
   { label: 'DeepSeek', value: 'pendente de verificacao', tone: 'pending' },
   { label: 'Grok / xAI', value: 'pendente de verificacao', tone: 'pending' },
+  { label: 'Perplexity / Sonar', value: 'pendente de verificacao', tone: 'pending' },
 ];
 
 export const credentialStorageModes = [
@@ -137,7 +140,7 @@ export const storageModeSummaries: Record<CredentialStorageMode, { title: string
   cloudflare: {
     title: 'Cloudflare remoto',
     detail:
-      'Configuracoes em D1 maestro_db; segredos centralizados no Cloudflare Secrets Store. Importante: o app nao busca segredos remotos em runtime; para executar peers via API localmente, mantenha MAESTRO_OPENAI_API_KEY / MAESTRO_ANTHROPIC_API_KEY / MAESTRO_GEMINI_API_KEY / MAESTRO_DEEPSEEK_API_KEY / MAESTRO_GROK_API_KEY em env vars (ou na config local). Esse modo e escolha de armazenamento canonico, nao alimenta execucao local sozinho.',
+      'Configuracoes em D1 maestro_db; segredos centralizados no Cloudflare Secrets Store. Importante: o app nao busca segredos remotos em runtime; para executar peers via API localmente, mantenha MAESTRO_OPENAI_API_KEY / MAESTRO_ANTHROPIC_API_KEY / MAESTRO_GEMINI_API_KEY / MAESTRO_DEEPSEEK_API_KEY / MAESTRO_GROK_API_KEY / MAESTRO_PERPLEXITY_API_KEY em env vars (ou na config local). Esse modo e escolha de armazenamento canonico, nao alimenta execucao local sozinho.',
   },
 };
 
@@ -177,6 +180,13 @@ export const aiProviderRows = [
     secretLabel: 'Grok API key',
     meta: 'API oficial xAI; melhor modelo disponivel via /models',
   },
+  {
+    key: 'perplexity',
+    name: 'Perplexity / Sonar',
+    cli: 'perplexity-api',
+    secretLabel: 'Perplexity API key',
+    meta: 'API oficial Sonar; modelo reasoning com busca e citacoes',
+  },
 ] satisfies Array<{
   key: AiCredentialKey;
   name: string;
@@ -211,6 +221,11 @@ export const providerRateRows = [
     name: 'Grok / xAI',
     hint: 'Obrigatorio para sessoes com Grok via API.',
   },
+  {
+    key: 'perplexity',
+    name: 'Perplexity / Sonar',
+    hint: 'Obrigatorio para sessoes com Perplexity via API.',
+  },
 ] satisfies Array<{ key: ProviderRateKey; name: string; hint: string }>;
 
 export const initialAgentOptions = [
@@ -219,6 +234,7 @@ export const initialAgentOptions = [
   { key: 'gemini', label: 'Gemini', detail: 'primeira versao e revisoes' },
   { key: 'deepseek', label: 'DeepSeek', detail: 'primeira versao e revisoes via API' },
   { key: 'grok', label: 'Grok', detail: 'primeira versao e revisoes via API' },
+  { key: 'perplexity', label: 'Perplexity', detail: 'primeira versao e revisoes via API Sonar' },
 ] satisfies Array<{ key: InitialAgentKey; label: string; detail: string }>;
 
 export const defaultActiveAgents = initialAgentOptions.map((option) => option.key);

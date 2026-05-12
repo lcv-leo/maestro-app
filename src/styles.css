@@ -596,11 +596,6 @@ button:disabled {
 .reading-list {
   display: grid;
   gap: 10px;
-  max-height: min(42vh, 460px);
-  overflow-y: auto;
-  padding-right: 4px;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
 }
 
 .reading-row {
@@ -746,6 +741,8 @@ button:disabled {
 }
 
 .operation-body {
+  align-items: stretch;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 18px;
   padding: 14px;
@@ -755,6 +752,7 @@ button:disabled {
 }
 
 .operation-summary {
+  flex: 1 1 300px;
   min-width: 0;
 }
 
@@ -835,6 +833,7 @@ button:disabled {
 }
 
 .progress-stack {
+  flex: 0 1 220px;
   min-width: 220px;
 }
 
@@ -974,6 +973,60 @@ button:disabled {
   text-align: right;
 }
 
+.active-agent-now {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  flex: 1 1 260px;
+  gap: 10px;
+  align-items: center;
+  min-width: 240px;
+  padding: 10px 12px;
+  border: 1px solid #d8dee8;
+  border-left: 4px solid #94a3b8;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.active-agent-now.running {
+  border-left-color: #0f766e;
+}
+
+.active-agent-now.finished {
+  border-left-color: #16a34a;
+}
+
+.active-agent-now .agent-icon {
+  color: #0f172a;
+}
+
+.active-agent-now span,
+.active-agent-now strong,
+.active-agent-now em {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.active-agent-now span {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.active-agent-now strong {
+  margin-top: 2px;
+  color: #111827;
+  font-size: 15px;
+}
+
+.active-agent-now em {
+  margin-top: 2px;
+  color: #475569;
+  font-size: 12px;
+  font-style: normal;
+}
+
 @keyframes indeterminateSlide {
   0% {
     transform: translateX(-120%);
@@ -1104,8 +1157,7 @@ button:disabled {
 
 .round-list,
 .artifact-list,
-.connector-list,
-.pipeline-list {
+.connector-list {
   display: grid;
   gap: 10px;
   max-height: min(34vh, 360px);
@@ -1114,6 +1166,12 @@ button:disabled {
   align-content: start;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+}
+
+.pipeline-list {
+  display: grid;
+  gap: 10px;
+  align-content: start;
 }
 
 .round-row {
@@ -1264,11 +1322,6 @@ button:disabled {
 .agent-list {
   display: grid;
   gap: 10px;
-  max-height: min(48vh, 520px);
-  overflow-y: auto;
-  padding-right: 4px;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
 }
 
 .agent-row {
@@ -1865,6 +1918,8 @@ button:disabled {
 
 .connector-row strong,
 .pipeline-row strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
   color: #202124;
   font-size: 13px;
 }

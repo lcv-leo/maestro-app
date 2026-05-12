@@ -30,6 +30,7 @@ use std::{
         Arc, Mutex,
     },
 };
+use tauri::Emitter;
 
 use crate::app_paths::{app_root, checked_data_child_path, logs_dir};
 use crate::human_logs::{human_log_summary, severity_number_for, write_human_log_projection};
@@ -49,6 +50,7 @@ pub(crate) struct LogSession {
     pub(crate) id: String,
     pub(crate) path: PathBuf,
     pub(crate) write_lock: Arc<Mutex<()>>,
+    pub(crate) event_emitter: Option<tauri::AppHandle>,
 }
 
 /// Frontend → backend payload for `write_log_event`. `level` is normalized
@@ -74,13 +76,21 @@ pub(crate) struct LogWriteResult {
 /// Build a new `LogSession` anchored at the current process's logs_dir.
 /// The id is `<UTC timestamp>-pid<pid>` so every run produces a unique
 /// log file under `data/logs/maestro-<id>.ndjson`.
+#[cfg(test)]
 pub(crate) fn create_log_session() -> LogSession {
+    create_log_session_with_emitter(None)
+}
+
+pub(crate) fn create_log_session_with_emitter(
+    event_emitter: Option<tauri::AppHandle>,
+) -> LogSession {
     let timestamp = Utc::now().format("%Y-%m-%dT%H-%M-%SZ");
     let id = format!("{timestamp}-pid{}", process::id());
     LogSession {
         id: id.clone(),
         path: logs_dir().join(format!("maestro-{id}.ndjson")),
         write_lock: Arc::new(Mutex::new(())),
+        event_emitter,
     }
 }
 
@@ -99,12 +109,6 @@ pub(crate) fn write_log_record(
     log_session: &LogSession,
     event: LogEventInput,
 ) -> Result<LogWriteResult, String> {
-    let _guard = log_session
-        .write_lock
-        .lock()
-        .map_err(|_| "failed to lock log writer".to_string())?;
-    let dir = checked_data_child_path(&logs_dir())?;
-    fs::create_dir_all(&dir).map_err(|error| format!("failed to create log dir: {error}"))?;
     let sequence = NATIVE_LOG_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
     let log_path = checked_data_child_path(&log_session.path)?;
 
@@ -141,14 +145,32 @@ pub(crate) fn write_log_record(
             "log_file": log_path.to_string_lossy().to_string()
         }
     });
+    let event_payload = json!({
+        "timestamp": record["timestamp"].clone(),
+        "level": record["level"].clone(),
+        "category": record["category"].clone(),
+        "message": record["message"].clone(),
+        "context": record["context"].clone()
+    });
 
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .map_err(|error| format!("failed to open log file: {error}"))?;
-    writeln!(file, "{record}").map_err(|error| format!("failed to write log record: {error}"))?;
-    let _ = write_human_log_projection(&log_session.path, &record);
+    {
+        let _guard = log_session
+            .write_lock
+            .lock()
+            .map_err(|_| "failed to lock log writer".to_string())?;
+        let dir = checked_data_child_path(&logs_dir())?;
+        fs::create_dir_all(&dir).map_err(|error| format!("failed to create log dir: {error}"))?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(|error| format!("failed to open log file: {error}"))?;
+        writeln!(file, "{record}").map_err(|error| format!("failed to write log record: {error}"))?;
+        let _ = write_human_log_projection(&log_session.path, &record);
+    }
+    if let Some(emitter) = &log_session.event_emitter {
+        let _ = emitter.emit("maestro-log-event", event_payload);
+    }
 
     Ok(LogWriteResult {
         path: log_path.to_string_lossy().to_string(),

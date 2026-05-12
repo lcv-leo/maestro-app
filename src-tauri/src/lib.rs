@@ -136,7 +136,11 @@ use crate::editorial_inputs::{
 use crate::editorial_prompts::{
     editorial_agent_specs, ordered_editorial_agent_specs, resolve_initial_agent_key,
 };
-use crate::logging::{create_log_session, write_log_record, LogEventInput, LogSession};
+#[cfg(test)]
+use crate::logging::create_log_session;
+use crate::logging::{
+    create_log_session_with_emitter, write_log_record, LogEventInput, LogSession,
+};
 #[cfg(test)]
 use crate::session_artifacts::{inspect_resumable_session_dir, load_resume_session_state};
 #[cfg(test)]
@@ -659,7 +663,7 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             initialize_app_root(app)?;
-            app.manage(create_log_session());
+            app.manage(create_log_session_with_emitter(Some(app.handle().clone())));
             let log_session = app.state::<LogSession>();
             let panic_log_session = log_session.inner().clone();
             std::panic::set_hook(Box::new(move |panic_info| {

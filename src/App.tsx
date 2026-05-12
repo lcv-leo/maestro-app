@@ -21,6 +21,7 @@ import {
   Globe2,
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import type { ChangeEvent } from 'react';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import packageJson from '../package.json';
@@ -109,6 +110,28 @@ const PostEditor = lazy(() => import('./editor/posteditor/PostEditor'));
 
 const APP_VERSION = `v${packageJson.version}`;
 
+type ActiveAgentNow = {
+  name: string;
+  role: string;
+  detail: string;
+  state: 'idle' | 'running' | 'finished';
+};
+
+type NativeLogPayload = {
+  category?: string;
+  context?: {
+    run_id?: string;
+    agent?: string;
+    role?: string;
+    cli?: string;
+    status?: string;
+    tone?: 'ok' | 'warn' | 'blocked' | 'error';
+    elapsed_seconds?: number;
+  };
+};
+
+type NativeLogTone = NonNullable<NativeLogPayload['context']>['tone'];
+
 const agentIsApiOnly = (agent: InitialAgentKey) =>
   agent === 'deepseek' || agent === 'grok' || agent === 'perplexity';
 
@@ -180,6 +203,7 @@ export function App() {
   const [activityItems, setActivityItems] = useState<ActivityItem[]>(idleActivityFeed);
   const [discussionItems, setDiscussionItems] = useState<DiscussionRound[]>(initialDiscussionRounds);
   const [agentCards, setAgentCards] = useState<AgentCard[]>(initialAgents);
+  const [activeAgentNow, setActiveAgentNow] = useState<ActiveAgentNow | null>(null);
   const [evidenceRows, setEvidenceRows] = useState<EvidenceRow[]>(initialEvidenceRows);
   const [linkAuditRows, setLinkAuditRows] = useState<LinkAuditResult['rows']>([]);
   const [protocolGateItems, setProtocolGateItems] = useState<ProtocolReadingGate[]>(initialProtocolReadingGates);
@@ -198,6 +222,7 @@ export function App() {
   const [showResumePicker, setShowResumePicker] = useState(false);
   const [isResumeLoading, setIsResumeLoading] = useState(false);
   const [useLoadedProtocolForResume, setUseLoadedProtocolForResume] = useState(false);
+  const sessionRunIdRef = useRef<string | null>(null);
 
   // v0.3.14 / audit closure (MEDIUM): ESC dismissal on the ResumeDialog at
   // line 2574. Mirrors the existing Close button (line 2582) — no new
@@ -209,6 +234,93 @@ export function App() {
     setShowResumePicker(false);
   }, []);
   useEscapeKey(handleResumeDialogEscape, showResumePicker);
+
+  useEffect(() => {
+    sessionRunIdRef.current = sessionRunId;
+  }, [sessionRunId]);
+
+  useEffect(() => {
+    let unsubscribe: (() => void) | null = null;
+    let disposed = false;
+
+    const roleLabel = (role: string | undefined) => {
+      if (role === 'draft') return 'redacao';
+      if (role === 'review') return 'revisao';
+      if (role === 'revision') return 'reescrita';
+      return role || 'turno editorial';
+    };
+
+    const toneToState = (tone: NativeLogTone): AgentState => {
+      if (tone === 'ok') return 'ready';
+      if (tone === 'warn') return 'evidence';
+      if (tone === 'blocked' || tone === 'error') return 'blocked';
+      return 'evidence';
+    };
+
+    void listen<NativeLogPayload>('maestro-log-event', (event) => {
+      const { category, context } = event.payload;
+      if (!context?.run_id || context.run_id !== sessionRunIdRef.current) return;
+
+      if (category === 'session.agent.started') {
+        const name = context.agent ?? 'Agente';
+        const role = roleLabel(context.role);
+        const detail = `${role} em andamento${context.cli ? ` via ${context.cli}` : ''}`;
+        setActiveAgentNow({ name, role, detail, state: 'running' });
+        setAgentCards((current) =>
+          current.map((agent) =>
+            agent.name === name
+              ? { ...agent, state: 'running', note: detail }
+              : agent.name === 'Maestro'
+                ? agent
+                : agent.state === 'running'
+                  ? { ...agent, state: 'evidence', note: 'aguardando seu turno no circuito' }
+                  : agent,
+          ),
+        );
+        return;
+      }
+
+      if (category === 'session.agent.running') {
+        const name = context.agent ?? 'Agente';
+        const role = roleLabel(context.role);
+        const elapsed =
+          context.elapsed_seconds == null ? '' : ` ha ${formatElapsedTime(context.elapsed_seconds)}`;
+        const detail = `${role} em andamento${elapsed}${context.cli ? ` via ${context.cli}` : ''}`;
+        setActiveAgentNow({ name, role, detail, state: 'running' });
+        return;
+      }
+
+      if (category === 'session.agent.finished') {
+        const name = context.agent ?? 'Agente';
+        const role = roleLabel(context.role);
+        const status = context.status ? humanizeAgentStatus(context.status) : 'turno finalizado';
+        setActiveAgentNow({ name, role, detail: status, state: 'finished' });
+        setAgentCards((current) =>
+          current.map((agent) =>
+            agent.name === name
+              ? { ...agent, state: toneToState(context.tone), note: `${role}: ${status}` }
+              : agent,
+          ),
+        );
+        return;
+      }
+
+      if (category === 'session.editorial.completed' || category === 'session.editorial.failed') {
+        setActiveAgentNow(null);
+      }
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+      } else {
+        unsubscribe = unlisten;
+      }
+    });
+
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
+  }, []);
 
   const readyCount = useMemo(() => agentCards.filter((agent) => agent.state === 'ready').length, [agentCards]);
   const visibleActivity = useMemo(() => {
@@ -1017,7 +1129,9 @@ export function App() {
 
   async function startResumeSession(session: ResumableSessionInfo, useLoadedProtocol: boolean) {
     setShowResumePicker(false);
+    sessionRunIdRef.current = session.run_id;
     setSessionRunId(session.run_id);
+    setActiveAgentNow(null);
     setSessionName(session.session_name);
     const protocolOverride = resumeProtocolOptions(useLoadedProtocol);
 
@@ -1336,7 +1450,9 @@ export function App() {
       return;
     }
 
+    sessionRunIdRef.current = runId;
     setSessionRunId(runId);
+    setActiveAgentNow(null);
     const selectedInitialAgent = initialAgent;
     const selectedInitialAgentLabel =
       initialAgentOptions.find((option) => option.key === selectedInitialAgent)?.label ?? 'Claude';
@@ -1633,6 +1749,7 @@ export function App() {
           result.observed_cost_usd == null ? 'nao medido' : `US$ ${result.observed_cost_usd.toFixed(6)}`
         }. Log humano: ${result.human_log_path ?? 'indisponivel'}.`,
       });
+      setActiveAgentNow(null);
 
       if (result.consensus_ready) {
         setOperation({
@@ -1725,6 +1842,7 @@ export function App() {
       }
     } catch (error) {
       window.clearInterval(heartbeat);
+      setActiveAgentNow(null);
       setOperation({
         title: 'Sessao editorial falhou',
         progress: 42,
@@ -2512,6 +2630,16 @@ export function App() {
                     />
                   </div>
                   <span>{operationProgressLabel}</span>
+                </div>
+                <div className={`active-agent-now ${activeAgentNow?.state ?? 'idle'}`} aria-live="polite">
+                  <div className="agent-icon">
+                    <Bot size={16} />
+                  </div>
+                  <div>
+                    <span>Agente em turno</span>
+                    <strong>{activeAgentNow?.name ?? (isRunPreparing ? 'Aguardando primeiro turno' : 'Nenhum')}</strong>
+                    <em>{activeAgentNow?.detail ?? 'O indicador atualiza automaticamente quando o backend inicia cada peer.'}</em>
+                  </div>
                 </div>
               </div>
 

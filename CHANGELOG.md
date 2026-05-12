@@ -6,6 +6,29 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 _No unreleased changes._
 
+## [v0.5.28] - 2026-05-12
+
+### Added
+- Added a live "Agente em turno" indicator that tracks the backend editorial run events and shows which peer is currently drafting, reviewing, or rewriting.
+- Added a typed Tauri `maestro-log-event` bridge from backend log records to the React UI, with reduced event payloads scoped by `run_id`.
+
+### Changed
+- Removed unnecessary internal vertical scrolling from the agent, required-reading, and bootstrap status lists so their rows render as visible lists instead of nested scroll panes.
+- Updated agent cards from live backend events during active runs, while ignoring stale events from previous or resumed sessions.
+
+### Fixed
+- Emitted frontend progress events outside the backend log write lock, avoiding IPC while the NDJSON writer mutex is held.
+- Gated the test-only `create_log_session()` helper with `#[cfg(test)]`; production uses `create_log_session_with_emitter(...)`.
+
+### Validation
+- `git diff --check`: passed.
+- `npm run tauri -- build`: passed once; Vite kept the known large-chunk warning.
+- `cargo check --locked --lib`: passed with pre-existing warning debt only.
+- `cargo test --locked --lib --no-run`: passed.
+- `cargo test --locked --lib`: blocked before Rust tests by native Windows loader `STATUS_ENTRYPOINT_NOT_FOUND` (`0xc0000139`), tracked as separate test-infrastructure debt.
+- `cross-review-v2` session `41244a1c-e7e8-439a-a59e-9339f7c7175d`: main patch reached `unanimous_ready` in round 4. Post-build `#[cfg(test)]` delta received READY from Claude, Gemini, DeepSeek, and Grok; Perplexity returned substantively READY but cross-review-v2 marked it `unparseable_after_recovery` due a `<think>` preamble before JSON, exposing a v2 parser/state inconsistency.
+- `src-tauri/target` verified absent after validation per workspace directive.
+
 ## [v0.5.27] - 2026-05-12
 
 ### Added

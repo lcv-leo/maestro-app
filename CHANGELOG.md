@@ -6,7 +6,7 @@ All notable changes to Maestro Editorial AI will be documented in this file.
 
 _No unreleased changes._
 
-## [v0.5.28] - 2026-05-12
+## [v0.5.29] - 2026-05-12
 
 ### Added
 - Added a live "Agente em turno" indicator that tracks the backend editorial run events and shows which peer is currently drafting, reviewing, or rewriting.
@@ -20,7 +20,7 @@ _No unreleased changes._
 - Emitted frontend progress events outside the backend log write lock, avoiding IPC while the NDJSON writer mutex is held.
 - Gated the test-only `create_log_session()` helper with `#[cfg(test)]`; production uses `create_log_session_with_emitter(...)`.
 - Decoupled the backend log event bridge from a concrete `tauri::AppHandle`, preserving runtime event emission through a callback emitter and avoiding concrete Tauri handle storage in `LogSession`.
-- Synchronized `src-tauri/Cargo.lock` with the `0.5.28` package version.
+- Synchronized all release version sources at `0.5.29` after the log event emitter hotfix.
 
 ### Validation
 - `git diff --check`: passed.

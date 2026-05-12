@@ -19,13 +19,15 @@ _No unreleased changes._
 ### Fixed
 - Emitted frontend progress events outside the backend log write lock, avoiding IPC while the NDJSON writer mutex is held.
 - Gated the test-only `create_log_session()` helper with `#[cfg(test)]`; production uses `create_log_session_with_emitter(...)`.
+- Decoupled the backend log event bridge from a concrete `tauri::AppHandle`, preserving runtime event emission through a callback emitter and avoiding concrete Tauri handle storage in `LogSession`.
+- Synchronized `src-tauri/Cargo.lock` with the `0.5.28` package version.
 
 ### Validation
 - `git diff --check`: passed.
 - `npm run tauri -- build`: passed once; Vite kept the known large-chunk warning.
 - `cargo check --locked --lib`: passed with pre-existing warning debt only.
 - `cargo test --locked --lib --no-run`: passed.
-- `cargo test --locked --lib`: blocked before Rust tests by native Windows loader `STATUS_ENTRYPOINT_NOT_FOUND` (`0xc0000139`), tracked as separate test-infrastructure debt.
+- `cargo test --locked --lib`: passed; 162 tests passed.
 - `cross-review-v2` session `41244a1c-e7e8-439a-a59e-9339f7c7175d`: main patch reached `unanimous_ready` in round 4. Post-build `#[cfg(test)]` delta received READY from Claude, Gemini, DeepSeek, and Grok; Perplexity returned substantively READY but cross-review-v2 marked it `unparseable_after_recovery` due a `<think>` preamble before JSON, exposing a v2 parser/state inconsistency.
 - `src-tauri/target` verified absent after validation per workspace directive.
 

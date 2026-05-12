@@ -18,8 +18,8 @@ use serde_json::json;
 use serde_json::Value;
 #[cfg(test)]
 use std::{fs, path::Path, thread};
-use std::{path::PathBuf, process::Output, time::Duration};
-use tauri::Manager;
+use std::{path::PathBuf, process::Output, sync::Arc, time::Duration};
+use tauri::{Emitter, Manager};
 
 mod ai_probes;
 mod api_payloads;
@@ -663,7 +663,10 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             initialize_app_root(app)?;
-            app.manage(create_log_session_with_emitter(Some(app.handle().clone())));
+            let event_handle = app.handle().clone();
+            app.manage(create_log_session_with_emitter(Some(Arc::new(move |payload| {
+                let _ = event_handle.emit("maestro-log-event", payload);
+            }))));
             let log_session = app.state::<LogSession>();
             let panic_log_session = log_session.inner().clone();
             std::panic::set_hook(Box::new(move |panic_info| {

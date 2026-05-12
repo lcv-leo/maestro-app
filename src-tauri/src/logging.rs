@@ -30,11 +30,11 @@ use std::{
         Arc, Mutex,
     },
 };
-use tauri::Emitter;
-
 use crate::app_paths::{app_root, checked_data_child_path, logs_dir};
 use crate::human_logs::{human_log_summary, severity_number_for, write_human_log_projection};
 use crate::{sanitize_short, sanitize_text, sanitize_value};
+
+pub(crate) type LogEventEmitter = Arc<dyn Fn(Value) + Send + Sync + 'static>;
 
 /// Monotonic sequence stamped into every NDJSON record so log consumers can
 /// detect dropped lines or out-of-order writes. Process-scoped (resets on
@@ -50,7 +50,7 @@ pub(crate) struct LogSession {
     pub(crate) id: String,
     pub(crate) path: PathBuf,
     pub(crate) write_lock: Arc<Mutex<()>>,
-    pub(crate) event_emitter: Option<tauri::AppHandle>,
+    pub(crate) event_emitter: Option<LogEventEmitter>,
 }
 
 /// Frontend → backend payload for `write_log_event`. `level` is normalized
@@ -82,7 +82,7 @@ pub(crate) fn create_log_session() -> LogSession {
 }
 
 pub(crate) fn create_log_session_with_emitter(
-    event_emitter: Option<tauri::AppHandle>,
+    event_emitter: Option<LogEventEmitter>,
 ) -> LogSession {
     let timestamp = Utc::now().format("%Y-%m-%dT%H-%M-%SZ");
     let id = format!("{timestamp}-pid{}", process::id());
@@ -169,7 +169,7 @@ pub(crate) fn write_log_record(
         let _ = write_human_log_projection(&log_session.path, &record);
     }
     if let Some(emitter) = &log_session.event_emitter {
-        let _ = emitter.emit("maestro-log-event", event_payload);
+        emitter(event_payload);
     }
 
     Ok(LogWriteResult {

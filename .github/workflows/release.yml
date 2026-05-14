@@ -266,7 +266,8 @@ jobs:
             exit 1
           fi
 
-          cat > RELEASE_NOTES.md <<'NOTES'
+          release_notes="${RUNNER_TEMP}/maestro-release-notes.md"
+          cat > "$release_notes" <<'NOTES'
           # Maestro Editorial AI __TAG__
 
           Portable Windows 11+ editorial workbench for protocol-driven AI drafting, source verification, and multi-agent convergence.
@@ -313,7 +314,7 @@ jobs:
           - ZIP receives GitHub artifact attestation.
           - CI, CodeQL Default Setup, and Dependabot checks are expected to be green on the release commit.
           NOTES
-          sed -i "s|__TAG__|${tag}|g; s|__REPOSITORY__|${GITHUB_REPOSITORY}|g" RELEASE_NOTES.md
+          sed -i "s|__TAG__|${tag}|g; s|__REPOSITORY__|${GITHUB_REPOSITORY}|g" "$release_notes"
 
           assets=(release/*.zip release/SHA256SUMS.txt)
           for asset in "${assets[@]}"; do
@@ -324,12 +325,12 @@ jobs:
           done
 
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            edit_args=(release edit "$tag" --repo "$GITHUB_REPOSITORY" --title "Maestro Editorial AI $tag" --notes-file RELEASE_NOTES.md)
+            edit_args=(release edit "$tag" --repo "$GITHUB_REPOSITORY" --title "Maestro Editorial AI $tag" --notes-file "$release_notes")
             edit_args+=(--latest)
             gh "${edit_args[@]}"
             gh release upload "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
           else
-            args=(release create "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --title "Maestro Editorial AI $tag" --notes-file RELEASE_NOTES.md)
+            args=(release create "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --title "Maestro Editorial AI $tag" --notes-file "$release_notes")
             if ! gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" >/dev/null 2>&1; then
               args+=(--target "$GITHUB_SHA")
             fi

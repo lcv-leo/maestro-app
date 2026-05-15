@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-import { Component, type ErrorInfo, type ReactNode } from 'react';
-import { logEvent } from '../diagnostics';
+import { Component, type ErrorInfo, type ReactNode } from "react";
+import { logEvent } from "../diagnostics";
 
 /**
  * v0.3.14 / maestro-app audit closure (HIGH): top-level Error Boundary.
@@ -54,9 +54,9 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     // installGlobalDiagnostics uses, so the operator's diagnostic timeline
     // contains the failure regardless of which listener actually catches it.
     void logEvent({
-      level: 'error',
-      category: 'react.render',
-      message: 'ErrorBoundary caught render-phase exception',
+      level: "error",
+      category: "react.render",
+      message: "ErrorBoundary caught render-phase exception",
       context: {
         error_message: error.message,
         error_name: error.name,
@@ -76,34 +76,34 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
         role="alert"
         aria-live="assertive"
         style={{
-          minHeight: '100vh',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          padding: '24px',
-          backgroundColor: '#0b0b0d',
-          color: '#f5f5f5',
-          fontFamily: 'system-ui, sans-serif',
+          minHeight: "100vh",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: "24px",
+          backgroundColor: "#0b0b0d",
+          color: "#f5f5f5",
+          fontFamily: "system-ui, sans-serif",
         }}
       >
-        <div style={{ maxWidth: 480, textAlign: 'center' }}>
+        <div style={{ maxWidth: 480, textAlign: "center" }}>
           <h1 style={{ fontSize: 20, fontWeight: 700, marginBottom: 12 }}>
             Algo deu errado no Maestro.
           </h1>
           <p style={{ fontSize: 14, opacity: 0.8, marginBottom: 20 }}>
-            Um erro inesperado interrompeu a renderização. Recarregar normalmente
-            recupera o estado da sessão. O erro foi gravado no log NDJSON local.
+            Um erro inesperado interrompeu a renderização. Recarregar normalmente recupera o estado
+            da sessão. O erro foi gravado no log NDJSON local.
           </p>
           <button
             type="button"
             onClick={this.handleReload}
             style={{
-              padding: '10px 20px',
+              padding: "10px 20px",
               borderRadius: 6,
-              border: '1px solid #444',
-              backgroundColor: '#1a1a1d',
-              color: '#f5f5f5',
-              cursor: 'pointer',
+              border: "1px solid #444",
+              backgroundColor: "#1a1a1d",
+              color: "#f5f5f5",
+              cursor: "pointer",
               fontSize: 14,
               fontWeight: 600,
             }}

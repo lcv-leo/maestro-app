@@ -3,14 +3,14 @@
  * Extracted from PostEditor.tsx for structural decomposition.
  */
 
-import { getEmbedUrlFromYoutubeUrl } from '@tiptap/extension-youtube';
-import type { NodeViewProps } from '@tiptap/react';
-import { NodeViewWrapper } from '@tiptap/react';
-import { MousePointer2 } from 'lucide-react';
-import { NodeSelection } from 'prosemirror-state';
-import type React from 'react';
-import { useEffect, useRef, useState } from 'react';
-import { clamp } from './utils';
+import { getEmbedUrlFromYoutubeUrl } from "@tiptap/extension-youtube";
+import type { NodeViewProps } from "@tiptap/react";
+import { NodeViewWrapper } from "@tiptap/react";
+import { MousePointer2 } from "lucide-react";
+import { NodeSelection } from "prosemirror-state";
+import type React from "react";
+import { useEffect, useRef, useState } from "react";
+import { clamp } from "./utils";
 
 // ── Shared helpers ────────────────────────────────────────────
 
@@ -18,7 +18,7 @@ import { clamp } from './utils';
 
 export const ResizableMediaHandle = ({
   onStartResize,
-  tone = 'neutral',
+  tone = "neutral",
 }: {
   onStartResize: (e: React.MouseEvent | React.TouchEvent) => void;
   tone?: string;
@@ -58,10 +58,10 @@ export const SelectMediaButton = ({ onSelect }: { onSelect: () => void }) => (
 );
 
 const IMAGE_SNAPS = [
-  { label: '25%', v: '25%' },
-  { label: '50%', v: '50%' },
-  { label: '75%', v: '75%' },
-  { label: '100%', v: '100%' },
+  { label: "25%", v: "25%" },
+  { label: "50%", v: "50%" },
+  { label: "75%", v: "75%" },
+  { label: "100%", v: "100%" },
 ];
 
 export const MediaSnapBar = ({ onSnap }: { onSnap: (v: string) => void }) => (
@@ -76,9 +76,9 @@ export const MediaSnapBar = ({ onSnap }: { onSnap: (v: string) => void }) => (
 );
 
 const VIDEO_SNAPS = [
-  { label: '480p', w: 853, h: 480 },
-  { label: '720p', w: 1280, h: 720 },
-  { label: '840px', w: 840, h: 472 },
+  { label: "480p", w: 853, h: 480 },
+  { label: "720p", w: 1280, h: 720 },
+  { label: "840px", w: 840, h: 472 },
 ];
 
 export const YoutubeSnapBar = ({ onSnap }: { onSnap: (w: number, h: number) => void }) => (
@@ -94,12 +94,18 @@ export const YoutubeSnapBar = ({ onSnap }: { onSnap: (w: number, h: number) => v
 
 // ── FigureNodeView ─────────────────────────────────────────────
 
-export const FigureNodeView = ({ node, updateAttributes, selected, editor, getPos }: NodeViewProps) => {
+export const FigureNodeView = ({
+  node,
+  updateAttributes,
+  selected,
+  editor,
+  getPos,
+}: NodeViewProps) => {
   const captionRef = useRef<HTMLElement>(null);
   const startXRef = useRef(0);
   const startWidthRef = useRef(100);
   const imageRef = useRef<HTMLImageElement>(null);
-  const [localTone, setLocalTone] = useState('neutral');
+  const [localTone, setLocalTone] = useState("neutral");
 
   useEffect(() => {
     const img = imageRef.current;
@@ -108,12 +114,12 @@ export const FigureNodeView = ({ node, updateAttributes, selected, editor, getPo
     const analyzeTone = () => {
       try {
         const sample = 24;
-        const canvas = document.createElement('canvas');
+        const canvas = document.createElement("canvas");
         canvas.width = sample;
         canvas.height = sample;
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
         if (!ctx) {
-          setLocalTone('neutral');
+          setLocalTone("neutral");
           return;
         }
 
@@ -133,52 +139,52 @@ export const FigureNodeView = ({ node, updateAttributes, selected, editor, getPo
         }
 
         if (!count) {
-          setLocalTone('neutral');
+          setLocalTone("neutral");
           return;
         }
 
         const luma = total / count / 255;
-        setLocalTone(luma >= 0.56 ? 'light' : 'dark');
+        setLocalTone(luma >= 0.56 ? "light" : "dark");
       } catch {
-        setLocalTone('neutral');
+        setLocalTone("neutral");
       }
     };
 
     if (img.complete) analyzeTone();
-    img.addEventListener('load', analyzeTone);
-    return () => img.removeEventListener('load', analyzeTone);
+    img.addEventListener("load", analyzeTone);
+    return () => img.removeEventListener("load", analyzeTone);
   }, []);
 
   const onStartResize = (event: React.MouseEvent | React.TouchEvent) => {
     event.preventDefault();
     event.stopPropagation();
-    const point = 'touches' in event ? event.touches[0] : (event as React.MouseEvent);
+    const point = "touches" in event ? event.touches[0] : (event as React.MouseEvent);
     startXRef.current = point.clientX;
-    startWidthRef.current = Number(String(node.attrs.width || '100').replace('%', '')) || 100;
+    startWidthRef.current = Number(String(node.attrs.width || "100").replace("%", "")) || 100;
 
     const onMove = (moveEvent: MouseEvent | TouchEvent) => {
-      const p = 'touches' in moveEvent ? moveEvent.touches[0] : (moveEvent as MouseEvent);
+      const p = "touches" in moveEvent ? moveEvent.touches[0] : (moveEvent as MouseEvent);
       const deltaX = p.clientX - startXRef.current;
       const next = clamp(Math.round(startWidthRef.current + deltaX * 0.22), 20, 100);
       updateAttributes({ width: `${next}%` });
     };
 
     const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      window.removeEventListener('touchmove', onMove);
-      window.removeEventListener('touchend', onUp);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("touchmove", onMove);
+      window.removeEventListener("touchend", onUp);
     };
 
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    window.addEventListener('touchmove', onMove, { passive: true });
-    window.addEventListener('touchend', onUp);
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    window.addEventListener("touchmove", onMove, { passive: true });
+    window.addEventListener("touchend", onUp);
   };
 
   const selectCurrentNode = () => {
     const pos = getPos?.();
-    if (typeof pos !== 'number') return;
+    if (typeof pos !== "number") return;
     const tr = editor.state.tr.setSelection(NodeSelection.create(editor.state.doc, pos));
     editor.view.dispatch(tr);
     editor.commands.focus();
@@ -192,7 +198,7 @@ export const FigureNodeView = ({ node, updateAttributes, selected, editor, getPo
 
   // Sync caption text back to attrs on blur
   const handleCaptionBlur = () => {
-    const text = captionRef.current?.innerText?.trim() ?? '';
+    const text = captionRef.current?.innerText?.trim() ?? "";
     updateAttributes({ caption: text });
   };
 
@@ -200,21 +206,24 @@ export const FigureNodeView = ({ node, updateAttributes, selected, editor, getPo
 
   return (
     <NodeViewWrapper
-      className={`tiptap-figure-nv resizable-media media-image tone-${localTone} ${selected ? 'is-selected' : ''}`}
+      className={`tiptap-figure-nv resizable-media media-image tone-${localTone} ${selected ? "is-selected" : ""}`}
       contentEditable={false}
-      style={{ width: node.attrs.width || '100%' }}
+      style={{ width: node.attrs.width || "100%" }}
       onMouseDown={handleSelectMedia}
       onPointerDown={handleSelectMedia}
     >
       <MediaSnapBar onSnap={(size) => updateAttributes({ width: size })} />
       <SelectMediaButton onSelect={selectCurrentNode} />
-      <figure className="tiptap-figure" style={{ margin: 0, width: '100%', height: 'auto', display: 'block' }}>
+      <figure
+        className="tiptap-figure"
+        style={{ margin: 0, width: "100%", height: "auto", display: "block" }}
+      >
         <img
           ref={imageRef}
           src={node.attrs.src}
-          alt={node.attrs.alt || ''}
-          title={node.attrs.title || ''}
-          style={{ width: '100%', height: 'auto', display: 'block' }}
+          alt={node.attrs.alt || ""}
+          title={node.attrs.title || ""}
+          style={{ width: "100%", height: "auto", display: "block" }}
           draggable="false"
           onMouseDown={handleSelectMedia}
           onPointerDown={handleSelectMedia}
@@ -226,7 +235,7 @@ export const FigureNodeView = ({ node, updateAttributes, selected, editor, getPo
           onBlur={handleCaptionBlur}
           onKeyDown={(e) => {
             stopEvents(e);
-            if (e.key === 'Enter') {
+            if (e.key === "Enter") {
               e.preventDefault();
               captionRef.current?.blur();
             }
@@ -236,10 +245,10 @@ export const FigureNodeView = ({ node, updateAttributes, selected, editor, getPo
           onInput={stopEvents}
           onMouseDown={stopEvents}
           onClick={stopEvents}
-          style={{ outline: 'none', cursor: 'text', minHeight: '1.4em' }}
+          style={{ outline: "none", cursor: "text", minHeight: "1.4em" }}
           data-placeholder="Clique para adicionar legenda..."
         >
-          {node.attrs.caption || ''}
+          {node.attrs.caption || ""}
         </figcaption>
       </figure>
       <ResizableMediaHandle onStartResize={onStartResize} tone={localTone} />
@@ -249,11 +258,17 @@ export const FigureNodeView = ({ node, updateAttributes, selected, editor, getPo
 
 // ── ResizableImageNodeView ─────────────────────────────────────
 
-export const ResizableImageNodeView = ({ node, updateAttributes, selected, editor, getPos }: NodeViewProps) => {
+export const ResizableImageNodeView = ({
+  node,
+  updateAttributes,
+  selected,
+  editor,
+  getPos,
+}: NodeViewProps) => {
   const startXRef = useRef(0);
   const startWidthRef = useRef(100);
   const imageRef = useRef<HTMLImageElement>(null);
-  const [localTone, setLocalTone] = useState('neutral');
+  const [localTone, setLocalTone] = useState("neutral");
 
   useEffect(() => {
     const img = imageRef.current;
@@ -262,12 +277,12 @@ export const ResizableImageNodeView = ({ node, updateAttributes, selected, edito
     const analyzeTone = () => {
       try {
         const sample = 24;
-        const canvas = document.createElement('canvas');
+        const canvas = document.createElement("canvas");
         canvas.width = sample;
         canvas.height = sample;
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
         if (!ctx) {
-          setLocalTone('neutral');
+          setLocalTone("neutral");
           return;
         }
         ctx.drawImage(img, 0, 0, sample, sample);
@@ -281,47 +296,51 @@ export const ResizableImageNodeView = ({ node, updateAttributes, selected, edito
           count += 1;
         }
         if (!count) {
-          setLocalTone('neutral');
+          setLocalTone("neutral");
           return;
         }
-        setLocalTone(total / count / 255 >= 0.56 ? 'light' : 'dark');
+        setLocalTone(total / count / 255 >= 0.56 ? "light" : "dark");
       } catch {
-        setLocalTone('neutral');
+        setLocalTone("neutral");
       }
     };
 
     if (img.complete) analyzeTone();
-    img.addEventListener('load', analyzeTone);
-    return () => img.removeEventListener('load', analyzeTone);
+    img.addEventListener("load", analyzeTone);
+    return () => img.removeEventListener("load", analyzeTone);
   }, []);
 
   const onStartResize = (event: React.MouseEvent | React.TouchEvent) => {
     event.preventDefault();
     event.stopPropagation();
-    const point = 'touches' in event ? event.touches[0] : (event as React.MouseEvent);
+    const point = "touches" in event ? event.touches[0] : (event as React.MouseEvent);
     startXRef.current = point.clientX;
-    startWidthRef.current = Number(String(node.attrs.width || '100').replace('%', '')) || 100;
+    startWidthRef.current = Number(String(node.attrs.width || "100").replace("%", "")) || 100;
 
     const onMove = (e: MouseEvent | TouchEvent) => {
-      const p = 'touches' in e ? e.touches[0] : (e as MouseEvent);
-      const next = clamp(Math.round(startWidthRef.current + (p.clientX - startXRef.current) * 0.22), 20, 100);
+      const p = "touches" in e ? e.touches[0] : (e as MouseEvent);
+      const next = clamp(
+        Math.round(startWidthRef.current + (p.clientX - startXRef.current) * 0.22),
+        20,
+        100,
+      );
       updateAttributes({ width: `${next}%` });
     };
     const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      window.removeEventListener('touchmove', onMove);
-      window.removeEventListener('touchend', onUp);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("touchmove", onMove);
+      window.removeEventListener("touchend", onUp);
     };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    window.addEventListener('touchmove', onMove, { passive: true });
-    window.addEventListener('touchend', onUp);
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    window.addEventListener("touchmove", onMove, { passive: true });
+    window.addEventListener("touchend", onUp);
   };
 
   const selectCurrentNode = () => {
     const pos = getPos?.();
-    if (typeof pos !== 'number') return;
+    if (typeof pos !== "number") return;
     const tr = editor.state.tr.setSelection(NodeSelection.create(editor.state.doc, pos));
     editor.view.dispatch(tr);
     editor.commands.focus();
@@ -335,9 +354,9 @@ export const ResizableImageNodeView = ({ node, updateAttributes, selected, edito
 
   return (
     <NodeViewWrapper
-      className={`resizable-media media-image tone-${localTone} ${selected ? 'is-selected' : ''}`}
+      className={`resizable-media media-image tone-${localTone} ${selected ? "is-selected" : ""}`}
       contentEditable={false}
-      style={{ width: node.attrs.width || '100%' }}
+      style={{ width: node.attrs.width || "100%" }}
       onMouseDown={handleSelectMedia}
       onPointerDown={handleSelectMedia}
     >
@@ -346,8 +365,8 @@ export const ResizableImageNodeView = ({ node, updateAttributes, selected, edito
       <img
         ref={imageRef}
         src={node.attrs.src}
-        alt={node.attrs.alt || ''}
-        title={node.attrs.title || ''}
+        alt={node.attrs.alt || ""}
+        title={node.attrs.title || ""}
         draggable="false"
         onMouseDown={handleSelectMedia}
         onPointerDown={handleSelectMedia}
@@ -359,7 +378,13 @@ export const ResizableImageNodeView = ({ node, updateAttributes, selected, edito
 
 // ── ResizableYoutubeNodeView ───────────────────────────────────
 
-export const ResizableYoutubeNodeView = ({ node, updateAttributes, selected, editor, getPos }: NodeViewProps) => {
+export const ResizableYoutubeNodeView = ({
+  node,
+  updateAttributes,
+  selected,
+  editor,
+  getPos,
+}: NodeViewProps) => {
   const startXRef = useRef(0);
   const startWidthRef = useRef(840);
   const currentW = Number(node.attrs.width) || 840;
@@ -368,30 +393,34 @@ export const ResizableYoutubeNodeView = ({ node, updateAttributes, selected, edi
   const onStartResize = (event: React.MouseEvent | React.TouchEvent) => {
     event.preventDefault();
     event.stopPropagation();
-    const point = 'touches' in event ? event.touches[0] : (event as React.MouseEvent);
+    const point = "touches" in event ? event.touches[0] : (event as React.MouseEvent);
     startXRef.current = point.clientX;
     startWidthRef.current = currentW;
 
     const onMove = (e: MouseEvent | TouchEvent) => {
-      const p = 'touches' in e ? e.touches[0] : (e as MouseEvent);
-      const nextW = clamp(Math.round(startWidthRef.current + (p.clientX - startXRef.current) * 1.2), 320, 1200);
+      const p = "touches" in e ? e.touches[0] : (e as MouseEvent);
+      const nextW = clamp(
+        Math.round(startWidthRef.current + (p.clientX - startXRef.current) * 1.2),
+        320,
+        1200,
+      );
       updateAttributes({ width: nextW, height: Math.round((nextW * 9) / 16) });
     };
     const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      window.removeEventListener('touchmove', onMove);
-      window.removeEventListener('touchend', onUp);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("touchmove", onMove);
+      window.removeEventListener("touchend", onUp);
     };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    window.addEventListener('touchmove', onMove, { passive: true });
-    window.addEventListener('touchend', onUp);
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    window.addEventListener("touchmove", onMove, { passive: true });
+    window.addEventListener("touchend", onUp);
   };
 
   const selectCurrentNode = () => {
     const pos = getPos?.();
-    if (typeof pos !== 'number') return;
+    if (typeof pos !== "number") return;
     const tr = editor.state.tr.setSelection(NodeSelection.create(editor.state.doc, pos));
     editor.view.dispatch(tr);
     editor.commands.focus();
@@ -413,9 +442,9 @@ export const ResizableYoutubeNodeView = ({ node, updateAttributes, selected, edi
 
   return (
     <NodeViewWrapper
-      className={`resizable-media media-youtube ${selected ? 'is-selected' : ''}`}
+      className={`resizable-media media-youtube ${selected ? "is-selected" : ""}`}
       contentEditable={false}
-      style={{ width: `${currentW}px`, maxWidth: '100%' }}
+      style={{ width: `${currentW}px`, maxWidth: "100%" }}
       onMouseDown={handleSelectMedia}
       onPointerDown={handleSelectMedia}
     >

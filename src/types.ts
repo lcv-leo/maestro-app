@@ -6,7 +6,7 @@
 // components, no hooks, no behavior. Only the home of these declarations
 // moved.
 
-import type { ComponentType } from 'react';
+import type { ComponentType } from "react";
 
 export type ProtocolSnapshot = {
   name: string;
@@ -15,21 +15,31 @@ export type ProtocolSnapshot = {
   hash: string;
 };
 
-export type AgentState = 'ready' | 'blocked' | 'evidence' | 'running';
-export type VerbosityMode = 'resumo' | 'detalhado' | 'diagnostico';
-export type PhaseState = 'done' | 'active' | 'waiting';
-export type ProviderMode = 'cli' | 'api' | 'hybrid';
-export type AiCredentialKey = 'openai' | 'anthropic' | 'gemini' | 'deepseek' | 'grok' | 'perplexity';
-export type InitialAgentKey = 'claude' | 'codex' | 'gemini' | 'deepseek' | 'grok' | 'perplexity';
+export type AgentState = "ready" | "blocked" | "evidence" | "running";
+export type VerbosityMode = "resumo" | "detalhado" | "diagnostico";
+export type PhaseState = "done" | "active" | "waiting";
+export type ProviderMode = "cli" | "api" | "hybrid";
+export type AiCredentialKey =
+  | "openai"
+  | "anthropic"
+  | "gemini"
+  | "deepseek"
+  | "grok"
+  | "perplexity";
+export type InitialAgentKey = "claude" | "codex" | "gemini" | "deepseek" | "grok" | "perplexity";
 export type ProviderRateKey = AiCredentialKey;
-export type NativeAttachmentProvider = Exclude<AiCredentialKey, 'deepseek' | 'grok' | 'perplexity'>;
-export type CredentialStorageMode = 'local_json' | 'windows_env' | 'cloudflare';
-export type CloudflareTokenSource = 'prompt_each_launch' | 'windows_env' | 'local_encrypted';
-export type ActiveSection = 'session' | 'protocols' | 'evidence' | 'agents' | 'settings' | 'setup';
-export type SettingsTab = 'providers' | 'cloudflare';
-export type RunStatus = 'idle' | 'preparing' | 'running' | 'paused' | 'blocked' | 'completed';
-export type ActivityLevel = 'summary' | 'detail' | 'diagnostic';
-export type NavItem = { section: ActiveSection; label: string; icon: ComponentType<{ size?: number }> };
+export type NativeAttachmentProvider = Exclude<AiCredentialKey, "deepseek" | "grok" | "perplexity">;
+export type CredentialStorageMode = "local_json" | "windows_env" | "cloudflare";
+export type CloudflareTokenSource = "prompt_each_launch" | "windows_env" | "local_encrypted";
+export type ActiveSection = "session" | "protocols" | "evidence" | "agents" | "settings" | "setup";
+export type SettingsTab = "providers" | "cloudflare";
+export type RunStatus = "idle" | "preparing" | "running" | "paused" | "blocked" | "completed";
+export type ActivityLevel = "summary" | "detail" | "diagnostic";
+export type NavItem = {
+  section: ActiveSection;
+  label: string;
+  icon: ComponentType<{ size?: number }>;
+};
 
 export type OperationSnapshot = {
   title: string;
@@ -68,19 +78,19 @@ export type DiscussionRound = {
 export type EvidenceRow = {
   label: string;
   value: string;
-  tone: 'idle' | 'ok' | 'warn' | 'danger' | 'info';
+  tone: "idle" | "ok" | "warn" | "danger" | "info";
 };
 
 export type CloudflarePermissionRow = {
   label: string;
   value: string;
-  tone: 'pending' | 'blocked' | 'ok' | 'warn' | 'error';
+  tone: "pending" | "blocked" | "ok" | "warn" | "error";
 };
 
 export type BootstrapCheckRow = {
   label: string;
   value: string;
-  tone: 'pending' | 'blocked' | 'ok' | 'warn';
+  tone: "pending" | "blocked" | "ok" | "warn";
 };
 
 export type BootstrapConfig = {
@@ -156,7 +166,7 @@ export type AiProviderConfig = {
 export type AiProviderProbeRow = {
   label: string;
   value: string;
-  tone: 'pending' | 'blocked' | 'ok' | 'warn' | 'error';
+  tone: "pending" | "blocked" | "ok" | "warn" | "error";
 };
 
 export type AiProviderProbeResult = {
@@ -168,7 +178,7 @@ export type LinkAuditRow = {
   url: string;
   status: string;
   invalidity: string;
-  tone: 'ok' | 'warn' | 'blocked' | 'error';
+  tone: "ok" | "warn" | "blocked" | "error";
 };
 
 export type LinkAuditResult = {
@@ -182,7 +192,7 @@ export type LinkAuditResult = {
 export type EditorialAgentResult = {
   name: string;
   cli: string;
-  tone: 'ok' | 'warn' | 'blocked' | 'error';
+  tone: "ok" | "warn" | "blocked" | "error";
   status: string;
   duration_ms: number;
   exit_code: number | null;

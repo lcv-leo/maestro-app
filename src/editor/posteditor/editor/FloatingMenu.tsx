@@ -4,11 +4,22 @@
  * Features: drag-and-drop, viewport clamping, shows on empty text blocks.
  */
 
-import type { useEditor } from '@tiptap/react';
-import { CheckSquare, Code2, Heading1, Heading2, Heading3, List, ListOrdered, Minus, Quote, Table } from 'lucide-react';
-import type React from 'react';
-import { useCallback, useEffect, useRef, useState } from 'react';
-import ReactDOM from 'react-dom';
+import type { useEditor } from "@tiptap/react";
+import {
+  CheckSquare,
+  Code2,
+  Heading1,
+  Heading2,
+  Heading3,
+  List,
+  ListOrdered,
+  Minus,
+  Quote,
+  Table,
+} from "lucide-react";
+import type React from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import ReactDOM from "react-dom";
 
 interface EditorFloatingMenuProps {
   editor: ReturnType<typeof useEditor>;
@@ -51,7 +62,7 @@ export function EditorFloatingMenu({ editor, onInsertTable }: EditorFloatingMenu
         setAutoPos(null);
         return;
       }
-      const isEmptyBlock = $from.parent.textContent === '' && $from.parent.type.isTextblock;
+      const isEmptyBlock = $from.parent.textContent === "" && $from.parent.type.isTextblock;
       if (!isEmptyBlock) {
         setAutoPos(null);
         return;
@@ -85,28 +96,32 @@ export function EditorFloatingMenu({ editor, onInsertTable }: EditorFloatingMenu
       scrollRef.current = false;
       update();
     };
-    popupWin?.addEventListener('scroll', handleScroll, true);
-    popupWin?.addEventListener('scrollend', handleScrollEnd, true);
-    editor.on('selectionUpdate', update);
-    editor.on('blur', () => {
+    popupWin?.addEventListener("scroll", handleScroll, true);
+    popupWin?.addEventListener("scrollend", handleScrollEnd, true);
+    editor.on("selectionUpdate", update);
+    editor.on("blur", () => {
       setAutoPos(null);
       setDragPos(null);
     });
     return () => {
-      editor.off('selectionUpdate', update);
-      popupWin?.removeEventListener('scroll', handleScroll, true);
-      popupWin?.removeEventListener('scrollend', handleScrollEnd, true);
+      editor.off("selectionUpdate", update);
+      popupWin?.removeEventListener("scroll", handleScroll, true);
+      popupWin?.removeEventListener("scrollend", handleScrollEnd, true);
     };
   }, [editor, getPopupWindow]);
 
   const startDrag = (e: React.MouseEvent) => {
-    if ((e.target as HTMLElement).closest('button')) return;
+    if ((e.target as HTMLElement).closest("button")) return;
     e.preventDefault();
     const menuEl = ref.current;
     if (!menuEl) return;
     const rect = menuEl.getBoundingClientRect();
-    dragRef.current = { active: true, offsetX: e.clientX - rect.left, offsetY: e.clientY - rect.top };
-    menuEl.classList.add('dragging');
+    dragRef.current = {
+      active: true,
+      offsetX: e.clientX - rect.left,
+      offsetY: e.clientY - rect.top,
+    };
+    menuEl.classList.add("dragging");
     const ownerDoc = menuEl.ownerDocument;
     const popupWin = ownerDoc.defaultView;
     const menuW = rect.width,
@@ -123,12 +138,12 @@ export function EditorFloatingMenu({ editor, onInsertTable }: EditorFloatingMenu
     };
     const onUp = () => {
       dragRef.current.active = false;
-      menuEl.classList.remove('dragging');
-      ownerDoc.removeEventListener('mousemove', onMove);
-      ownerDoc.removeEventListener('mouseup', onUp);
+      menuEl.classList.remove("dragging");
+      ownerDoc.removeEventListener("mousemove", onMove);
+      ownerDoc.removeEventListener("mouseup", onUp);
     };
-    ownerDoc.addEventListener('mousemove', onMove);
-    ownerDoc.addEventListener('mouseup', onUp);
+    ownerDoc.addEventListener("mousemove", onMove);
+    ownerDoc.addEventListener("mouseup", onUp);
   };
 
   if (!autoPos || !editor) return null;
@@ -143,7 +158,7 @@ export function EditorFloatingMenu({ editor, onInsertTable }: EditorFloatingMenu
         e.preventDefault();
         onClick();
       }}
-      className={active ? 'is-active' : ''}
+      className={active ? "is-active" : ""}
       title={title}
     >
       <Icon size={14} />
@@ -156,55 +171,71 @@ export function EditorFloatingMenu({ editor, onInsertTable }: EditorFloatingMenu
       ref={ref}
       className="floating-menu"
       onMouseDown={startDrag}
-      style={{ position: 'fixed', top: `${pos.top}px`, left: `${pos.left}px`, zIndex: 99998, cursor: 'grab' }}
+      style={{
+        position: "fixed",
+        top: `${pos.top}px`,
+        left: `${pos.left}px`,
+        zIndex: 99998,
+        cursor: "grab",
+      }}
     >
       {btn(
-        'Título 1',
-        editor.isActive('heading', { level: 1 }),
+        "Título 1",
+        editor.isActive("heading", { level: 1 }),
         () => editor.chain().focus().toggleHeading({ level: 1 }).run(),
         Heading1,
       )}
       {btn(
-        'Título 2',
-        editor.isActive('heading', { level: 2 }),
+        "Título 2",
+        editor.isActive("heading", { level: 2 }),
         () => editor.chain().focus().toggleHeading({ level: 2 }).run(),
         Heading2,
       )}
       {btn(
-        'Título 3',
-        editor.isActive('heading', { level: 3 }),
+        "Título 3",
+        editor.isActive("heading", { level: 3 }),
         () => editor.chain().focus().toggleHeading({ level: 3 }).run(),
         Heading3,
       )}
       <span className="bubble-divider" />
       {btn(
-        'Lista com marcadores',
-        editor.isActive('bulletList'),
+        "Lista com marcadores",
+        editor.isActive("bulletList"),
         () => editor.chain().focus().toggleBulletList().run(),
         List,
       )}
       {btn(
-        'Lista numerada',
-        editor.isActive('orderedList'),
+        "Lista numerada",
+        editor.isActive("orderedList"),
         () => editor.chain().focus().toggleOrderedList().run(),
         ListOrdered,
       )}
       {btn(
-        'Lista de tarefas',
-        editor.isActive('taskList'),
+        "Lista de tarefas",
+        editor.isActive("taskList"),
         () => editor.chain().focus().toggleTaskList().run(),
         CheckSquare,
       )}
       <span className="bubble-divider" />
-      {btn('Citação', editor.isActive('blockquote'), () => editor.chain().focus().toggleBlockquote().run(), Quote)}
       {btn(
-        'Bloco de código',
-        editor.isActive('codeBlock'),
+        "Citação",
+        editor.isActive("blockquote"),
+        () => editor.chain().focus().toggleBlockquote().run(),
+        Quote,
+      )}
+      {btn(
+        "Bloco de código",
+        editor.isActive("codeBlock"),
         () => editor.chain().focus().toggleCodeBlock().run(),
         Code2,
       )}
-      {btn('Linha horizontal', false, () => editor.chain().focus().setHorizontalRule().run(), Minus)}
-      {btn('Tabela', false, onInsertTable, Table)}
+      {btn(
+        "Linha horizontal",
+        false,
+        () => editor.chain().focus().setHorizontalRule().run(),
+        Minus,
+      )}
+      {btn("Tabela", false, onInsertTable, Table)}
     </div>,
     portalTarget,
   );

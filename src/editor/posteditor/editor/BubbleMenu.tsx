@@ -4,7 +4,7 @@
  * Features: drag-and-drop, viewport clamping, dynamic active state.
  */
 
-import type { useEditor } from '@tiptap/react';
+import type { useEditor } from "@tiptap/react";
 import {
   Bold,
   Code,
@@ -15,11 +15,11 @@ import {
   Subscript as SubIcon,
   Superscript as SuperIcon,
   Underline as UnderlineIcon,
-} from 'lucide-react';
-import { NodeSelection } from 'prosemirror-state';
-import type React from 'react';
-import { useEffect, useRef, useState } from 'react';
-import ReactDOM from 'react-dom';
+} from "lucide-react";
+import { NodeSelection } from "prosemirror-state";
+import type React from "react";
+import { useEffect, useRef, useState } from "react";
+import ReactDOM from "react-dom";
 
 interface EditorBubbleMenuProps {
   editor: ReturnType<typeof useEditor>;
@@ -84,22 +84,26 @@ export function EditorBubbleMenu({ editor, onLinkClick }: EditorBubbleMenuProps)
       setAutoPos(null);
       setDragPos(null);
     };
-    editor.on('selectionUpdate', update);
-    editor.on('blur', onBlur);
+    editor.on("selectionUpdate", update);
+    editor.on("blur", onBlur);
     return () => {
-      editor.off('selectionUpdate', update);
-      editor.off('blur', onBlur);
+      editor.off("selectionUpdate", update);
+      editor.off("blur", onBlur);
     };
   }, [editor]);
 
   const startDrag = (e: React.MouseEvent) => {
-    if ((e.target as HTMLElement).closest('button')) return;
+    if ((e.target as HTMLElement).closest("button")) return;
     e.preventDefault();
     const menuEl = ref.current;
     if (!menuEl) return;
     const rect = menuEl.getBoundingClientRect();
-    dragRef.current = { active: true, offsetX: e.clientX - rect.left, offsetY: e.clientY - rect.top };
-    menuEl.classList.add('dragging');
+    dragRef.current = {
+      active: true,
+      offsetX: e.clientX - rect.left,
+      offsetY: e.clientY - rect.top,
+    };
+    menuEl.classList.add("dragging");
     const ownerDoc = menuEl.ownerDocument;
     const popupWin = ownerDoc.defaultView;
     const menuW = rect.width,
@@ -116,12 +120,12 @@ export function EditorBubbleMenu({ editor, onLinkClick }: EditorBubbleMenuProps)
     };
     const onUp = () => {
       dragRef.current.active = false;
-      menuEl.classList.remove('dragging');
-      ownerDoc.removeEventListener('mousemove', onMove);
-      ownerDoc.removeEventListener('mouseup', onUp);
+      menuEl.classList.remove("dragging");
+      ownerDoc.removeEventListener("mousemove", onMove);
+      ownerDoc.removeEventListener("mouseup", onUp);
     };
-    ownerDoc.addEventListener('mousemove', onMove);
-    ownerDoc.addEventListener('mouseup', onUp);
+    ownerDoc.addEventListener("mousemove", onMove);
+    ownerDoc.addEventListener("mouseup", onUp);
   };
 
   if (!autoPos || !editor) return null;
@@ -134,7 +138,13 @@ export function EditorBubbleMenu({ editor, onLinkClick }: EditorBubbleMenuProps)
       ref={ref}
       className="bubble-menu"
       onMouseDown={startDrag}
-      style={{ position: 'fixed', top: `${pos.top}px`, left: `${pos.left}px`, zIndex: 99999, cursor: 'grab' }}
+      style={{
+        position: "fixed",
+        top: `${pos.top}px`,
+        left: `${pos.left}px`,
+        zIndex: 99999,
+        cursor: "grab",
+      }}
     >
       <button
         type="button"
@@ -142,7 +152,7 @@ export function EditorBubbleMenu({ editor, onLinkClick }: EditorBubbleMenuProps)
           e.preventDefault();
           editor.chain().focus().toggleBold().run();
         }}
-        className={editor.isActive('bold') ? 'is-active' : ''}
+        className={editor.isActive("bold") ? "is-active" : ""}
         title="Negrito (Ctrl+B)"
       >
         <Bold size={14} />
@@ -153,7 +163,7 @@ export function EditorBubbleMenu({ editor, onLinkClick }: EditorBubbleMenuProps)
           e.preventDefault();
           editor.chain().focus().toggleItalic().run();
         }}
-        className={editor.isActive('italic') ? 'is-active' : ''}
+        className={editor.isActive("italic") ? "is-active" : ""}
         title="Itálico (Ctrl+I)"
       >
         <Italic size={14} />
@@ -164,7 +174,7 @@ export function EditorBubbleMenu({ editor, onLinkClick }: EditorBubbleMenuProps)
           e.preventDefault();
           editor.chain().focus().toggleUnderline().run();
         }}
-        className={editor.isActive('underline') ? 'is-active' : ''}
+        className={editor.isActive("underline") ? "is-active" : ""}
         title="Sublinhado (Ctrl+U)"
       >
         <UnderlineIcon size={14} />
@@ -175,7 +185,7 @@ export function EditorBubbleMenu({ editor, onLinkClick }: EditorBubbleMenuProps)
           e.preventDefault();
           editor.chain().focus().toggleStrike().run();
         }}
-        className={editor.isActive('strike') ? 'is-active' : ''}
+        className={editor.isActive("strike") ? "is-active" : ""}
         title="Tachado (Ctrl+Shift+X)"
       >
         <Strikethrough size={14} />
@@ -187,7 +197,7 @@ export function EditorBubbleMenu({ editor, onLinkClick }: EditorBubbleMenuProps)
           e.preventDefault();
           editor.chain().focus().toggleHighlight().run();
         }}
-        className={editor.isActive('highlight') ? 'is-active' : ''}
+        className={editor.isActive("highlight") ? "is-active" : ""}
         title="Marca-texto (Ctrl+Shift+H)"
       >
         <Highlighter size={14} />
@@ -198,7 +208,7 @@ export function EditorBubbleMenu({ editor, onLinkClick }: EditorBubbleMenuProps)
           e.preventDefault();
           editor.chain().focus().toggleSubscript().run();
         }}
-        className={editor.isActive('subscript') ? 'is-active' : ''}
+        className={editor.isActive("subscript") ? "is-active" : ""}
         title="Subscrito (Ctrl+,)"
       >
         <SubIcon size={14} />
@@ -209,7 +219,7 @@ export function EditorBubbleMenu({ editor, onLinkClick }: EditorBubbleMenuProps)
           e.preventDefault();
           editor.chain().focus().toggleSuperscript().run();
         }}
-        className={editor.isActive('superscript') ? 'is-active' : ''}
+        className={editor.isActive("superscript") ? "is-active" : ""}
         title="Sobrescrito (Ctrl+.)"
       >
         <SuperIcon size={14} />
@@ -221,7 +231,7 @@ export function EditorBubbleMenu({ editor, onLinkClick }: EditorBubbleMenuProps)
           e.preventDefault();
           editor.chain().focus().toggleCode().run();
         }}
-        className={editor.isActive('code') ? 'is-active' : ''}
+        className={editor.isActive("code") ? "is-active" : ""}
         title="Código inline (Ctrl+E)"
       >
         <Code size={14} />
@@ -230,10 +240,10 @@ export function EditorBubbleMenu({ editor, onLinkClick }: EditorBubbleMenuProps)
         type="button"
         onMouseDown={(e) => {
           e.preventDefault();
-          if (editor.isActive('link')) editor.chain().focus().unsetLink().run();
+          if (editor.isActive("link")) editor.chain().focus().unsetLink().run();
           else onLinkClick?.();
         }}
-        className={editor.isActive('link') ? 'is-active' : ''}
+        className={editor.isActive("link") ? "is-active" : ""}
         title="Link (Ctrl+K)"
       >
         <LinkIcon size={14} />

@@ -4,11 +4,15 @@
  * Extracted from PostEditor.tsx for structural decomposition.
  */
 
-import { Image as ImageIcon, Link as LinkIcon, Type, X } from 'lucide-react';
-import { useCallback } from 'react';
-import { createPortal } from 'react-dom';
-import { useEscapeKey } from '../../../hooks/useEscapeKey';
-import { PROMPT_MODAL_INITIAL, type PromptModalState, type PromptModalSubmit } from './promptModalState';
+import { Image as ImageIcon, Link as LinkIcon, Type, X } from "lucide-react";
+import { useCallback } from "react";
+import { createPortal } from "react-dom";
+import { useEscapeKey } from "../../../hooks/useEscapeKey";
+import {
+  PROMPT_MODAL_INITIAL,
+  type PromptModalState,
+  type PromptModalSubmit,
+} from "./promptModalState";
 
 // ── Types ─────────────────────────────────────────────────────
 
@@ -50,14 +54,25 @@ export function PromptModal({ modal, setModal, targetNode }: PromptModalProps) {
   };
 
   return createPortal(
-    <div className="admin-modal-overlay" role="dialog" aria-modal="true" aria-label="Entrada de dados">
+    <div
+      className="admin-modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Entrada de dados"
+    >
       <div className="admin-modal-content">
         <button type="button" title="Fechar diálogo" className="admin-modal-close" onClick={close}>
           <X size={24} />
         </button>
         <div className="admin-modal-header">
           <div className="admin-modal-icon">
-            {modal.isLink ? <LinkIcon size={24} /> : modal.showCaption ? <ImageIcon size={24} /> : <Type size={24} />}
+            {modal.isLink ? (
+              <LinkIcon size={24} />
+            ) : modal.showCaption ? (
+              <ImageIcon size={24} />
+            ) : (
+              <Type size={24} />
+            )}
           </div>
           <h2 className="admin-modal-title">{modal.title}</h2>
           <p className="admin-modal-subtitle">Insira as informações necessárias abaixo</p>
@@ -75,7 +90,7 @@ export function PromptModal({ modal, setModal, targetNode }: PromptModalProps) {
               onChange={(e) => setModal({ ...modal, value: e.target.value })}
               placeholder={modal.placeholder}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && !modal.showAltText && !modal.showCaption) submit();
+                if (e.key === "Enter" && !modal.showAltText && !modal.showCaption) submit();
               }}
             />
           </div>
@@ -140,7 +155,11 @@ export function PromptModal({ modal, setModal, targetNode }: PromptModalProps) {
             </div>
           )}
           <div className="admin-modal-actions">
-            <button type="button" className="admin-modal-btn admin-modal-btn--ghost" onClick={close}>
+            <button
+              type="button"
+              className="admin-modal-btn admin-modal-btn--ghost"
+              onClick={close}
+            >
               Cancelar
             </button>
             <button type="button" className="admin-modal-btn" onClick={submit}>

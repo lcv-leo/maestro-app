@@ -4,12 +4,12 @@
  * ProseMirror Decoration-based highlighting (no external deps).
  */
 
-import type { Editor } from '@tiptap/core';
-import { ChevronDown, ChevronUp, X } from 'lucide-react';
-import { TextSelection } from 'prosemirror-state';
-import type React from 'react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { findAllMatches, searchHighlightKey, setGlobalSearchState } from './searchReplaceCore';
+import type { Editor } from "@tiptap/core";
+import { ChevronDown, ChevronUp, X } from "lucide-react";
+import { TextSelection } from "prosemirror-state";
+import type React from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { findAllMatches, searchHighlightKey, setGlobalSearchState } from "./searchReplaceCore";
 
 // -------------- React panel component ----------------
 
@@ -19,8 +19,8 @@ interface SearchReplacePanelProps {
 
 export function SearchReplacePanel({ editor }: SearchReplacePanelProps) {
   const [visible, setVisible] = useState(false);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [replaceTerm, setReplaceTerm] = useState('');
+  const [searchTerm, setSearchTerm] = useState("");
+  const [replaceTerm, setReplaceTerm] = useState("");
   const [currentIndex, setCurrentIndex] = useState(0);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -42,14 +42,14 @@ export function SearchReplacePanel({ editor }: SearchReplacePanelProps) {
         if (next) setTimeout(() => searchInputRef.current?.focus(), 50);
         else {
           // Clear search decorations when closing
-          setGlobalSearchState({ term: '', currentIndex: 0 });
+          setGlobalSearchState({ term: "", currentIndex: 0 });
           editor?.view.dispatch(editor.state.tr);
         }
         return next;
       });
     };
-    ownerDoc.addEventListener('tiptap:search-toggle', toggle);
-    return () => ownerDoc.removeEventListener('tiptap:search-toggle', toggle);
+    ownerDoc.addEventListener("tiptap:search-toggle", toggle);
+    return () => ownerDoc.removeEventListener("tiptap:search-toggle", toggle);
   }, [editor, getOwnerDoc]);
 
   // Recompute match list whenever searchTerm or doc changes
@@ -125,12 +125,12 @@ export function SearchReplacePanel({ editor }: SearchReplacePanelProps) {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') {
+    if (e.key === "Escape") {
       setVisible(false);
-      setGlobalSearchState({ term: '', currentIndex: 0 });
+      setGlobalSearchState({ term: "", currentIndex: 0 });
       editor?.view.dispatch(editor.state.tr);
       editor?.commands.focus();
-    } else if (e.key === 'Enter') {
+    } else if (e.key === "Enter") {
       e.preventDefault();
       goNext();
     }
@@ -142,8 +142,8 @@ export function SearchReplacePanel({ editor }: SearchReplacePanelProps) {
     matches.length > 0
       ? `${Math.min(currentIndex + 1, matches.length)} de ${matches.length}`
       : searchTerm
-        ? '0 resultados'
-        : '';
+        ? "0 resultados"
+        : "";
 
   return (
     <div className="search-replace-panel" role="dialog" aria-label="Localizar e substituir">
@@ -154,7 +154,7 @@ export function SearchReplacePanel({ editor }: SearchReplacePanelProps) {
           className="search-replace-close"
           onClick={() => {
             setVisible(false);
-            setGlobalSearchState({ term: '', currentIndex: 0 });
+            setGlobalSearchState({ term: "", currentIndex: 0 });
             editor?.view.dispatch(editor?.state.tr);
           }}
           title="Fechar (Esc)"

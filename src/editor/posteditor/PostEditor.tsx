@@ -1,5 +1,6 @@
-import { DragHandle } from '@tiptap/extension-drag-handle-react';
-import { EditorContent, useEditor } from '@tiptap/react';
+import { DragHandle } from "@tiptap/extension-drag-handle-react";
+import { EditorContent, useEditor } from "@tiptap/react";
+import DOMPurify from "dompurify";
 import {
   AlignCenter,
   AlignJustify,
@@ -49,34 +50,33 @@ import {
   X,
   ZoomIn,
   ZoomOut,
-} from 'lucide-react';
-import DOMPurify from 'dompurify';
-import type React from 'react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import ReactDOM from 'react-dom';
-import { EditorBubbleMenu } from './editor/BubbleMenu';
-import { buildTiptapExtensions, EDITORIAL_MENTION_BASE_ITEMS } from './editor/extensions';
-import { EditorFloatingMenu } from './editor/FloatingMenu';
-import { convertMarkdownToFormattedHtml } from './editor/markdownImport';
-import { PromptModal as EditorPromptModal } from './editor/PromptModal';
-import { PROMPT_MODAL_INITIAL, type PromptModalState } from './editor/promptModalState';
-import { SearchReplacePanel } from './editor/SearchReplace';
-import { TIPTAP_SLASH_EVENTS } from './editor/SlashCommands';
-import { clamp, formatImageUrl, isYoutubeUrl, migrateLegacyCaptions } from './editor/utils';
+} from "lucide-react";
+import type React from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ReactDOM from "react-dom";
+import { EditorBubbleMenu } from "./editor/BubbleMenu";
+import { buildTiptapExtensions, EDITORIAL_MENTION_BASE_ITEMS } from "./editor/extensions";
+import { EditorFloatingMenu } from "./editor/FloatingMenu";
+import { convertMarkdownToFormattedHtml } from "./editor/markdownImport";
+import { PromptModal as EditorPromptModal } from "./editor/PromptModal";
+import { PROMPT_MODAL_INITIAL, type PromptModalState } from "./editor/promptModalState";
+import { SearchReplacePanel } from "./editor/SearchReplace";
+import { TIPTAP_SLASH_EVENTS } from "./editor/SlashCommands";
+import { clamp, formatImageUrl, isYoutubeUrl, migrateLegacyCaptions } from "./editor/utils";
 
-type SaveFeedback = { message: string; type: 'success' | 'error' | 'info' } | null;
+type SaveFeedback = { message: string; type: "success" | "error" | "info" } | null;
 
 type GeminiImportProgress = {
   active: boolean;
-  stage: 'idle' | 'validating' | 'requesting' | 'processing' | 'inserting' | 'done' | 'error';
+  stage: "idle" | "validating" | "requesting" | "processing" | "inserting" | "done" | "error";
   message: string;
   percent: number;
 };
 
 const GEMINI_IMPORT_IDLE: GeminiImportProgress = {
   active: false,
-  stage: 'idle',
-  message: '',
+  stage: "idle",
+  message: "",
   percent: 0,
 };
 
@@ -91,7 +91,7 @@ export type PostEditorProps = {
   requiresAboutConversionConfirmation?: boolean;
   requiresAboutRestoreConfirmation?: boolean;
   savingPost: boolean;
-  showNotification: (msg: string, type: 'info' | 'success' | 'error') => void;
+  showNotification: (msg: string, type: "info" | "success" | "error") => void;
   onSave: (
     title: string,
     author: string,
@@ -124,15 +124,16 @@ export default function PostEditor({
   const [postIsPublished, setPostIsPublished] = useState(initialIsPublished);
   const [postIsAboutSite, setPostIsAboutSite] = useState(aboutMode || initialIsAboutSite);
   const [postIdEditorOpen, setPostIdEditorOpen] = useState(false);
-  const [postIdDraft, setPostIdDraft] = useState(editingPostId ? String(editingPostId) : '');
+  const [postIdDraft, setPostIdDraft] = useState(editingPostId ? String(editingPostId) : "");
   const [showAboutConversionConfirm, setShowAboutConversionConfirm] = useState(false);
   const [showAboutRestoreConfirm, setShowAboutRestoreConfirm] = useState(false);
   const [promptModal, setPromptModal] = useState<PromptModalState>(PROMPT_MODAL_INITIAL);
   const [isUploading, setIsUploading] = useState(false);
   const [isGeneratingAI, setIsGeneratingAI] = useState(false);
   const [isImportingGemini, setIsImportingGemini] = useState(false);
-  const [geminiImportProgress, setGeminiImportProgress] = useState<GeminiImportProgress>(GEMINI_IMPORT_IDLE);
-  const [lastGeminiImportUrl, setLastGeminiImportUrl] = useState('');
+  const [geminiImportProgress, setGeminiImportProgress] =
+    useState<GeminiImportProgress>(GEMINI_IMPORT_IDLE);
+  const [lastGeminiImportUrl, setLastGeminiImportUrl] = useState("");
   const [saveFeedback, setSaveFeedback] = useState<SaveFeedback>(null);
   const saveFeedbackTimer = useRef<ReturnType<typeof setTimeout>>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -141,9 +142,12 @@ export default function PostEditor({
   const markdownInputRef = useRef<HTMLInputElement>(null);
   const [isProcessingMarkdown, setIsProcessingMarkdown] = useState(false);
   const [aiChatOpen, setAiChatOpen] = useState(false);
-  const [aiChatInput, setAiChatInput] = useState('');
+  const [aiChatInput, setAiChatInput] = useState("");
   const aiChatBtnRef = useRef<HTMLButtonElement>(null);
-  const migratedInitialContent = useMemo(() => migrateLegacyCaptions(initialContent || ''), [initialContent]);
+  const migratedInitialContent = useMemo(
+    () => migrateLegacyCaptions(initialContent || ""),
+    [initialContent],
+  );
 
   const mentionItems = useMemo(() => {
     const baseItems = initialAuthor.trim()
@@ -169,11 +173,11 @@ export default function PostEditor({
         /* view not ready */
       }
     };
-    editor.on('transaction', forceUpdate);
-    editor.on('selectionUpdate', forceUpdate);
+    editor.on("transaction", forceUpdate);
+    editor.on("selectionUpdate", forceUpdate);
     return () => {
-      editor.off('transaction', forceUpdate);
-      editor.off('selectionUpdate', forceUpdate);
+      editor.off("transaction", forceUpdate);
+      editor.off("selectionUpdate", forceUpdate);
     };
   }, [editor]);
 
@@ -195,7 +199,7 @@ export default function PostEditor({
 
   useEffect(() => {
     setPostIdEditorOpen(false);
-    setPostIdDraft(editingPostId ? String(editingPostId) : '');
+    setPostIdDraft(editingPostId ? String(editingPostId) : "");
   }, [editingPostId, aboutMode]);
 
   useEffect(() => {
@@ -207,30 +211,30 @@ export default function PostEditor({
     const instruction = aiChatInput.trim();
     if (!instruction) return;
     const { from, to, empty } = editor.state.selection;
-    const text = empty ? editor.getHTML() : editor.state.doc.textBetween(from, to, ' ');
+    const text = empty ? editor.getHTML() : editor.state.doc.textBetween(from, to, " ");
     if (!text) {
-      showNotification('O editor está vazio.', 'error');
+      showNotification("O editor está vazio.", "error");
       return;
     }
     setIsGeneratingAI(true);
     setAiChatOpen(false);
-    showNotification('Gemini está processando sua instrução...', 'info');
+    showNotification("Gemini está processando sua instrução...", "info");
     try {
-      const res = await fetch('/api/mainsite/ai/transform', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'freeform', text, instruction }),
+      const res = await fetch("/api/mainsite/ai/transform", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "freeform", text, instruction }),
       });
       const data = (await res.json()) as { text?: string; error?: string };
-      if (!res.ok) throw new Error(data.error || 'Erro na geração por IA.');
+      if (!res.ok) throw new Error(data.error || "Erro na geração por IA.");
       if (data.text) {
         if (empty) editor.commands.setContent(data.text);
         else editor.chain().focus().deleteSelection().insertContent(data.text).run();
       }
-      showNotification('Instrução aplicada com sucesso.', 'success');
-      setAiChatInput('');
+      showNotification("Instrução aplicada com sucesso.", "success");
+      setAiChatInput("");
     } catch (err) {
-      showNotification(err instanceof Error ? err.message : 'Erro desconhecido na IA.', 'error');
+      showNotification(err instanceof Error ? err.message : "Erro desconhecido na IA.", "error");
     } finally {
       setIsGeneratingAI(false);
     }
@@ -241,29 +245,32 @@ export default function PostEditor({
 
     const { from, to, empty } = editor.state.selection;
     if (empty) {
-      showNotification('Por favor, selecione um trecho de texto no editor para aplicar a IA.', 'error');
+      showNotification(
+        "Por favor, selecione um trecho de texto no editor para aplicar a IA.",
+        "error",
+      );
       return;
     }
 
-    const selectedText = editor.state.doc.textBetween(from, to, ' ');
+    const selectedText = editor.state.doc.textBetween(from, to, " ");
     setIsGeneratingAI(true);
-    showNotification('Processando transformação textual no Gemini...', 'info');
+    showNotification("Processando transformação textual no Gemini...", "info");
 
     try {
       const res = await fetch(`/api/mainsite/ai/transform`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action, text: selectedText }),
       });
       const data = (await res.json()) as { text?: string; error?: string };
-      if (!res.ok) throw new Error(data.error || 'Erro na geração por IA.');
+      if (!res.ok) throw new Error(data.error || "Erro na geração por IA.");
 
       if (data.text) {
         editor.chain().focus().deleteSelection().insertContent(data.text).run();
       }
-      showNotification('Transformação aplicada com sucesso.', 'success');
+      showNotification("Transformação aplicada com sucesso.", "success");
     } catch (err) {
-      showNotification(err instanceof Error ? err.message : 'Erro desconhecido na IA.', 'error');
+      showNotification(err instanceof Error ? err.message : "Erro desconhecido na IA.", "error");
     } finally {
       setIsGeneratingAI(false);
     }
@@ -273,7 +280,7 @@ export default function PostEditor({
 
   const insertCaptionBlock = useCallback(
     (caption: string) => {
-      const safeCaption = (caption || '').trim();
+      const safeCaption = (caption || "").trim();
       if (!safeCaption || !editor) return;
       // Resolve a posição imediatamente após o nó selecionado (imagem/vídeo)
       // para evitar que insertContent substitua o nó selecionado
@@ -282,9 +289,9 @@ export default function PostEditor({
         .chain()
         .focus()
         .insertContentAt(to, {
-          type: 'paragraph',
-          attrs: { textAlign: 'center' },
-          content: [{ type: 'text', text: safeCaption, marks: [{ type: 'italic' }] }],
+          type: "paragraph",
+          attrs: { textAlign: "center" },
+          content: [{ type: "text", text: safeCaption, marks: [{ type: "italic" }] }],
         })
         .run();
     },
@@ -305,18 +312,18 @@ export default function PostEditor({
       const file = event.target.files?.[0];
       if (!file) return;
       setIsUploading(true);
-      showNotification('Enviando arquivo...', 'info');
+      showNotification("Enviando arquivo...", "info");
       const formData = new FormData();
-      formData.append('file', file);
+      formData.append("file", file);
       try {
-        const res = await fetch('/api/mainsite/upload', { method: 'POST', body: formData });
-        if (!res.ok) throw new Error('Falha na consolidação do arquivo.');
+        const res = await fetch("/api/mainsite/upload", { method: "POST", body: formData });
+        if (!res.ok) throw new Error("Falha na consolidação do arquivo.");
         const data = (await res.json()) as { url: string };
-        showNotification('Upload concluído com sucesso.', 'success');
+        showNotification("Upload concluído com sucesso.", "success");
         openPromptModal({
-          title: 'Finalizar inserção da imagem:',
-          submitLabel: 'Inserir imagem',
-          primaryLabel: 'URL',
+          title: "Finalizar inserção da imagem:",
+          submitLabel: "Inserir imagem",
+          primaryLabel: "URL",
           placeholder: data.url,
           value: data.url,
           showAltText: true,
@@ -328,16 +335,21 @@ export default function PostEditor({
               .chain()
               .focus()
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              .setImage({ src: imageUrl, alt: altText.trim(), title: titleText.trim(), width: '100%' } as any)
+              .setImage({
+                src: imageUrl,
+                alt: altText.trim(),
+                title: titleText.trim(),
+                width: "100%",
+              } as any)
               .run();
             insertCaptionBlock(caption);
           },
         });
       } catch (err) {
-        showNotification(err instanceof Error ? err.message : 'Erro no upload.', 'error');
+        showNotification(err instanceof Error ? err.message : "Erro no upload.", "error");
       } finally {
         setIsUploading(false);
-        if (fileInputRef.current) fileInputRef.current.value = '';
+        if (fileInputRef.current) fileInputRef.current.value = "";
       }
     },
     [editor, showNotification, insertCaptionBlock, openPromptModal],
@@ -349,10 +361,10 @@ export default function PostEditor({
       const file = event.target.files?.[0];
       if (!file) return;
       setIsProcessingWord(true);
-      showNotification('Processando documento do MS Word...', 'info');
+      showNotification("Processando documento do MS Word...", "info");
 
       try {
-        const mammothModule = await import('mammoth');
+        const mammothModule = await import("mammoth");
         const mammoth = mammothModule.default || mammothModule;
         const arrayBuffer = await file.arrayBuffer();
 
@@ -378,15 +390,18 @@ export default function PostEditor({
         // event handlers or dangerous URLs. Markdown import already uses
         // DOMPurify; mirror that posture here.
         const sanitized = DOMPurify.sanitize(htmlResult.value, {
-          ADD_ATTR: ['style', 'data-width'],
+          ADD_ATTR: ["style", "data-width"],
         });
         editor.chain().focus().insertContent(sanitized).run();
-        showNotification('Documento do Word importado com sucesso.', 'success');
+        showNotification("Documento do Word importado com sucesso.", "success");
       } catch (err) {
-        showNotification(err instanceof Error ? err.message : 'Erro ao importar documento do Word.', 'error');
+        showNotification(
+          err instanceof Error ? err.message : "Erro ao importar documento do Word.",
+          "error",
+        );
       } finally {
         setIsProcessingWord(false);
-        if (wordInputRef.current) wordInputRef.current.value = '';
+        if (wordInputRef.current) wordInputRef.current.value = "";
       }
     },
     [editor, showNotification],
@@ -398,22 +413,25 @@ export default function PostEditor({
       const file = event.target.files?.[0];
       if (!file) return;
       setIsProcessingMarkdown(true);
-      showNotification('Processando arquivo Markdown...', 'info');
+      showNotification("Processando arquivo Markdown...", "info");
 
       try {
         const rawMd = await file.text();
         const { html, title } = convertMarkdownToFormattedHtml(rawMd);
         if (!html) {
-          throw new Error('Arquivo Markdown vazio ou inválido.');
+          throw new Error("Arquivo Markdown vazio ou inválido.");
         }
         editor.chain().focus().insertContent(html).run();
         if (title && !postTitle.trim()) setPostTitle(title);
-        showNotification('Arquivo Markdown importado com sucesso.', 'success');
+        showNotification("Arquivo Markdown importado com sucesso.", "success");
       } catch (err) {
-        showNotification(err instanceof Error ? err.message : 'Erro ao importar arquivo Markdown.', 'error');
+        showNotification(
+          err instanceof Error ? err.message : "Erro ao importar arquivo Markdown.",
+          "error",
+        );
       } finally {
         setIsProcessingMarkdown(false);
-        if (markdownInputRef.current) markdownInputRef.current.value = '';
+        if (markdownInputRef.current) markdownInputRef.current.value = "";
       }
     },
     [editor, showNotification, postTitle],
@@ -422,9 +440,9 @@ export default function PostEditor({
   const addImageUrl = useCallback(() => {
     if (!editor) return;
     openPromptModal({
-      title: 'URL da Imagem (Drive/Externa):',
-      submitLabel: 'Inserir imagem',
-      primaryLabel: 'URL da imagem',
+      title: "URL da Imagem (Drive/Externa):",
+      submitLabel: "Inserir imagem",
+      primaryLabel: "URL da imagem",
       showCaption: true,
       showAltText: true,
       showTitleText: true,
@@ -434,7 +452,12 @@ export default function PostEditor({
           .chain()
           .focus()
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          .setImage({ src: formatImageUrl(value), alt: altText.trim(), title: titleText.trim(), width: '100%' } as any)
+          .setImage({
+            src: formatImageUrl(value),
+            alt: altText.trim(),
+            title: titleText.trim(),
+            width: "100%",
+          } as any)
           .run();
         insertCaptionBlock(caption);
       },
@@ -444,9 +467,9 @@ export default function PostEditor({
   const addFigureImage = useCallback(() => {
     if (!editor) return;
     openPromptModal({
-      title: 'Figura semântica com legenda:',
-      submitLabel: 'Inserir figura',
-      primaryLabel: 'URL da imagem',
+      title: "Figura semântica com legenda:",
+      submitLabel: "Inserir figura",
+      primaryLabel: "URL da imagem",
       showCaption: true,
       showAltText: true,
       showTitleText: true,
@@ -468,7 +491,7 @@ export default function PostEditor({
             alt: altText.trim(),
             title: titleText.trim(),
             caption: caption.trim(),
-            width: '100%',
+            width: "100%",
           });
           return;
         }
@@ -476,7 +499,12 @@ export default function PostEditor({
         editor
           .chain()
           .focus()
-          .setImage({ src, alt: altText.trim(), title: titleText.trim(), width: '100%' } as unknown as {
+          .setImage({
+            src,
+            alt: altText.trim(),
+            title: titleText.trim(),
+            width: "100%",
+          } as unknown as {
             src: string;
             alt?: string;
             title?: string;
@@ -491,10 +519,10 @@ export default function PostEditor({
   const addYoutube = useCallback(() => {
     if (!editor) return;
     openPromptModal({
-      title: 'Código ou URL do vídeo (YouTube):',
-      submitLabel: 'Inserir vídeo',
-      primaryLabel: 'URL ou código',
-      placeholder: 'Ex.: dQw4w9WgXcQ ou https://youtube.com/watch?v=...',
+      title: "Código ou URL do vídeo (YouTube):",
+      submitLabel: "Inserir vídeo",
+      primaryLabel: "URL ou código",
+      placeholder: "Ex.: dQw4w9WgXcQ ou https://youtube.com/watch?v=...",
       showCaption: true,
       callback: ({ value, caption }) => {
         if (!value) return;
@@ -509,34 +537,34 @@ export default function PostEditor({
 
   const addLink = useCallback(() => {
     if (!editor) return;
-    const prev = editor.getAttributes('link').href || '';
+    const prev = editor.getAttributes("link").href || "";
     openPromptModal({
-      title: 'Inserir Link de Hipertexto:',
-      submitLabel: 'Aplicar link',
-      primaryLabel: 'URL',
+      title: "Inserir Link de Hipertexto:",
+      submitLabel: "Aplicar link",
+      primaryLabel: "URL",
       value: prev as string,
       isLink: true,
       showLinkText: editor.state.selection.empty,
       callback: ({ value, linkText }) => {
         const url = value.trim();
         const text = linkText.trim();
-        if (url === '') {
-          editor.chain().focus().extendMarkRange('link').unsetLink().run();
+        if (url === "") {
+          editor.chain().focus().extendMarkRange("link").unsetLink().run();
           return;
         }
         const linkAttrs = isYoutubeUrl(url)
           ? { href: url }
-          : { href: url, target: '_blank' as const, rel: 'noopener noreferrer' };
+          : { href: url, target: "_blank" as const, rel: "noopener noreferrer" };
         if (editor.state.selection.empty && text) {
           editor
             .chain()
             .focus()
             .insertContent(
-              `<a href="${url}"${isYoutubeUrl(url) ? '' : ' target="_blank" rel="noopener noreferrer"'}>${text}</a>`,
+              `<a href="${url}"${isYoutubeUrl(url) ? "" : ' target="_blank" rel="noopener noreferrer"'}>${text}</a>`,
             )
             .run();
         } else {
-          editor.chain().focus().extendMarkRange('link').setLink(linkAttrs).run();
+          editor.chain().focus().extendMarkRange("link").setLink(linkAttrs).run();
         }
       },
     });
@@ -572,57 +600,57 @@ export default function PostEditor({
   const adjustSelectedMediaSize = useCallback(
     (direction: 1 | -1) => {
       if (!editor) return;
-      if (editor.isActive('image')) {
-        const attrs = editor.getAttributes('image');
-        const current = Number(String(attrs.width || '100').replace('%', '')) || 100;
+      if (editor.isActive("image")) {
+        const attrs = editor.getAttributes("image");
+        const current = Number(String(attrs.width || "100").replace("%", "")) || 100;
         const next = clamp(current + direction * 10, 20, 100);
         editor
           .chain()
           .focus()
-          .updateAttributes('image', { width: `${next}%` })
+          .updateAttributes("image", { width: `${next}%` })
           .run();
-        showNotification(`Imagem redimensionada para ${next}%`, 'success');
+        showNotification(`Imagem redimensionada para ${next}%`, "success");
         return;
       }
-      if (editor.isActive('youtube')) {
-        const attrs = editor.getAttributes('youtube');
+      if (editor.isActive("youtube")) {
+        const attrs = editor.getAttributes("youtube");
         const currentW = Number(attrs.width) || 840;
         const nextW = clamp(currentW + direction * 80, 320, 1200);
         const nextH = Math.round((nextW * 9) / 16);
-        editor.chain().focus().updateAttributes('youtube', { width: nextW, height: nextH }).run();
-        showNotification(`Vídeo redimensionado para ${nextW}x${nextH}`, 'success');
+        editor.chain().focus().updateAttributes("youtube", { width: nextW, height: nextH }).run();
+        showNotification(`Vídeo redimensionado para ${nextW}x${nextH}`, "success");
         return;
       }
-      showNotification('Selecione uma imagem ou vídeo para redimensionar.', 'info');
+      showNotification("Selecione uma imagem ou vídeo para redimensionar.", "info");
     },
     [editor, showNotification],
   );
 
   const editCaption = useCallback(() => {
     if (!editor) return;
-    const isImg = editor.isActive('image');
-    const isVid = editor.isActive('youtube');
+    const isImg = editor.isActive("image");
+    const isVid = editor.isActive("youtube");
     if (!isImg && !isVid) {
-      showNotification('Selecione uma imagem ou vídeo para adicionar/editar a legenda.', 'info');
+      showNotification("Selecione uma imagem ou vídeo para adicionar/editar a legenda.", "info");
       return;
     }
     const { selection, doc } = editor.state;
     const nodeSize = (selection as unknown as { node?: { nodeSize: number } }).node?.nodeSize || 1;
     const nodeEnd = selection.from + nodeSize;
 
-    let existingCaption = '';
+    let existingCaption = "";
     let captionFrom: number | null = null;
     let captionTo: number | null = null;
     const nextNode = doc.nodeAt(nodeEnd);
     if (
       nextNode &&
-      nextNode.type.name === 'paragraph' &&
-      nextNode.attrs?.textAlign === 'center' &&
+      nextNode.type.name === "paragraph" &&
+      nextNode.attrs?.textAlign === "center" &&
       nextNode.textContent
     ) {
       let hasItalic = false;
       nextNode.forEach((child) => {
-        if (child.isText && child.marks.some((m) => m.type.name === 'italic')) hasItalic = true;
+        if (child.isText && child.marks.some((m) => m.type.name === "italic")) hasItalic = true;
       });
       if (hasItalic) {
         existingCaption = nextNode.textContent;
@@ -631,21 +659,21 @@ export default function PostEditor({
       }
     }
     openPromptModal({
-      title: existingCaption ? 'Editar legenda da mídia:' : 'Adicionar legenda à mídia:',
-      submitLabel: 'Salvar legenda',
-      primaryLabel: 'Legenda',
-      placeholder: 'Texto da legenda...',
+      title: existingCaption ? "Editar legenda da mídia:" : "Adicionar legenda à mídia:",
+      submitLabel: "Salvar legenda",
+      primaryLabel: "Legenda",
+      placeholder: "Texto da legenda...",
       value: existingCaption,
       callback: ({ value }) => {
-        const trimmed = (value || '').trim();
+        const trimmed = (value || "").trim();
         if (captionFrom !== null && captionTo !== null) {
           const tr = editor.state.tr.delete(captionFrom, captionTo);
           editor.view.dispatch(tr);
           if (trimmed) {
             editor.commands.insertContentAt(captionFrom, {
-              type: 'paragraph',
-              attrs: { textAlign: 'center' },
-              content: [{ type: 'text', text: trimmed, marks: [{ type: 'italic' }] }],
+              type: "paragraph",
+              attrs: { textAlign: "center" },
+              content: [{ type: "text", text: trimmed, marks: [{ type: "italic" }] }],
             });
           }
         } else if (trimmed) {
@@ -657,7 +685,7 @@ export default function PostEditor({
   }, [editor, showNotification, insertCaptionBlock, openPromptModal]);
 
   // ── Local feedback helper (visible in popup window) ─────────
-  const flashFeedback = useCallback((message: string, type: NonNullable<SaveFeedback>['type']) => {
+  const flashFeedback = useCallback((message: string, type: NonNullable<SaveFeedback>["type"]) => {
     if (saveFeedbackTimer.current) clearTimeout(saveFeedbackTimer.current);
     setSaveFeedback({ message, type });
     saveFeedbackTimer.current = setTimeout(() => setSaveFeedback(null), 5000);
@@ -672,10 +700,10 @@ export default function PostEditor({
       if (!editor) return;
       const chain = editor.chain().focus();
       if (!command(chain).run()) {
-        showNotification(errorMessage, 'info');
+        showNotification(errorMessage, "info");
         return;
       }
-      showNotification(successMessage, 'success');
+      showNotification(successMessage, "success");
     },
     [editor, showNotification],
   );
@@ -685,18 +713,18 @@ export default function PostEditor({
   // regardless of whether the ProseMirror plugin had a chance to run.
   const sanitizeLinksTargetBlank = (html: string): string => {
     const parser = new DOMParser();
-    const doc = parser.parseFromString(html, 'text/html');
-    const anchors = doc.querySelectorAll('a[href]');
+    const doc = parser.parseFromString(html, "text/html");
+    const anchors = doc.querySelectorAll("a[href]");
     let changed = false;
     anchors.forEach((a) => {
-      const href = a.getAttribute('href') || '';
+      const href = a.getAttribute("href") || "";
       if (isYoutubeUrl(href)) return;
-      if (a.getAttribute('target') !== '_blank') {
-        a.setAttribute('target', '_blank');
+      if (a.getAttribute("target") !== "_blank") {
+        a.setAttribute("target", "_blank");
         changed = true;
       }
-      if (a.getAttribute('rel') !== 'noopener noreferrer') {
-        a.setAttribute('rel', 'noopener noreferrer');
+      if (a.getAttribute("rel") !== "noopener noreferrer") {
+        a.setAttribute("rel", "noopener noreferrer");
         changed = true;
       }
     });
@@ -712,8 +740,8 @@ export default function PostEditor({
 
     const parsed = Number(trimmed);
     if (!Number.isInteger(parsed) || parsed <= 0) {
-      flashFeedback('Informe um ID inteiro positivo para o post.', 'error');
-      showNotification('Informe um ID inteiro positivo para o post.', 'error');
+      flashFeedback("Informe um ID inteiro positivo para o post.", "error");
+      showNotification("Informe um ID inteiro positivo para o post.", "error");
       return null;
     }
 
@@ -724,11 +752,11 @@ export default function PostEditor({
   const submitPost = async (confirmedAboutAction = false) => {
     const title = postTitle.trim();
     const author = postAuthor.trim();
-    const rawContent = editor?.getHTML()?.trim() ?? '';
-    if (!title || !rawContent || rawContent === '<p></p>') {
-      const label = aboutMode || postIsAboutSite ? 'Sobre Este Site' : 'post';
-      flashFeedback(`Título e conteúdo são obrigatórios para salvar ${label}.`, 'error');
-      showNotification(`Título e conteúdo são obrigatórios para salvar ${label}.`, 'error');
+    const rawContent = editor?.getHTML()?.trim() ?? "";
+    if (!title || !rawContent || rawContent === "<p></p>") {
+      const label = aboutMode || postIsAboutSite ? "Sobre Este Site" : "post";
+      flashFeedback(`Título e conteúdo são obrigatórios para salvar ${label}.`, "error");
+      showNotification(`Título e conteúdo são obrigatórios para salvar ${label}.`, "error");
       return;
     }
     // Enforce target="_blank" on all non-YouTube links before persisting
@@ -739,16 +767,16 @@ export default function PostEditor({
     if (requiresAboutConversionConfirmation && postIsAboutSite && !confirmedAboutAction) {
       setShowAboutConversionConfirm(true);
       setShowAboutRestoreConfirm(false);
-      flashFeedback('Confirme a conversão deste post em Sobre Este Site.', 'info');
-      showNotification('Confirme a conversão deste post em Sobre Este Site.', 'info');
+      flashFeedback("Confirme a conversão deste post em Sobre Este Site.", "info");
+      showNotification("Confirme a conversão deste post em Sobre Este Site.", "info");
       return;
     }
 
     if (requiresAboutRestoreConfirmation && !postIsAboutSite && !confirmedAboutAction) {
       setShowAboutRestoreConfirm(true);
       setShowAboutConversionConfirm(false);
-      flashFeedback('Confirme a restauração deste conteúdo como post.', 'info');
-      showNotification('Confirme a restauração deste conteúdo como post.', 'info');
+      flashFeedback("Confirme a restauração deste conteúdo como post.", "info");
+      showNotification("Confirme a restauração deste conteúdo como post.", "info");
       return;
     }
 
@@ -765,14 +793,17 @@ export default function PostEditor({
       setShowAboutConversionConfirm(false);
       setShowAboutRestoreConfirm(false);
       if (aboutMode && !postIsAboutSite) {
-        flashFeedback('Post restaurado na lista com sucesso ✓', 'success');
+        flashFeedback("Post restaurado na lista com sucesso ✓", "success");
       } else if (aboutMode || postIsAboutSite) {
-        flashFeedback('Sobre Este Site salvo com sucesso ✓', 'success');
+        flashFeedback("Sobre Este Site salvo com sucesso ✓", "success");
       } else {
-        flashFeedback(editingPostId ? 'Post atualizado com sucesso ✓' : 'Post criado com sucesso ✓', 'success');
+        flashFeedback(
+          editingPostId ? "Post atualizado com sucesso ✓" : "Post criado com sucesso ✓",
+          "success",
+        );
       }
     } else {
-      flashFeedback('Falha ao salvar. Verifique e tente novamente.', 'error');
+      flashFeedback("Falha ao salvar. Verifique e tente novamente.", "error");
     }
   };
 
@@ -783,13 +814,13 @@ export default function PostEditor({
   };
 
   const handleClear = () => {
-    setPostTitle('');
-    setPostAuthor('');
+    setPostTitle("");
+    setPostAuthor("");
     editor?.commands.clearContent();
     setShowAboutConversionConfirm(false);
     setShowAboutRestoreConfirm(false);
     setPostIdEditorOpen(false);
-    setPostIdDraft(editingPostId ? String(editingPostId) : '');
+    setPostIdDraft(editingPostId ? String(editingPostId) : "");
   };
 
   const handleGeminiImport = useCallback(
@@ -804,30 +835,34 @@ export default function PostEditor({
       const resolveImportError = (status: number | null, backendMessage?: string): string => {
         if (backendMessage) {
           if (/privado|expirado|bloqueado/i.test(backendMessage)) {
-            return 'O link do Gemini parece privado, expirado ou bloqueado. Gere um novo link de compartilhamento publico e tente novamente.';
+            return "O link do Gemini parece privado, expirado ou bloqueado. Gere um novo link de compartilhamento publico e tente novamente.";
           }
           if (/nenhum conteudo extraido/i.test(backendMessage)) {
-            return 'Nao consegui extrair conteudo desse link. Abra o compartilhamento, confirme se o texto aparece publicamente e tente de novo.';
+            return "Nao consegui extrair conteudo desse link. Abra o compartilhamento, confirme se o texto aparece publicamente e tente de novo.";
           }
         }
         if (status === 422) {
-          return 'URL invalida. Use um link de compartilhamento do Gemini no formato https://gemini.google.com/share/....';
+          return "URL invalida. Use um link de compartilhamento do Gemini no formato https://gemini.google.com/share/....";
         }
         if (status === 502) {
-          return 'Falha ao ler o compartilhamento do Gemini no servidor. Tente novamente em instantes ou gere um novo link publico.';
+          return "Falha ao ler o compartilhamento do Gemini no servidor. Tente novamente em instantes ou gere um novo link publico.";
         }
         if (status === 400) {
-          return 'A requisicao de importacao foi rejeitada. Verifique o link informado.';
+          return "A requisicao de importacao foi rejeitada. Verifique o link informado.";
         }
-        return backendMessage || 'Erro ao importar do Gemini.';
+        return backendMessage || "Erro ao importar do Gemini.";
       };
 
-      updateProgress({ stage: 'validating', percent: 12, message: 'Validando link compartilhado do Gemini...' });
+      updateProgress({
+        stage: "validating",
+        percent: 12,
+        message: "Validando link compartilhado do Gemini...",
+      });
 
       if (!/^https:\/\//i.test(normalizedUrl)) {
-        const message = 'URL invalida. O link precisa comecar com https://.';
-        updateProgress({ stage: 'error', percent: 100, message });
-        showNotification(message, 'error');
+        const message = "URL invalida. O link precisa comecar com https://.";
+        updateProgress({ stage: "error", percent: 100, message });
+        showNotification(message, "error");
         setTimeout(() => setGeminiImportProgress(GEMINI_IMPORT_IDLE), 2400);
         return;
       }
@@ -835,17 +870,25 @@ export default function PostEditor({
       setLastGeminiImportUrl(normalizedUrl);
 
       setIsImportingGemini(true);
-      updateProgress({ stage: 'requesting', percent: 36, message: 'Conectando ao endpoint de importação...' });
-      showNotification('Importando conteúdo do Gemini...', 'info');
+      updateProgress({
+        stage: "requesting",
+        percent: 36,
+        message: "Conectando ao endpoint de importação...",
+      });
+      showNotification("Importando conteúdo do Gemini...", "info");
 
       try {
-        const res = await fetch('/api/mainsite/gemini-import', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+        const res = await fetch("/api/mainsite/gemini-import", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ url: normalizedUrl }),
         });
 
-        updateProgress({ stage: 'processing', percent: 70, message: 'Processando conteudo retornado...' });
+        updateProgress({
+          stage: "processing",
+          percent: 70,
+          message: "Processando conteudo retornado...",
+        });
 
         let data: { html?: string; title?: string; error?: string } = {};
         try {
@@ -858,20 +901,28 @@ export default function PostEditor({
           throw new Error(resolveImportError(res.status, data.error));
         }
 
-        updateProgress({ stage: 'inserting', percent: 90, message: 'Inserindo conteudo no editor...' });
+        updateProgress({
+          stage: "inserting",
+          percent: 90,
+          message: "Inserindo conteudo no editor...",
+        });
 
         if (data.html) {
           editor.chain().focus().insertContent(data.html).run();
           if (data.title && !postTitle.trim()) setPostTitle(data.title);
         }
 
-        updateProgress({ stage: 'done', percent: 100, message: 'Importacao concluida com sucesso.' });
-        showNotification('Conteúdo importado com sucesso!', 'success');
+        updateProgress({
+          stage: "done",
+          percent: 100,
+          message: "Importacao concluida com sucesso.",
+        });
+        showNotification("Conteúdo importado com sucesso!", "success");
         setTimeout(() => setGeminiImportProgress(GEMINI_IMPORT_IDLE), 1400);
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Erro desconhecido.';
-        updateProgress({ stage: 'error', percent: 100, message });
-        showNotification(message, 'error');
+        const message = err instanceof Error ? err.message : "Erro desconhecido.";
+        updateProgress({ stage: "error", percent: 100, message });
+        showNotification(message, "error");
         setTimeout(() => setGeminiImportProgress(GEMINI_IMPORT_IDLE), 2800);
       } finally {
         setIsImportingGemini(false);
@@ -886,22 +937,22 @@ export default function PostEditor({
         <div>
           <h4>
             {aboutMode
-              ? 'Editar Sobre Este Site'
+              ? "Editar Sobre Este Site"
               : editingPostId
                 ? `Editar post #${editingPostId}`
-                : 'Novo post (NOVO)'}
+                : "Novo post (NOVO)"}
           </h4>
           <p className="field-hint">
             {aboutMode
-              ? 'Edite o texto institucional publicado em /sobre-este-site.'
-              : 'Crie e edite posts com salvamento imediato.'}
+              ? "Edite o texto institucional publicado em /sobre-este-site."
+              : "Crie e edite posts com salvamento imediato."}
           </p>
         </div>
         <div className="inline-actions">
           {!aboutMode && !postIsAboutSite && (
             <button
               type="button"
-              className={`ghost-button post-id-edit-button${postIdEditorOpen ? ' post-id-edit-button--active' : ''}`}
+              className={`ghost-button post-id-edit-button${postIdEditorOpen ? " post-id-edit-button--active" : ""}`}
               onClick={() => {
                 if (!postIdEditorOpen && !postIdDraft && editingPostId) {
                   setPostIdDraft(String(editingPostId));
@@ -923,14 +974,19 @@ export default function PostEditor({
               <FilePlus2 size={16} />
             )}
             {aboutMode && !postIsAboutSite
-              ? 'Restaurar como post'
+              ? "Restaurar como post"
               : aboutMode || postIsAboutSite
-                ? 'Salvar Sobre'
+                ? "Salvar Sobre"
                 : editingPostId
-                  ? 'Salvar alterações'
-                  : 'Criar post'}
+                  ? "Salvar alterações"
+                  : "Criar post"}
           </button>
-          <button type="button" className="ghost-button" onClick={handleClear} disabled={savingPost}>
+          <button
+            type="button"
+            className="ghost-button"
+            onClick={handleClear}
+            disabled={savingPost}
+          >
             <X size={16} />
             Limpar
           </button>
@@ -948,9 +1004,9 @@ export default function PostEditor({
           role="status"
           aria-live="polite"
         >
-          {saveFeedback.type === 'success' ? (
+          {saveFeedback.type === "success" ? (
             <CheckSquare size={16} />
-          ) : saveFeedback.type === 'info' ? (
+          ) : saveFeedback.type === "info" ? (
             <FileText size={16} />
           ) : (
             <X size={16} />
@@ -972,7 +1028,7 @@ export default function PostEditor({
           <div className="field-group post-id-editor-field">
             <label htmlFor="mainsite-post-id">
               ID do post
-              {editingPostId ? ` atual: #${editingPostId}` : ' novo'}
+              {editingPostId ? ` atual: #${editingPostId}` : " novo"}
             </label>
             <input
               id="mainsite-post-id"
@@ -983,13 +1039,13 @@ export default function PostEditor({
               step={1}
               value={postIdDraft}
               onChange={(event) => setPostIdDraft(event.target.value)}
-              placeholder={editingPostId ? String(editingPostId) : 'Automático'}
+              placeholder={editingPostId ? String(editingPostId) : "Automático"}
               disabled={savingPost}
             />
           </div>
           <p>
-            Deixe vazio para manter o comportamento atual: numeração automática em novos posts e ID inalterado ao
-            editar.
+            Deixe vazio para manter o comportamento atual: numeração automática em novos posts e ID
+            inalterado ao editar.
           </p>
         </div>
       )}
@@ -1018,8 +1074,8 @@ export default function PostEditor({
       </div>
 
       <div className="field-group">
-        <div style={{ display: 'flex', gap: '18px', alignItems: 'center', flexWrap: 'wrap' }}>
-          <label style={{ display: 'flex', gap: '8px', alignItems: 'center', cursor: 'pointer' }}>
+        <div style={{ display: "flex", gap: "18px", alignItems: "center", flexWrap: "wrap" }}>
+          <label style={{ display: "flex", gap: "8px", alignItems: "center", cursor: "pointer" }}>
             <input
               type="checkbox"
               checked={postIsPublished}
@@ -1028,7 +1084,7 @@ export default function PostEditor({
             />
             <span>Visível no site (quando desmarcado, o post fica oculto para visitantes)</span>
           </label>
-          <label style={{ display: 'flex', gap: '8px', alignItems: 'center', cursor: 'pointer' }}>
+          <label style={{ display: "flex", gap: "8px", alignItems: "center", cursor: "pointer" }}>
             <input
               type="checkbox"
               checked={postIsAboutSite}
@@ -1049,8 +1105,8 @@ export default function PostEditor({
           <div>
             <strong>Converter este post em Sobre Este Site?</strong>
             <p>
-              O conteúdo será salvo na tabela institucional e o post original sairá da lista pública se não houver
-              comentários ou avaliações vinculados.
+              O conteúdo será salvo na tabela institucional e o post original sairá da lista pública
+              se não houver comentários ou avaliações vinculados.
             </p>
           </div>
           <div className="inline-actions">
@@ -1079,8 +1135,8 @@ export default function PostEditor({
           <div>
             <strong>Restaurar este conteúdo como post?</strong>
             <p>
-              O conteúdo será recriado na lista de posts com a formatação atual e a página Sobre Este Site ficará vazia
-              até ser preenchida novamente.
+              O conteúdo será recriado na lista de posts com a formatação atual e a página Sobre
+              Este Site ficará vazia até ser preenchida novamente.
             </p>
           </div>
           <div className="inline-actions">
@@ -1128,12 +1184,14 @@ export default function PostEditor({
                 onChange={(e) => {
                   if (e.target.value) {
                     handleAITransform(e.target.value);
-                    e.target.value = '';
+                    e.target.value = "";
                   }
                 }}
                 disabled={isGeneratingAI}
               >
-                <option value="">{isGeneratingAI ? 'Processando...' : 'IA: Aprimorar Texto'}</option>
+                <option value="">
+                  {isGeneratingAI ? "Processando..." : "IA: Aprimorar Texto"}
+                </option>
                 <option value="grammar">Corrigir Gramática</option>
                 <option value="summarize">Resumir Seleção</option>
                 <option value="expand">Expandir Conteúdo</option>
@@ -1147,7 +1205,7 @@ export default function PostEditor({
               title="Desfazer (Ctrl+Z)"
               onClick={() => editor.chain().focus().undo().run()}
               disabled={!editor.can().undo()}
-              className={!editor.can().undo() ? 'disabled' : ''}
+              className={!editor.can().undo() ? "disabled" : ""}
             >
               <Undo2 size={15} />
             </button>
@@ -1156,7 +1214,7 @@ export default function PostEditor({
               title="Refazer (Ctrl+Y)"
               onClick={() => editor.chain().focus().redo().run()}
               disabled={!editor.can().redo()}
-              className={!editor.can().redo() ? 'disabled' : ''}
+              className={!editor.can().redo() ? "disabled" : ""}
             >
               <Redo2 size={15} />
             </button>
@@ -1165,7 +1223,7 @@ export default function PostEditor({
             <button
               type="button"
               title="Negrito (Ctrl+B)"
-              className={editor.isActive('bold') ? 'active' : ''}
+              className={editor.isActive("bold") ? "active" : ""}
               onClick={() => editor.chain().focus().toggleBold().run()}
             >
               <Bold size={15} />
@@ -1173,7 +1231,7 @@ export default function PostEditor({
             <button
               type="button"
               title="Itálico (Ctrl+I)"
-              className={editor.isActive('italic') ? 'active' : ''}
+              className={editor.isActive("italic") ? "active" : ""}
               onClick={() => editor.chain().focus().toggleItalic().run()}
             >
               <Italic size={15} />
@@ -1181,7 +1239,7 @@ export default function PostEditor({
             <button
               type="button"
               title="Sublinhado (Ctrl+U)"
-              className={editor.isActive('underline') ? 'active' : ''}
+              className={editor.isActive("underline") ? "active" : ""}
               onClick={() => editor.chain().focus().toggleUnderline().run()}
             >
               <UnderlineIcon size={15} />
@@ -1189,7 +1247,7 @@ export default function PostEditor({
             <button
               type="button"
               title="Tachado (Ctrl+Shift+X)"
-              className={editor.isActive('strike') ? 'active' : ''}
+              className={editor.isActive("strike") ? "active" : ""}
               onClick={() => editor.chain().focus().toggleStrike().run()}
             >
               <Strikethrough size={15} />
@@ -1197,7 +1255,7 @@ export default function PostEditor({
             <button
               type="button"
               title="Marca-texto (Ctrl+Shift+H)"
-              className={editor.isActive('highlight') ? 'active' : ''}
+              className={editor.isActive("highlight") ? "active" : ""}
               onClick={() => editor.chain().focus().toggleHighlight().run()}
             >
               <Highlighter size={15} />
@@ -1206,7 +1264,7 @@ export default function PostEditor({
             <button
               type="button"
               title="Subscrito (Ctrl+,)"
-              className={editor.isActive('subscript') ? 'active' : ''}
+              className={editor.isActive("subscript") ? "active" : ""}
               onClick={() => editor.chain().focus().toggleSubscript().run()}
             >
               <SubIcon size={15} />
@@ -1214,7 +1272,7 @@ export default function PostEditor({
             <button
               type="button"
               title="Sobrescrito (Ctrl+.)"
-              className={editor.isActive('superscript') ? 'active' : ''}
+              className={editor.isActive("superscript") ? "active" : ""}
               onClick={() => editor.chain().focus().toggleSuperscript().run()}
             >
               <SuperIcon size={15} />
@@ -1222,7 +1280,7 @@ export default function PostEditor({
             <button
               type="button"
               title="Bloco de código (Ctrl+Alt+C)"
-              className={editor.isActive('codeBlock') ? 'active' : ''}
+              className={editor.isActive("codeBlock") ? "active" : ""}
               onClick={() => editor.chain().focus().toggleCodeBlock().run()}
             >
               <Code size={15} />
@@ -1230,7 +1288,7 @@ export default function PostEditor({
             <button
               type="button"
               title="Citação (Ctrl+Shift+B)"
-              className={editor.isActive('blockquote') ? 'active' : ''}
+              className={editor.isActive("blockquote") ? "active" : ""}
               onClick={() => editor.chain().focus().toggleBlockquote().run()}
             >
               <Quote size={15} />
@@ -1239,32 +1297,32 @@ export default function PostEditor({
             <button
               type="button"
               title="Esquerda (Ctrl+Shift+L)"
-              className={editor.isActive({ textAlign: 'left' }) ? 'active' : ''}
-              onClick={() => editor.chain().focus().setTextAlign('left').run()}
+              className={editor.isActive({ textAlign: "left" }) ? "active" : ""}
+              onClick={() => editor.chain().focus().setTextAlign("left").run()}
             >
               <AlignLeft size={15} />
             </button>
             <button
               type="button"
               title="Centro (Ctrl+Shift+E)"
-              className={editor.isActive({ textAlign: 'center' }) ? 'active' : ''}
-              onClick={() => editor.chain().focus().setTextAlign('center').run()}
+              className={editor.isActive({ textAlign: "center" }) ? "active" : ""}
+              onClick={() => editor.chain().focus().setTextAlign("center").run()}
             >
               <AlignCenter size={15} />
             </button>
             <button
               type="button"
               title="Direita (Ctrl+Shift+R)"
-              className={editor.isActive({ textAlign: 'right' }) ? 'active' : ''}
-              onClick={() => editor.chain().focus().setTextAlign('right').run()}
+              className={editor.isActive({ textAlign: "right" }) ? "active" : ""}
+              onClick={() => editor.chain().focus().setTextAlign("right").run()}
             >
               <AlignRight size={15} />
             </button>
             <button
               type="button"
               title="Justificar (Ctrl+Shift+J)"
-              className={editor.isActive({ textAlign: 'justify' }) ? 'active' : ''}
-              onClick={() => editor.chain().focus().setTextAlign('justify').run()}
+              className={editor.isActive({ textAlign: "justify" }) ? "active" : ""}
+              onClick={() => editor.chain().focus().setTextAlign("justify").run()}
             >
               <AlignJustify size={15} />
             </button>
@@ -1272,7 +1330,7 @@ export default function PostEditor({
             <button
               type="button"
               title="Título 1 (Ctrl+Alt+1)"
-              className={editor.isActive('heading', { level: 1 }) ? 'active' : ''}
+              className={editor.isActive("heading", { level: 1 }) ? "active" : ""}
               onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}
             >
               <Heading1 size={15} />
@@ -1280,7 +1338,7 @@ export default function PostEditor({
             <button
               type="button"
               title="Título 2 (Ctrl+Alt+2)"
-              className={editor.isActive('heading', { level: 2 }) ? 'active' : ''}
+              className={editor.isActive("heading", { level: 2 }) ? "active" : ""}
               onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}
             >
               <Heading2 size={15} />
@@ -1288,7 +1346,7 @@ export default function PostEditor({
             <button
               type="button"
               title="Título 3 (Ctrl+Alt+3)"
-              className={editor.isActive('heading', { level: 3 }) ? 'active' : ''}
+              className={editor.isActive("heading", { level: 3 }) ? "active" : ""}
               onClick={() => editor.chain().focus().toggleHeading({ level: 3 }).run()}
             >
               <Heading3 size={15} />
@@ -1296,7 +1354,7 @@ export default function PostEditor({
             <button
               type="button"
               title="Marcadores (Ctrl+Shift+8)"
-              className={editor.isActive('bulletList') ? 'active' : ''}
+              className={editor.isActive("bulletList") ? "active" : ""}
               onClick={() => editor.chain().focus().toggleBulletList().run()}
             >
               <List size={15} />
@@ -1304,7 +1362,7 @@ export default function PostEditor({
             <button
               type="button"
               title="Numeração (Ctrl+Shift+7)"
-              className={editor.isActive('orderedList') ? 'active' : ''}
+              className={editor.isActive("orderedList") ? "active" : ""}
               onClick={() => editor.chain().focus().toggleOrderedList().run()}
             >
               <ListOrdered size={15} />
@@ -1312,7 +1370,7 @@ export default function PostEditor({
             <button
               type="button"
               title="Tarefas (Ctrl+Shift+9)"
-              className={editor.isActive('taskList') ? 'active' : ''}
+              className={editor.isActive("taskList") ? "active" : ""}
               onClick={() => editor.chain().focus().toggleTaskList().run()}
             >
               <CheckSquare size={15} />
@@ -1327,11 +1385,13 @@ export default function PostEditor({
             <button
               type="button"
               title="Inserir tabela 3×3"
-              onClick={() => editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()}
+              onClick={() =>
+                editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()
+              }
             >
               <TableIcon size={15} />
             </button>
-            {editor.isActive('table') && (
+            {editor.isActive("table") && (
               <>
                 <button
                   type="button"
@@ -1340,8 +1400,8 @@ export default function PostEditor({
                   onClick={() =>
                     runTableCommand(
                       (chain) => chain.addRowAfter(),
-                      'Linha adicionada à tabela.',
-                      'Posicione o cursor dentro da tabela para adicionar uma linha.',
+                      "Linha adicionada à tabela.",
+                      "Posicione o cursor dentro da tabela para adicionar uma linha.",
                     )
                   }
                 >
@@ -1354,8 +1414,8 @@ export default function PostEditor({
                   onClick={() =>
                     runTableCommand(
                       (chain) => chain.deleteRow(),
-                      'Linha removida da tabela.',
-                      'Posicione o cursor dentro da tabela para remover uma linha.',
+                      "Linha removida da tabela.",
+                      "Posicione o cursor dentro da tabela para remover uma linha.",
                     )
                   }
                 >
@@ -1368,8 +1428,8 @@ export default function PostEditor({
                   onClick={() =>
                     runTableCommand(
                       (chain) => chain.addColumnAfter(),
-                      'Coluna adicionada à tabela.',
-                      'Posicione o cursor dentro da tabela para adicionar uma coluna.',
+                      "Coluna adicionada à tabela.",
+                      "Posicione o cursor dentro da tabela para adicionar uma coluna.",
                     )
                   }
                 >
@@ -1382,8 +1442,8 @@ export default function PostEditor({
                   onClick={() =>
                     runTableCommand(
                       (chain) => chain.deleteColumn(),
-                      'Coluna removida da tabela.',
-                      'Posicione o cursor dentro da tabela para remover uma coluna.',
+                      "Coluna removida da tabela.",
+                      "Posicione o cursor dentro da tabela para remover uma coluna.",
                     )
                   }
                 >
@@ -1396,8 +1456,8 @@ export default function PostEditor({
                   onClick={() =>
                     runTableCommand(
                       (chain) => chain.toggleHeaderRow(),
-                      'Cabeçalho da tabela atualizado.',
-                      'Posicione o cursor dentro da tabela para atualizar o cabeçalho.',
+                      "Cabeçalho da tabela atualizado.",
+                      "Posicione o cursor dentro da tabela para atualizar o cabeçalho.",
                     )
                   }
                 >
@@ -1410,8 +1470,8 @@ export default function PostEditor({
                   onClick={() =>
                     runTableCommand(
                       (chain) => chain.mergeOrSplit(),
-                      'Estrutura de células atualizada.',
-                      'Selecione células válidas para mesclar ou dividir.',
+                      "Estrutura de células atualizada.",
+                      "Selecione células válidas para mesclar ou dividir.",
                     )
                   }
                 >
@@ -1424,8 +1484,8 @@ export default function PostEditor({
                   onClick={() =>
                     runTableCommand(
                       (chain) => chain.deleteTable(),
-                      'Tabela removida.',
-                      'Posicione o cursor dentro da tabela para excluí-la.',
+                      "Tabela removida.",
+                      "Posicione o cursor dentro da tabela para excluí-la.",
                     )
                   }
                 >
@@ -1460,7 +1520,7 @@ export default function PostEditor({
             <button
               type="button"
               title="Link (Ctrl+K)"
-              className={editor.isActive('link') ? 'active' : ''}
+              className={editor.isActive("link") ? "active" : ""}
               onClick={addLink}
             >
               <LinkIcon size={15} />
@@ -1469,8 +1529,8 @@ export default function PostEditor({
               type="button"
               title="Remover link"
               onClick={() => editor.chain().focus().unsetLink().run()}
-              disabled={!editor.isActive('link')}
-              className={!editor.isActive('link') ? 'disabled' : ''}
+              disabled={!editor.isActive("link")}
+              className={!editor.isActive("link") ? "disabled" : ""}
             >
               <Unlink size={15} />
             </button>
@@ -1528,7 +1588,11 @@ export default function PostEditor({
               onClick={() => markdownInputRef.current?.click()}
               disabled={isProcessingMarkdown}
             >
-              {isProcessingMarkdown ? <Loader2 size={15} className="spin" /> : <FileText size={15} />}
+              {isProcessingMarkdown ? (
+                <Loader2 size={15} className="spin" />
+              ) : (
+                <FileText size={15} />
+              )}
             </button>
             <button type="button" title="Imagem por URL / Google Drive" onClick={addImageUrl}>
               <ImageIcon size={15} />
@@ -1540,7 +1604,7 @@ export default function PostEditor({
               type="button"
               title="Reduzir mídia"
               onClick={() => adjustSelectedMediaSize(-1)}
-              disabled={!editor.isActive('image') && !editor.isActive('youtube')}
+              disabled={!editor.isActive("image") && !editor.isActive("youtube")}
             >
               <ZoomOut size={15} />
             </button>
@@ -1548,7 +1612,7 @@ export default function PostEditor({
               type="button"
               title="Ampliar mídia"
               onClick={() => adjustSelectedMediaSize(1)}
-              disabled={!editor.isActive('image') && !editor.isActive('youtube')}
+              disabled={!editor.isActive("image") && !editor.isActive("youtube")}
             >
               <ZoomIn size={15} />
             </button>
@@ -1556,7 +1620,7 @@ export default function PostEditor({
               type="button"
               title="Legenda da mídia"
               onClick={editCaption}
-              disabled={!editor.isActive('image') && !editor.isActive('youtube')}
+              disabled={!editor.isActive("image") && !editor.isActive("youtube")}
             >
               <MessageSquare size={15} />
             </button>
@@ -1565,10 +1629,10 @@ export default function PostEditor({
               title="Importar do Gemini"
               onClick={() =>
                 openPromptModal({
-                  title: 'Importar do Gemini (link compartilhado):',
-                  submitLabel: 'Importar',
-                  primaryLabel: 'URL do compartilhamento',
-                  placeholder: 'https://gemini.google.com/share/...',
+                  title: "Importar do Gemini (link compartilhado):",
+                  submitLabel: "Importar",
+                  primaryLabel: "URL do compartilhamento",
+                  placeholder: "https://gemini.google.com/share/...",
                   callback: ({ value }) => handleGeminiImport(value),
                 })
               }
@@ -1593,7 +1657,7 @@ export default function PostEditor({
                     .setColor((e.target as HTMLInputElement).value)
                     .run()
                 }
-                value={(editor.getAttributes('textStyle').color as string) || '#000000'}
+                value={(editor.getAttributes("textStyle").color as string) || "#000000"}
               />
             </div>
             <div className="tiptap-select-group">
@@ -1603,7 +1667,7 @@ export default function PostEditor({
                 name="tiptapFontFamily"
                 title="Família da fonte"
                 onChange={(e) => editor.chain().focus().setFontFamily(e.target.value).run()}
-                value={(editor.getAttributes('textStyle').fontFamily as string) || 'inherit'}
+                value={(editor.getAttributes("textStyle").fontFamily as string) || "inherit"}
               >
                 <option value="inherit">Padrão</option>
                 <option value="monospace">Monospace</option>
@@ -1618,7 +1682,7 @@ export default function PostEditor({
                 title="Tamanho da fonte"
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 onChange={(e) => (editor.chain().focus() as any).setFontSize(e.target.value).run()}
-                value={(editor.getAttributes('textStyle').fontSize as string) || ''}
+                value={(editor.getAttributes("textStyle").fontSize as string) || ""}
               >
                 <option value="">Tam.</option>
                 <option value="12px">12px</option>
@@ -1639,21 +1703,21 @@ export default function PostEditor({
                 onChange={(e) => {
                   const val = e.target.value;
                   /* eslint-disable @typescript-eslint/no-explicit-any */
-                  if (val.startsWith('lh-')) {
-                    const lh = val.replace('lh-', '');
-                    if (lh === 'normal') (editor.chain().focus() as any).unsetLineHeight().run();
+                  if (val.startsWith("lh-")) {
+                    const lh = val.replace("lh-", "");
+                    if (lh === "normal") (editor.chain().focus() as any).unsetLineHeight().run();
                     else (editor.chain().focus() as any).setLineHeight(lh).run();
-                  } else if (val === 'mar-add-top') {
-                    (editor.chain().focus() as any).setMarginTop('1.5em').run();
-                  } else if (val === 'mar-rem-top') {
-                    (editor.chain().focus() as any).setMarginTop('0px').run();
-                  } else if (val === 'mar-add-bot') {
-                    (editor.chain().focus() as any).setMarginBottom('1.5em').run();
-                  } else if (val === 'mar-rem-bot') {
-                    (editor.chain().focus() as any).setMarginBottom('0px').run();
+                  } else if (val === "mar-add-top") {
+                    (editor.chain().focus() as any).setMarginTop("1.5em").run();
+                  } else if (val === "mar-rem-top") {
+                    (editor.chain().focus() as any).setMarginTop("0px").run();
+                  } else if (val === "mar-add-bot") {
+                    (editor.chain().focus() as any).setMarginBottom("1.5em").run();
+                  } else if (val === "mar-rem-bot") {
+                    (editor.chain().focus() as any).setMarginBottom("0px").run();
                   }
                   /* eslint-enable @typescript-eslint/no-explicit-any */
-                  e.target.value = '';
+                  e.target.value = "";
                 }}
                 value=""
               >
@@ -1682,7 +1746,7 @@ export default function PostEditor({
                 type="button"
                 title="IA: Instrução Livre (Gemini)"
                 onClick={() => setAiChatOpen(!aiChatOpen)}
-                className={aiChatOpen ? 'active' : ''}
+                className={aiChatOpen ? "active" : ""}
                 disabled={isGeneratingAI}
               >
                 {isGeneratingAI ? <Loader2 size={15} className="spin" /> : <Wand2 size={15} />}
@@ -1701,7 +1765,7 @@ export default function PostEditor({
                     <div
                       className="ai-freeform-popover"
                       style={{
-                        position: 'fixed',
+                        position: "fixed",
                         top: btnRect ? btnRect.bottom + 6 : 100,
                         left: popLeft,
                         width: `${popW}px`,
@@ -1712,7 +1776,7 @@ export default function PostEditor({
                         <Wand2 size={14} color="#1a73e8" />
                         <span className="ai-freeform-popover__title">IA: Instrução Livre</span>
                         <span className="ai-freeform-popover__scope">
-                          {editor?.state.selection.empty ? 'Texto inteiro' : 'Seleção'}
+                          {editor?.state.selection.empty ? "Texto inteiro" : "Seleção"}
                         </span>
                       </div>
                       <textarea
@@ -1722,11 +1786,11 @@ export default function PostEditor({
                         value={aiChatInput}
                         onChange={(e) => setAiChatInput(e.target.value)}
                         onKeyDown={(e) => {
-                          if (e.key === 'Enter' && !e.shiftKey) {
+                          if (e.key === "Enter" && !e.shiftKey) {
                             e.preventDefault();
                             handleAIFreeform();
                           }
-                          if (e.key === 'Escape') setAiChatOpen(false);
+                          if (e.key === "Escape") setAiChatOpen(false);
                         }}
                       />
                       <div className="ai-freeform-popover__actions">
@@ -1767,10 +1831,13 @@ export default function PostEditor({
                 <span>{geminiImportProgress.percent}%</span>
               </div>
               <div className="gemini-import-progress__track" aria-hidden="true">
-                <div className="gemini-import-progress__fill" style={{ width: `${geminiImportProgress.percent}%` }} />
+                <div
+                  className="gemini-import-progress__fill"
+                  style={{ width: `${geminiImportProgress.percent}%` }}
+                />
               </div>
               <p className="gemini-import-progress__message">{geminiImportProgress.message}</p>
-              {geminiImportProgress.stage === 'error' && (
+              {geminiImportProgress.stage === "error" && (
                 <div className="gemini-import-progress__actions">
                   <button
                     type="button"
@@ -1804,13 +1871,15 @@ export default function PostEditor({
         {editor && (
           <EditorFloatingMenu
             editor={editor}
-            onInsertTable={() => editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()}
+            onInsertTable={() =>
+              editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()
+            }
           />
         )}
         {editor && (
           <div className="tiptap-status-bar">
-            {editor.storage.characterCount.characters()} caracteres &middot; {editor.storage.characterCount.words()}{' '}
-            palavras
+            {editor.storage.characterCount.characters()} caracteres &middot;{" "}
+            {editor.storage.characterCount.words()} palavras
           </div>
         )}
       </div>

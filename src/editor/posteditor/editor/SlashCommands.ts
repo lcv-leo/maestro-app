@@ -4,14 +4,14 @@
  * Uses vanilla-DOM popup (same pattern as Mention) — no extra deps.
  */
 
-import type { Editor } from '@tiptap/core';
-import { Extension } from '@tiptap/core';
+import type { Editor } from "@tiptap/core";
+import { Extension } from "@tiptap/core";
 
 export const TIPTAP_SLASH_EVENTS = {
-  figure: 'tiptap:slash-figure',
-  upload: 'tiptap:slash-upload',
-  youtube: 'tiptap:slash-youtube',
-  ai: 'tiptap:slash-ai',
+  figure: "tiptap:slash-figure",
+  upload: "tiptap:slash-upload",
+  youtube: "tiptap:slash-youtube",
+  ai: "tiptap:slash-ai",
 } as const;
 
 interface SlashCommand {
@@ -31,109 +31,113 @@ interface SlashStorage {
 
 const createSlashCommands = (ownerDoc: Document): SlashCommand[] => [
   {
-    label: 'Parágrafo',
-    description: 'Texto simples',
-    icon: '¶',
-    keywords: ['parágrafo', 'texto', 'p', 'paragraph', 'text'],
+    label: "Parágrafo",
+    description: "Texto simples",
+    icon: "¶",
+    keywords: ["parágrafo", "texto", "p", "paragraph", "text"],
     command: (e) => e.chain().focus().setParagraph().run(),
   },
   {
-    label: 'Título 1',
-    description: 'Cabeçalho grande',
-    icon: 'H1',
-    keywords: ['h1', 'título', 'title', 'heading 1', 'cabeçalho'],
+    label: "Título 1",
+    description: "Cabeçalho grande",
+    icon: "H1",
+    keywords: ["h1", "título", "title", "heading 1", "cabeçalho"],
     command: (e) => e.chain().focus().toggleHeading({ level: 1 }).run(),
   },
   {
-    label: 'Título 2',
-    description: 'Cabeçalho médio',
-    icon: 'H2',
-    keywords: ['h2', 'título', 'heading 2', 'cabeçalho'],
+    label: "Título 2",
+    description: "Cabeçalho médio",
+    icon: "H2",
+    keywords: ["h2", "título", "heading 2", "cabeçalho"],
     command: (e) => e.chain().focus().toggleHeading({ level: 2 }).run(),
   },
   {
-    label: 'Título 3',
-    description: 'Cabeçalho pequeno',
-    icon: 'H3',
-    keywords: ['h3', 'título', 'heading 3', 'cabeçalho'],
+    label: "Título 3",
+    description: "Cabeçalho pequeno",
+    icon: "H3",
+    keywords: ["h3", "título", "heading 3", "cabeçalho"],
     command: (e) => e.chain().focus().toggleHeading({ level: 3 }).run(),
   },
   {
-    label: 'Lista com marcadores',
-    description: 'Lista não ordenada',
-    icon: '•',
-    keywords: ['lista', 'bullet', 'ul', 'marcadores'],
+    label: "Lista com marcadores",
+    description: "Lista não ordenada",
+    icon: "•",
+    keywords: ["lista", "bullet", "ul", "marcadores"],
     command: (e) => e.chain().focus().toggleBulletList().run(),
   },
   {
-    label: 'Lista numerada',
-    description: 'Lista ordenada',
-    icon: '1.',
-    keywords: ['numerada', 'ordered', 'ol', 'numeração'],
+    label: "Lista numerada",
+    description: "Lista ordenada",
+    icon: "1.",
+    keywords: ["numerada", "ordered", "ol", "numeração"],
     command: (e) => e.chain().focus().toggleOrderedList().run(),
   },
   {
-    label: 'Lista de tarefas',
-    description: 'Checklist interativo',
-    icon: '☑',
-    keywords: ['tarefas', 'checklist', 'todo', 'task'],
+    label: "Lista de tarefas",
+    description: "Checklist interativo",
+    icon: "☑",
+    keywords: ["tarefas", "checklist", "todo", "task"],
     command: (e) => e.chain().focus().toggleTaskList().run(),
   },
   {
-    label: 'Citação',
-    description: 'Bloco de citação',
+    label: "Citação",
+    description: "Bloco de citação",
     icon: '"',
-    keywords: ['citação', 'blockquote', 'quote', 'aspas'],
+    keywords: ["citação", "blockquote", "quote", "aspas"],
     command: (e) => e.chain().focus().toggleBlockquote().run(),
   },
   {
-    label: 'Bloco de código',
-    description: 'Código com syntax highlight',
-    icon: '</>',
-    keywords: ['código', 'code', 'pre', 'programação'],
+    label: "Bloco de código",
+    description: "Código com syntax highlight",
+    icon: "</>",
+    keywords: ["código", "code", "pre", "programação"],
     command: (e) => e.chain().focus().toggleCodeBlock().run(),
   },
   {
-    label: 'Linha horizontal',
-    description: 'Separador de seções',
-    icon: '—',
-    keywords: ['linha', 'hr', 'separador', 'divider', 'horizontal'],
+    label: "Linha horizontal",
+    description: "Separador de seções",
+    icon: "—",
+    keywords: ["linha", "hr", "separador", "divider", "horizontal"],
     command: (e) => e.chain().focus().setHorizontalRule().run(),
   },
   {
-    label: 'Tabela',
-    description: 'Tabela 3×3',
-    icon: '⊞',
-    keywords: ['tabela', 'table', 'grid'],
+    label: "Tabela",
+    description: "Tabela 3×3",
+    icon: "⊞",
+    keywords: ["tabela", "table", "grid"],
     command: (e) => e.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run(),
   },
   {
-    label: 'Imagem com legenda',
-    description: 'Figura semântica com figcaption',
-    icon: '🖼',
-    keywords: ['imagem', 'figura', 'legenda', 'image', 'figure', 'figcaption'],
-    command: () => ownerDoc.dispatchEvent(new CustomEvent(TIPTAP_SLASH_EVENTS.figure, { bubbles: true })),
+    label: "Imagem com legenda",
+    description: "Figura semântica com figcaption",
+    icon: "🖼",
+    keywords: ["imagem", "figura", "legenda", "image", "figure", "figcaption"],
+    command: () =>
+      ownerDoc.dispatchEvent(new CustomEvent(TIPTAP_SLASH_EVENTS.figure, { bubbles: true })),
   },
   {
-    label: 'Upload de imagem',
-    description: 'Enviar imagem do computador',
-    icon: '⤴',
-    keywords: ['upload', 'arquivo', 'imagem', 'file', 'enviar'],
-    command: () => ownerDoc.dispatchEvent(new CustomEvent(TIPTAP_SLASH_EVENTS.upload, { bubbles: true })),
+    label: "Upload de imagem",
+    description: "Enviar imagem do computador",
+    icon: "⤴",
+    keywords: ["upload", "arquivo", "imagem", "file", "enviar"],
+    command: () =>
+      ownerDoc.dispatchEvent(new CustomEvent(TIPTAP_SLASH_EVENTS.upload, { bubbles: true })),
   },
   {
-    label: 'Vídeo do YouTube',
-    description: 'Inserir vídeo com proporção 16:9',
-    icon: 'YT',
-    keywords: ['youtube', 'video', 'vídeo', 'yt'],
-    command: () => ownerDoc.dispatchEvent(new CustomEvent(TIPTAP_SLASH_EVENTS.youtube, { bubbles: true })),
+    label: "Vídeo do YouTube",
+    description: "Inserir vídeo com proporção 16:9",
+    icon: "YT",
+    keywords: ["youtube", "video", "vídeo", "yt"],
+    command: () =>
+      ownerDoc.dispatchEvent(new CustomEvent(TIPTAP_SLASH_EVENTS.youtube, { bubbles: true })),
   },
   {
-    label: 'IA: Instrução Livre',
-    description: 'Abrir comando livre do Gemini',
-    icon: '✦',
-    keywords: ['ia', 'gemini', 'assistente', 'ai'],
-    command: () => ownerDoc.dispatchEvent(new CustomEvent(TIPTAP_SLASH_EVENTS.ai, { bubbles: true })),
+    label: "IA: Instrução Livre",
+    description: "Abrir comando livre do Gemini",
+    icon: "✦",
+    keywords: ["ia", "gemini", "assistente", "ai"],
+    command: () =>
+      ownerDoc.dispatchEvent(new CustomEvent(TIPTAP_SLASH_EVENTS.ai, { bubbles: true })),
   },
 ];
 
@@ -164,15 +168,15 @@ function createSlashPopup(editor: Editor, query: string, triggerPos: number): ((
 
   if (filtered.length === 0) return null;
 
-  const menu = ownerDoc.createElement('div');
-  menu.className = 'slash-commands-menu';
-  menu.setAttribute('role', 'listbox');
-  menu.setAttribute('aria-label', 'Comandos');
+  const menu = ownerDoc.createElement("div");
+  menu.className = "slash-commands-menu";
+  menu.setAttribute("role", "listbox");
+  menu.setAttribute("aria-label", "Comandos");
   Object.assign(menu.style, {
-    position: 'fixed',
-    zIndex: '999999',
-    maxHeight: '320px',
-    overflowY: 'auto',
+    position: "fixed",
+    zIndex: "999999",
+    maxHeight: "320px",
+    overflowY: "auto",
   });
 
   const menuW = 320;
@@ -189,12 +193,12 @@ function createSlashPopup(editor: Editor, query: string, triggerPos: number): ((
   let selectedIndex = 0;
 
   const renderItems = () => {
-    menu.innerHTML = '';
+    menu.innerHTML = "";
     filtered.forEach((cmd, i) => {
-      const item = ownerDoc.createElement('div');
-      item.className = `slash-commands-item${i === selectedIndex ? ' is-selected' : ''}`;
-      item.setAttribute('role', 'option');
-      item.setAttribute('aria-selected', String(i === selectedIndex));
+      const item = ownerDoc.createElement("div");
+      item.className = `slash-commands-item${i === selectedIndex ? " is-selected" : ""}`;
+      item.setAttribute("role", "option");
+      item.setAttribute("aria-selected", String(i === selectedIndex));
       item.innerHTML = `
         <span class="slash-cmd-icon">${cmd.icon}</span>
         <span class="slash-cmd-text">
@@ -202,15 +206,15 @@ function createSlashPopup(editor: Editor, query: string, triggerPos: number): ((
           <span class="slash-cmd-desc">${cmd.description}</span>
         </span>
       `;
-      item.addEventListener('mousedown', (e) => {
+      item.addEventListener("mousedown", (e) => {
         e.preventDefault();
         selectCommand(i);
       });
       menu.appendChild(item);
     });
     // Scroll selected into view
-    const selectedEl = menu.querySelector('.is-selected') as HTMLElement | null;
-    selectedEl?.scrollIntoView({ block: 'nearest' });
+    const selectedEl = menu.querySelector(".is-selected") as HTMLElement | null;
+    selectedEl?.scrollIntoView({ block: "nearest" });
   };
 
   const selectCommand = (index: number) => {
@@ -222,21 +226,21 @@ function createSlashPopup(editor: Editor, query: string, triggerPos: number): ((
   };
 
   const keyHandler = (e: KeyboardEvent) => {
-    if (e.key === 'ArrowDown') {
+    if (e.key === "ArrowDown") {
       e.preventDefault();
       e.stopPropagation();
       selectedIndex = (selectedIndex + 1) % filtered.length;
       renderItems();
-    } else if (e.key === 'ArrowUp') {
+    } else if (e.key === "ArrowUp") {
       e.preventDefault();
       e.stopPropagation();
       selectedIndex = (selectedIndex - 1 + filtered.length) % filtered.length;
       renderItems();
-    } else if (e.key === 'Enter') {
+    } else if (e.key === "Enter") {
       e.preventDefault();
       e.stopPropagation();
       selectCommand(selectedIndex);
-    } else if (e.key === 'Escape') {
+    } else if (e.key === "Escape") {
       e.preventDefault();
       cleanup();
     }
@@ -244,12 +248,12 @@ function createSlashPopup(editor: Editor, query: string, triggerPos: number): ((
 
   const cleanup = () => {
     menu.remove();
-    ownerDoc.removeEventListener('keydown', keyHandler, true);
+    ownerDoc.removeEventListener("keydown", keyHandler, true);
   };
 
   renderItems();
   ownerDoc.body.appendChild(menu);
-  ownerDoc.addEventListener('keydown', keyHandler, true);
+  ownerDoc.addEventListener("keydown", keyHandler, true);
 
   return cleanup;
 }
@@ -259,7 +263,7 @@ function createSlashPopup(editor: Editor, query: string, triggerPos: number): ((
  * Intercepts '/' on an empty text block and shows the command popup.
  */
 export const SlashCommands = Extension.create({
-  name: 'slashCommands',
+  name: "slashCommands",
 
   addStorage() {
     return {
@@ -283,7 +287,7 @@ export const SlashCommands = Extension.create({
       }
       const $from = this.editor.state.selection.$from;
       const textBefore = $from.parent.textContent.slice(0, $from.parentOffset);
-      if (!textBefore.startsWith('/')) {
+      if (!textBefore.startsWith("/")) {
         storage.cleanup?.();
         storage.cleanup = null;
         storage.isActive = false;
@@ -294,15 +298,15 @@ export const SlashCommands = Extension.create({
       storage.cleanup = createSlashPopup(this.editor, query, storage.triggerPos);
     };
 
-    this.editor.on('selectionUpdate', storage.handleSelectionUpdate);
-    this.editor.on('update', storage.handleSelectionUpdate);
+    this.editor.on("selectionUpdate", storage.handleSelectionUpdate);
+    this.editor.on("update", storage.handleSelectionUpdate);
   },
 
   onDestroy() {
     const storage = this.storage as SlashStorage;
     if (storage.handleSelectionUpdate) {
-      this.editor.off('selectionUpdate', storage.handleSelectionUpdate);
-      this.editor.off('update', storage.handleSelectionUpdate);
+      this.editor.off("selectionUpdate", storage.handleSelectionUpdate);
+      this.editor.off("update", storage.handleSelectionUpdate);
     }
     storage.cleanup?.();
     storage.cleanup = null;
@@ -314,17 +318,17 @@ export const SlashCommands = Extension.create({
     const storage = this.storage as SlashStorage;
 
     return {
-      '/': () => {
+      "/": () => {
         const { empty, $from } = this.editor.state.selection;
         if (!empty) return false;
-        const isEmptyBlock = $from.parent.textContent === '' && $from.parent.type.isTextblock;
+        const isEmptyBlock = $from.parent.textContent === "" && $from.parent.type.isTextblock;
         if (!isEmptyBlock) return false;
         storage.isActive = true;
         storage.triggerPos = this.editor.state.selection.from;
         // Let the character be inserted first, then show popup
         setTimeout(() => {
           storage.cleanup?.();
-          storage.cleanup = createSlashPopup(this.editor, '', storage.triggerPos);
+          storage.cleanup = createSlashPopup(this.editor, "", storage.triggerPos);
         }, 0);
         return false; // don't prevent default — let '/' be typed
       },

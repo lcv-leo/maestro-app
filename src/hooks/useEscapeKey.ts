@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-import { useEffect } from 'react';
+import { useEffect } from "react";
 
 /**
  * v0.3.14 / maestro-app audit closure (MEDIUM): centralized ESC-key handler
@@ -27,11 +27,11 @@ export function useEscapeKey(onEscape: () => void, enabled: boolean): void {
   useEffect(() => {
     if (!enabled) return;
     const handler = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape' || event.key === 'Esc') {
+      if (event.key === "Escape" || event.key === "Esc") {
         onEscape();
       }
     };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
   }, [onEscape, enabled]);
 }

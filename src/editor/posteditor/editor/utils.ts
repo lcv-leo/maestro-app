@@ -1,7 +1,8 @@
-export const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
+export const clamp = (value: number, min: number, max: number): number =>
+  Math.max(min, Math.min(max, value));
 
 export const formatImageUrl = (url: string): string => {
-  if (!url) return '';
+  if (!url) return "";
   const driveRegex = /(?:file\/d\/|open\?id=|uc\?id=)([a-zA-Z0-9_-]+)/;
   const match = url.match(driveRegex);
   if (match?.[1]) return `https://drive.google.com/uc?export=view&id=${match[1]}`;
@@ -16,13 +17,13 @@ export function migrateLegacyCaptions(html: string): string {
   const normalizeCaption = (caption: string) => {
     // Loop até estabilizar para resistir a padrões aninhados (`<a<b>>`) onde
     // um único pass deixaria caracteres residuais.
-    let prev = '';
+    let prev = "";
     let out = caption;
     while (prev !== out) {
       prev = out;
-      out = out.replace(/<[^>]+>/g, '');
+      out = out.replace(/<[^>]+>/g, "");
     }
-    return out.replace(/\s+/g, ' ').trim();
+    return out.replace(/\s+/g, " ").trim();
   };
 
   const wrappedImagePattern =

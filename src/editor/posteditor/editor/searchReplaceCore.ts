@@ -1,7 +1,7 @@
-import { Extension } from '@tiptap/core';
-import type { Node as ProseMirrorNode } from 'prosemirror-model';
-import { Plugin, PluginKey } from 'prosemirror-state';
-import { Decoration, DecorationSet } from 'prosemirror-view';
+import { Extension } from "@tiptap/core";
+import type { Node as ProseMirrorNode } from "prosemirror-model";
+import { Plugin, PluginKey } from "prosemirror-state";
+import { Decoration, DecorationSet } from "prosemirror-view";
 
 interface DecorationPluginState {
   decorations: DecorationSet;
@@ -14,9 +14,9 @@ interface SearchState {
   currentIndex: number;
 }
 
-export const searchHighlightKey = new PluginKey<DecorationPluginState>('searchHighlight');
+export const searchHighlightKey = new PluginKey<DecorationPluginState>("searchHighlight");
 
-let globalSearchState: SearchState = { term: '', currentIndex: 0 };
+let globalSearchState: SearchState = { term: "", currentIndex: 0 };
 
 export function setGlobalSearchState(next: SearchState): void {
   globalSearchState = next;
@@ -25,11 +25,11 @@ export function setGlobalSearchState(next: SearchState): void {
 export function findAllMatches(doc: ProseMirrorNode, term: string): { from: number; to: number }[] {
   if (!term) return [];
   const results: { from: number; to: number }[] = [];
-  const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const regex = new RegExp(escaped, 'gi');
+  const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(escaped, "gi");
   doc.descendants((node, pos) => {
     if (!node.isText) return;
-    const text = node.text || '';
+    const text = node.text || "";
     for (const m of text.matchAll(regex)) {
       if (m.index === undefined) continue;
       results.push({ from: pos + m.index, to: pos + m.index + m[0].length });
@@ -43,12 +43,13 @@ const SearchHighlightPlugin = new Plugin({
   state: {
     init(_config, state) {
       if (!globalSearchState.term) {
-        return { decorations: DecorationSet.empty, term: '', currentIndex: 0 };
+        return { decorations: DecorationSet.empty, term: "", currentIndex: 0 };
       }
       const matches = findAllMatches(state.doc, globalSearchState.term);
       const decos = matches.map((m, i) =>
         Decoration.inline(m.from, m.to, {
-          class: i === globalSearchState.currentIndex ? 'search-current-highlight' : 'search-highlight',
+          class:
+            i === globalSearchState.currentIndex ? "search-current-highlight" : "search-highlight",
         }),
       );
       return {
@@ -59,7 +60,7 @@ const SearchHighlightPlugin = new Plugin({
     },
     apply(tr, oldPluginState: DecorationPluginState, _oldState, newState) {
       if (!globalSearchState.term) {
-        return { decorations: DecorationSet.empty, term: '', currentIndex: 0 };
+        return { decorations: DecorationSet.empty, term: "", currentIndex: 0 };
       }
 
       if (
@@ -73,7 +74,8 @@ const SearchHighlightPlugin = new Plugin({
       const matches = findAllMatches(newState.doc, globalSearchState.term);
       const decos = matches.map((m, i) =>
         Decoration.inline(m.from, m.to, {
-          class: i === globalSearchState.currentIndex ? 'search-current-highlight' : 'search-highlight',
+          class:
+            i === globalSearchState.currentIndex ? "search-current-highlight" : "search-highlight",
         }),
       );
       return {
@@ -92,7 +94,7 @@ const SearchHighlightPlugin = new Plugin({
 });
 
 export const SearchReplaceExtension = Extension.create({
-  name: 'searchReplace',
+  name: "searchReplace",
 
   addProseMirrorPlugins() {
     return [SearchHighlightPlugin];
@@ -108,16 +110,16 @@ export const SearchReplaceExtension = Extension.create({
     };
 
     return {
-      'Mod-f': () => {
+      "Mod-f": () => {
         const ownerDoc = resolveOwnerDoc();
         if (!ownerDoc) return false;
-        ownerDoc.dispatchEvent(new CustomEvent('tiptap:search-toggle', { bubbles: true }));
+        ownerDoc.dispatchEvent(new CustomEvent("tiptap:search-toggle", { bubbles: true }));
         return true;
       },
-      'Mod-h': () => {
+      "Mod-h": () => {
         const ownerDoc = resolveOwnerDoc();
         if (!ownerDoc) return false;
-        ownerDoc.dispatchEvent(new CustomEvent('tiptap:search-toggle', { bubbles: true }));
+        ownerDoc.dispatchEvent(new CustomEvent("tiptap:search-toggle", { bubbles: true }));
         return true;
       },
     };
